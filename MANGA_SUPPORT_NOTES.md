@@ -20,9 +20,9 @@
 ## Verification performed
 - Python syntax compilation for generator and GUI.
 - JavaScript syntax check with Node.js.
-- Eight offline unit tests covering XML structure, title escaping, canonical status mapping,
-  unresolved-ID exclusion, manga query selection, duplicate IDs, and a mocked GUI
-  manga-process endpoint that writes XML and gzip.
+- Offline unit tests covering XML structure, title escaping, canonical status mapping,
+  unresolved-ID exclusion, manga query selection, importable-candidate selection,
+  duplicate IDs, and a mocked GUI manga-process endpoint that writes XML and gzip.
 - Python bytecode compilation, JavaScript syntax validation with Node.js, and CLI `--help` smoke test.
 - GUI endpoint smoke test uses a mocked resolver; it does not make live AniList
   requests.
@@ -32,9 +32,10 @@
   environment. The generated file is structurally tested against an informal
   public description of the MAL XML format, but an actual AniList import should
   still be tested with a small sample first.
-- Title resolution still accepts AniList's top search result; ambiguous title
-  disambiguation and a candidate-picker UI are not implemented. The table shows the
-  resolved title, format, and IDs, but not release year. Exclude uncertain matches
-  manually; a correct match cannot currently be selected from alternate candidates.
+- Title resolution prefers candidates that carry a MAL ID (and full series over
+  one-shots), but ranking otherwise follows AniList's search order and no release
+  year is shown. Rows with two or more importable candidates get an in-table match
+  picker; matches without a MAL ID cannot be offered or imported. Review uncertain
+  matches manually.
 - This change modifies the local ZIP copy only; it has not been pushed to the
   upstream AniExport repository.
