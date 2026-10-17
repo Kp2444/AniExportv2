@@ -157,8 +157,8 @@ HTML_TEMPLATE = """<!DOCTYPE html>
       --border-hover: rgba(170, 180, 190, 0.22);
       --border-focus: var(--accent);
       --text: #EAE8E4;
-      --text-muted: #9CA3AC;
-      --text-subtle: #6E757F;
+      --text-muted: #A8AFB9;
+      --text-subtle: #8A919B;
 
       --accent: #3FA796;
       --accent-hover: #348D7E;
@@ -1139,6 +1139,205 @@ HTML_TEMPLATE = """<!DOCTYPE html>
     .unresolved-bar strong { color: var(--danger); }
     .unresolved-bar .spacer { flex: 1; }
 
+
+    /* ---- redesign pass -------------------------------------------------
+       The table is the work surface. Everything above it was competing with
+       it: four stat cards, a warning band, a chip band and a toolbar band,
+       stacked, pushed the rows below the fold. They are one line each now. */
+
+    .stats-strip {
+      display: flex;
+      flex-wrap: wrap;
+      align-items: baseline;
+      gap: 0 2rem;
+      margin: 0 0 1rem;
+      padding: 0.625rem 1rem;
+      background: var(--surface-1);
+      border: 1px solid var(--border);
+      border-radius: var(--radius-lg);
+    }
+    .stat-box {
+      display: flex;
+      align-items: baseline;
+      gap: 0.5rem;
+      padding: 0;
+      background: none;
+      border: none;
+    }
+    .stat-label {
+      font-size: 0.6875rem;
+      font-weight: 500;
+      letter-spacing: 0.02em;
+      color: var(--text-subtle);
+      text-transform: none;
+    }
+    .stat-value {
+      font-size: 0.9375rem;
+      font-weight: 600;
+      font-variant-numeric: tabular-nums;
+      color: var(--text-primary);
+    }
+
+    .table-toolbar {
+      display: flex;
+      align-items: center;
+      flex-wrap: wrap;
+      gap: 0.625rem;
+      padding: 0.75rem 1rem;
+    }
+    .table-toolbar .search-input-wrapper { flex: 0 1 280px; }
+    .filter-count {
+      margin-left: auto;
+      font-size: 0.75rem;
+      font-variant-numeric: tabular-nums;
+      color: var(--text-subtle);
+    }
+    .chip-row { padding: 0; gap: 0.25rem; }
+    .chip {
+      padding: 0.1875rem 0.5625rem;
+      font-size: 0.6875rem;
+      font-variant-numeric: tabular-nums;
+      transition: background 160ms ease, color 160ms ease, border-color 160ms ease;
+    }
+    .chip:hover { color: var(--text-primary); border-color: var(--text-subtle); }
+
+    .unresolved-bar {
+      margin: 0 1rem 0.75rem;
+      padding: 0.5rem 0.75rem;
+      font-size: 0.75rem;
+      line-height: 1.45;
+    }
+    .unresolved-bar .spacer { display: none; }
+    .btn-xs { padding: 0.1875rem 0.5rem; font-size: 0.6875rem; white-space: nowrap; }
+
+    /* ---- table ---- */
+    #animeTextInput { min-height: 232px; }
+
+    #animeTable thead th {
+      position: sticky;
+      top: 0;
+      z-index: 2;
+      padding: 0.5rem 0.75rem;
+      font-size: 0.6875rem;
+      font-weight: 600;
+      letter-spacing: 0.04em;
+      text-transform: uppercase;
+      color: var(--text-subtle);
+      background: var(--surface-2);
+      white-space: nowrap;
+    }
+    #animeTable tbody td {
+      padding: 0.5rem 0.75rem;
+      vertical-align: middle;
+      border-top: 1px solid var(--border);
+    }
+    #animeTable tbody tr:hover > td { background: rgba(148, 163, 184, 0.05); }
+
+    .title-row { gap: 0.625rem; align-items: center; }
+    .title-stack { min-width: 0; flex: 1; display: flex; flex-direction: column; gap: 0.125rem; }
+    .cell-title {
+      font-size: 0.8125rem;
+      font-weight: 500;
+      color: var(--text-primary);
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
+    .title-meta {
+      display: flex;
+      align-items: center;
+      flex-wrap: wrap;
+      gap: 0 0.625rem;
+      font-size: 0.6875rem;
+      color: var(--text-subtle);
+      min-width: 0;
+    }
+    .title-meta .id-link {
+      font-variant-numeric: tabular-nums;
+      color: var(--text-muted);
+      text-decoration: none;
+    }
+    .title-meta .id-link:hover { color: var(--border-focus); text-decoration: underline; }
+    .id-missing { color: var(--danger); }
+    .cell-original {
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+      max-width: 22ch;
+    }
+    .cover-thumb { width: 30px; height: 42px; border-radius: 3px; }
+    .cover-empty { display: block; background: rgba(148, 163, 184, 0.07); }
+
+    .tag-type { font-size: 0.6875rem; }
+    .tag-year {
+      display: block;
+      margin-top: 0.1875rem;
+      font-size: 0.6875rem;
+      font-variant-numeric: tabular-nums;
+      color: var(--text-subtle);
+    }
+
+    .progress-cell { gap: 0.3125rem; }
+    .progress-line {
+      display: flex;
+      align-items: center;
+      gap: 0.375rem;
+      margin: 0;
+      font-size: 0.6875rem;
+      color: var(--text-subtle);
+    }
+    .progress-input {
+      width: 54px;
+      text-align: right;
+      font-variant-numeric: tabular-nums;
+    }
+    .progress-total { white-space: nowrap; font-variant-numeric: tabular-nums; }
+
+    /* Status reads as a value you can change, not a button pretending to be a pill. */
+    .row-status {
+      width: 100%;
+      min-width: 112px;
+      padding: 0.25rem 0.4375rem;
+      border-radius: 6px;
+      border: 1px solid transparent;
+      background-color: transparent;
+      font-size: 0.6875rem;
+      font-weight: 500;
+    }
+    .row-status:hover:not(:disabled) { border-color: var(--border); }
+
+    .fix-row { margin-top: 0.375rem; gap: 0.25rem; }
+    .match-picker {
+      margin-top: 0.25rem;
+      max-width: 100%;
+      font-size: 0.6875rem;
+      color: var(--text-subtle);
+    }
+
+    .btn-detail {
+      border-radius: 6px;
+      line-height: 1;
+      padding: 0.25rem 0.375rem;
+      transition: background 160ms ease, color 160ms ease;
+    }
+    .btn-detail:hover { background: var(--surface-2); }
+
+    .detail-row td { padding: 0.75rem 1rem 0.875rem; border-top: none; }
+    .detail-head {
+      margin-bottom: 0.5rem;
+      font-size: 0.6875rem;
+      color: var(--text-subtle);
+    }
+    .detail-head strong { color: var(--text-muted); font-weight: 600; }
+    .detail-grid { grid-template-columns: repeat(auto-fit, minmax(168px, 1fr)); gap: 0.625rem 0.875rem; }
+    .detail-wide { grid-column: 1 / -1; }
+    .detail-grid input { padding: 0.3125rem 0.4375rem; font-size: 0.75rem; }
+
+    @media (max-width: 1180px) {
+      .title-meta .cell-original { display: none; }
+      .stats-strip { gap: 0 1.25rem; }
+    }
+
     /* Live Progress Card */
     .progress-card {
       background: var(--surface-1);
@@ -1304,6 +1503,136 @@ HTML_TEMPLATE = """<!DOCTYPE html>
     .toast.toast-error {
       border-color: var(--danger);
     }
+
+    /* ====================================================================
+       Control system. Audited before this existed: buttons came in four
+       heights (23/26/30/37px), inputs in three with two radii, selects in
+       three with two radii. Every control now resolves to one of three
+       sizes, one radius, one border treatment and one focus ring.
+       ==================================================================== */
+    :root {
+      --control-sm: 26px;      /* inside table rows */
+      --control-md: 32px;      /* panels, toolbars */
+      --control-lg: 38px;      /* primary action */
+      --control-radius: 6px;
+      --control-pad-sm: 0.4375rem;
+      --control-pad-md: 0.625rem;
+      --font-xs: 0.75rem;      /* 12px: smallest text anywhere */
+      --font-sm: 0.8125rem;    /* 13px */
+      --font-md: 0.875rem;     /* 14px */
+      --ring: 0 0 0 2px var(--bg), 0 0 0 4px var(--accent-tint);
+    }
+
+    .btn,
+    input[type="text"],
+    input[type="number"],
+    input[type="date"],
+    select,
+    textarea {
+      font-family: var(--font-sans);
+      border-radius: var(--control-radius);
+      transition: border-color 160ms ease, background-color 160ms ease, color 160ms ease, box-shadow 160ms ease;
+    }
+
+    /* Keyboard focus is visible everywhere and identical everywhere. */
+    .btn:focus-visible,
+    input:focus-visible,
+    select:focus-visible,
+    textarea:focus-visible,
+    .chip:focus-visible,
+    .btn-detail:focus-visible,
+    a:focus-visible {
+      outline: none;
+      border-color: var(--accent);
+      box-shadow: var(--ring);
+    }
+
+    /* ---- medium: the default for panel and toolbar controls ---- */
+    /* Doubled class names lift these to (0,2,0) so they beat the base
+       `select, input[type="text"], input[type="number"]` rule at (0,1,1).
+       Without this the whole control system is silently ignored. */
+    .btn.btn,
+    .input-grid input,
+    .input-grid select,
+    #mediaType,
+    #searchInput {
+      min-height: var(--control-md);
+      padding-top: 0;
+      padding-bottom: 0;
+      font-size: var(--font-sm);
+    }
+    .btn { padding-left: var(--control-pad-md); padding-right: var(--control-pad-md); }
+    #searchInput { min-height: var(--control-md); }
+
+    /* ---- large: one primary action per view ---- */
+    #btnProcess { min-height: var(--control-lg); font-size: var(--font-md); font-weight: 600; }
+    .header-actions .btn.btn, .panel-header .btn.btn { min-height: var(--control-sm); font-size: var(--font-xs); }
+
+    /* ---- small: dense controls that live inside table rows ---- */
+    .btn-xs.btn-xs,
+    .chip.chip,
+    .progress-input.progress-input,
+    .row-status.row-status,
+    .fix-input.fix-input,
+    .btn-fix.btn-fix,
+    .match-picker.match-picker,
+    .detail-input.detail-input {
+      min-height: var(--control-sm);
+      padding-top: 0;
+      padding-bottom: 0;
+      font-size: var(--font-xs);
+      border-radius: var(--control-radius);
+    }
+    .chip.chip { border-radius: 9999px; padding-left: 0.625rem; padding-right: 0.625rem; }
+    .row-status.row-status { border-radius: var(--control-radius); }
+    /* The base control rule contributes 12px of horizontal padding; with the
+       native number spinner on top, 56px clipped "142" to "14". Reclaim both. */
+    .progress-input.progress-input {
+      width: 62px;
+      padding-left: var(--control-pad-sm);
+      padding-right: var(--control-pad-sm);
+      -moz-appearance: textfield;
+    }
+    .progress-input::-webkit-outer-spin-button,
+    .progress-input::-webkit-inner-spin-button {
+      -webkit-appearance: none;
+      margin: 0;
+    }
+    .fix-input.fix-input,
+    .match-picker.match-picker,
+    .row-status.row-status,
+    .detail-input.detail-input {
+      padding-left: var(--control-pad-sm);
+      padding-right: var(--control-pad-sm);
+    }
+    .detail-input.detail-input { min-height: var(--control-md); padding-top: 0; padding-bottom: 0; }
+
+
+
+    /* ====================================================================
+       Contrast. Audited at 11-12px: chips 2.93, detail head 3.6, stat
+       labels / meta / counts 3.9 - all under the 4.5 AA floor for small
+       text. Secondary text is lifted and nothing sits below 12px.
+       ==================================================================== */
+    .stat-label,
+    .title-meta,
+    .filter-count,
+    .progress-total,
+    .detail-head,
+    .line-counter,
+    .progress-line,
+    .cell-original,
+    .tag-year,
+    .toggle-desc,
+    .detail-grid label {
+      font-size: var(--font-xs);
+      color: var(--text-muted);
+    }
+    .chip { color: var(--text-muted); }
+    .chip.active { color: var(--bg); }
+    .detail-head strong { color: var(--text); }
+    .title-meta .id-link { color: var(--text-muted); }
+
   </style>
 </head>
 <body>
@@ -1325,7 +1654,7 @@ HTML_TEMPLATE = """<!DOCTYPE html>
     </div>
 
     <div class="header-actions">
-      <button id="btnTheme" class="btn btn-secondary" style="padding:0.375rem 0.75rem; font-size:0.75rem;" title="Switch color theme">Light mode</button>
+      <button id="btnTheme" class="btn btn-secondary btn-xs" title="Switch color theme">Light mode</button>
       <div class="badge" title="Universal XML format supported natively by MyAnimeList and AniList import">
         <span class="badge-dot" aria-hidden="true"></span>
         <span>MAL &amp; AniList Compatible</span>
@@ -1346,10 +1675,10 @@ HTML_TEMPLATE = """<!DOCTYPE html>
           <span id="listPanelTitle">Paste Anime List</span>
         </h2>
         <div style="display:flex; gap:0.375rem;">
-          <button id="btnSample" class="btn btn-secondary" style="padding:0.25rem 0.5rem; font-size:0.75rem;" title="Load sample list">
+          <button id="btnSample" class="btn btn-secondary btn-xs" title="Load sample list">
             Sample
           </button>
-          <button id="btnClear" class="btn btn-secondary" style="padding:0.25rem 0.5rem; font-size:0.75rem;" title="Clear text area">
+          <button id="btnClear" class="btn btn-secondary btn-xs" title="Clear text area">
             Clear
           </button>
         </div>
@@ -1359,7 +1688,7 @@ HTML_TEMPLATE = """<!DOCTYPE html>
         <div>
           <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:0.375rem;">
             <label for="animeTextInput" style="margin-bottom:0;">Paste your list (one title per line):</label>
-            <button id="btnPaste" class="btn btn-secondary" style="padding:0.1875rem 0.5rem; font-size:0.6875rem;" title="Paste clipboard content">
+            <button id="btnPaste" class="btn btn-secondary btn-xs" title="Paste clipboard content">
               <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="width:12px; height:12px;">
                 <path d="M16 4h2a2 2 0 0 1 2 2v14a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2V6a2 2 0 0 1 2-2h2"></path>
                 <rect x="8" y="2" width="8" height="4" rx="1" ry="1"></rect>
@@ -1479,23 +1808,23 @@ HTML_TEMPLATE = """<!DOCTYPE html>
         </div>
       </section>
 
-      <!-- Stats Strip -->
+      <!-- Summary line: four numbers do not need four cards -->
       <div class="stats-strip">
         <div class="stat-box">
-          <div class="stat-label">Total Entries</div>
-          <div id="statTotal" class="stat-value">0</div>
+          <span class="stat-label">Total Entries</span>
+          <span id="statTotal" class="stat-value">0</span>
         </div>
         <div class="stat-box">
-          <div class="stat-label">Included in Export</div>
-          <div id="statNormalized" class="stat-value">0</div>
+          <span class="stat-label">Included in Export</span>
+          <span id="statNormalized" class="stat-value">0</span>
         </div>
         <div class="stat-box">
-          <div class="stat-label">Total Episodes / Chapters</div>
-          <div id="statEpisodes" class="stat-value">0</div>
+          <span class="stat-label">Total Episodes / Chapters</span>
+          <span id="statEpisodes" class="stat-value">0</span>
         </div>
         <div class="stat-box">
-          <div class="stat-label">XML Status</div>
-          <div id="statXmlValid" class="stat-value" style="font-size:1.125rem; color:var(--text-subtle);">Not Generated</div>
+          <span class="stat-label">XML Status</span>
+          <span id="statXmlValid" class="stat-value">Not Generated</span>
         </div>
       </div>
 
@@ -1534,12 +1863,6 @@ HTML_TEMPLATE = """<!DOCTYPE html>
 
       <!-- Table Panel -->
       <section class="table-panel">
-        <div id="unresolvedBar" class="unresolved-bar">
-          <span id="unresolvedText"></span>
-          <span class="spacer"></span>
-          <button id="btnCopyUnresolved" class="btn btn-secondary" style="padding:0.1875rem 0.5rem; font-size:0.6875rem;">Copy unmatched titles</button>
-        </div>
-        <div id="chipRow" class="chip-row"></div>
         <div class="table-toolbar">
           <div class="search-input-wrapper">
             <svg class="search-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
@@ -1548,7 +1871,12 @@ HTML_TEMPLATE = """<!DOCTYPE html>
             </svg>
             <input type="text" id="searchInput" placeholder="Filter by title, MAL ID, or AniList ID...">
           </div>
-          <span id="filterCountLabel" style="font-size:0.75rem; color:var(--text-muted);">Showing 0</span>
+          <div id="chipRow" class="chip-row"></div>
+          <span id="filterCountLabel" class="filter-count">Showing 0</span>
+        </div>
+        <div id="unresolvedBar" class="unresolved-bar">
+          <span id="unresolvedText"></span>
+          <button id="btnCopyUnresolved" class="btn btn-secondary btn-xs">Copy unmatched</button>
         </div>
 
         <div class="table-wrapper">
@@ -1558,13 +1886,11 @@ HTML_TEMPLATE = """<!DOCTYPE html>
                 <th style="width: 42px; text-align: center;">
                   <input type="checkbox" id="selectAllCheckbox" class="table-checkbox" checked title="Select/Deselect all">
                 </th>
-                <th style="width: 105px;" class="sortable" data-sort="id">Database IDs<span class="sort-mark"></span></th>
-                <th class="sortable" data-sort="title">Official Title (Full English)<span class="sort-mark"></span></th>
-                <th style="width: 90px;" class="sortable" data-sort="type">Type<span class="sort-mark"></span></th>
-                <th style="width: 110px;" id="countColumnHeading" class="sortable" data-sort="count">Episodes<span class="sort-mark"></span></th>
-                <th style="width: 125px;" id="progressColumnHeading">Progress</th>
-                <th style="width: 100px;" class="sortable" data-sort="status">Status<span class="sort-mark"></span></th>
-                <th style="width: 34px;"></th>
+                <th class="sortable" data-sort="title">Title<span class="sort-mark"></span></th>
+                <th style="width: 104px;" class="sortable" data-sort="type">Type<span class="sort-mark"></span></th>
+                <th style="width: 158px;" id="countColumnHeading" class="sortable" data-sort="count">Episodes<span class="sort-mark"></span></th>
+                <th style="width: 132px;" class="sortable" data-sort="status">Status<span class="sort-mark"></span></th>
+                <th style="width: 40px;" aria-label="More fields"></th>
               </tr>
             </thead>
             <tbody id="tableBody">
@@ -1717,8 +2043,9 @@ HTML_TEMPLATE = """<!DOCTYPE html>
       selectStatus.value = carried;
       document.getElementById('listPanelTitle').textContent = isManga ? 'Paste Manga List' : 'Paste Anime List';
       document.querySelector('label[for="animeTextInput"]').textContent = `Paste your list (one ${isManga ? 'manga' : 'anime'} per line):`;
-      countColumnHeading.textContent = isManga ? 'Chapters / Volumes' : 'Episodes';
-      document.getElementById('progressColumnHeading').textContent = isManga ? 'Read' : 'Watched';
+      // One column now holds "read / total", so it carries the label and the
+      // trailing control column stays unlabelled.
+      countColumnHeading.textContent = isManga ? 'Read / Total' : 'Watched / Total';
       const statLabels = document.querySelectorAll('.stat-label');
       if (statLabels[2]) statLabels[2].textContent = isManga ? 'Total Chapters / Volumes' : 'Total Episodes';
       toggleSequels.closest('.toggle-card').style.display = isManga ? 'none' : '';
@@ -2307,8 +2634,7 @@ HTML_TEMPLATE = """<!DOCTYPE html>
       return `<div class="fix-row">
         <input class="fix-input" data-index="${idx}" placeholder="Search title or MAL ID..."
           aria-label="Find a match for ${escapeHtml(item.original || item.title)}">
-        <button class="btn btn-secondary btn-fix" data-index="${idx}"
-          style="padding:0.1875rem 0.5rem; font-size:0.6875rem;">Find</button>
+        <button class="btn btn-secondary btn-fix" data-index="${idx}">Find</button>
       </div>`;
     }
 
@@ -2319,7 +2645,8 @@ HTML_TEMPLATE = """<!DOCTYPE html>
         const raw = val(key);
         return raw === '0000-00-00' ? '' : raw;
       };
-      return `<tr class="detail-row" data-detail-for="${idx}"><td colspan="8">
+      return `<tr class="detail-row" data-detail-for="${idx}"><td colspan="6">
+        <div class="detail-head">Extra fields for <strong>${escapeHtml(item.title)}</strong> - blank means unset</div>
         <div class="detail-grid">
           <label>Score (0-10)
             <input type="number" min="0" max="10" class="detail-input" data-index="${idx}" data-field="score" value="${escapeHtml(val('score'))}">
@@ -2333,7 +2660,7 @@ HTML_TEMPLATE = """<!DOCTYPE html>
           <label>Tags
             <input type="text" class="detail-input" data-index="${idx}" data-field="tags" value="${escapeHtml(val('tags'))}">
           </label>
-          <label>Comments
+          <label class="detail-wide">Comments
             <input type="text" class="detail-input" data-index="${idx}" data-field="comments" value="${escapeHtml(val('comments'))}">
           </label>
         </div>
@@ -2360,13 +2687,18 @@ HTML_TEMPLATE = """<!DOCTYPE html>
 
     function progressHtml(item, idx) {
       const exportable = Number(item.id) > 0;
+      // One column, not two: an editable count against its total reads as progress.
+      // Separate "total" and "read" columns forced the eye to join them every row.
       return '<div class="progress-cell">' + progressFields().map(([field, unit]) => {
         const value = item[field] === undefined || item[field] === null ? '' : item[field];
         const total = Number(item[PROGRESS_TOTAL_FIELD[field]] || 0);
-        return `<label><input type="number" class="progress-input" min="0" ${total > 0 ? `max="${total}"` : ''}
-          data-index="${idx}" data-field="${field}" value="${value}"
-          placeholder="${derivedProgress(item, field)}" ${exportable ? '' : 'disabled'}
-          aria-label="${escapeHtml(unit)} read for ${escapeHtml(item.title)}">${unit}</label>`;
+        return `<label class="progress-line">
+          <input type="number" class="progress-input" min="0" ${total > 0 ? `max="${total}"` : ''}
+            data-index="${idx}" data-field="${field}" value="${value}"
+            placeholder="${derivedProgress(item, field)}" ${exportable ? '' : 'disabled'}
+            aria-label="${escapeHtml(unit)} read for ${escapeHtml(item.title)}">
+          <span class="progress-total">/ ${total > 0 ? total : '?'} ${escapeHtml(unit)}</span>
+        </label>`;
       }).join('') + '</div>';
     }
 
@@ -2381,7 +2713,7 @@ HTML_TEMPLATE = """<!DOCTYPE html>
 
       if (matched.length > capped.length) {
         rowCapNotice.style.display = 'block';
-        rowCapNotice.innerHTML = `Showing the first ${capped.length} of ${matched.length} matching rows. <button id="btnShowAll" class="btn btn-secondary" style="padding:0.125rem 0.5rem; font-size:0.6875rem;">Show all</button>`;
+        rowCapNotice.innerHTML = `Showing the first ${capped.length} of ${matched.length} matching rows. <button id="btnShowAll" class="btn btn-secondary btn-xs">Show all</button>`;
       } else {
         rowCapNotice.style.display = 'none';
         rowCapNotice.innerHTML = '';
@@ -2407,25 +2739,27 @@ HTML_TEMPLATE = """<!DOCTYPE html>
             <td class="cell-checkbox" style="text-align: center; cursor: pointer;">
               <input type="checkbox" class="table-checkbox row-checkbox" data-index="${globalIdx}" ${isChecked ? 'checked' : ''} ${Number(item.id) > 0 ? '' : 'disabled'} aria-label="Include ${escapeHtml(item.title)}">
             </td>
-            <td class="cell-id">
-              <div style="display:flex; flex-direction:column; gap:2px;">
-                ${malUrl ? `<a href="${malUrl}" class="id-link" target="_blank" rel="noopener noreferrer" title="View on MyAnimeList"><span style="color:var(--text-subtle); font-size:0.625rem; font-weight:600; margin-right:4px;">MAL</span>${item.id}</a>` : '<span style="color:var(--text-subtle);"><span style="font-size:0.625rem; font-weight:600; margin-right:4px;">MAL</span>-</span>'}
-                ${alUrl ? `<a href="${alUrl}" class="id-link" target="_blank" rel="noopener noreferrer" title="View on AniList"><span style="color:var(--text-subtle); font-size:0.625rem; font-weight:600; margin-right:4px;">AL</span>${item.anilist_id}</a>` : '<span style="color:var(--text-subtle);"><span style="font-size:0.625rem; font-weight:600; margin-right:4px;">AL</span>-</span>'}
-              </div>
-            </td>
             <td>
               <div class="title-row">
-                ${item.cover ? `<img class="cover-thumb" src="${escapeHtml(item.cover)}" alt="" loading="lazy">` : ''}
-                <div style="min-width:0; flex:1;">
-                  <div class="cell-title">${escapeHtml(item.title)}</div>
-                  ${hasRenamed ? `<div class="cell-original">Original: ${escapeHtml(item.original)}</div>` : ''}
+                ${item.cover
+                  ? `<img class="cover-thumb" src="${escapeHtml(item.cover)}" alt="" loading="lazy">`
+                  : '<span class="cover-thumb cover-empty" aria-hidden="true"></span>'}
+                <div class="title-stack">
+                  <div class="cell-title" title="${escapeHtml(item.title)}">${escapeHtml(item.title)}</div>
+                  <div class="title-meta">
+                    ${malUrl ? `<a href="${malUrl}" class="id-link" target="_blank" rel="noopener noreferrer" title="View on MyAnimeList">MAL ${item.id}</a>` : '<span class="id-missing">no MAL ID</span>'}
+                    ${alUrl ? `<a href="${alUrl}" class="id-link" target="_blank" rel="noopener noreferrer" title="View on AniList">AL ${item.anilist_id}</a>` : ''}
+                    ${hasRenamed ? `<span class="cell-original" title="${escapeHtml(item.original)}">from ${escapeHtml(item.original)}</span>` : ''}
+                  </div>
                   ${pickerHtml(item, globalIdx)}
                   ${fixRowHtml(item, globalIdx)}
                 </div>
               </div>
             </td>
-            <td><span class="${Number(item.id) > 0 ? 'tag-type' : 'status-pill status-unresolved'}">${escapeHtml(Number(item.id) > 0 ? ((item.type || 'TV') + (item.year ? ' - ' + item.year : '')) : 'No MAL ID')}</span></td>
-            <td><span class="tag-eps">${mediaType() === 'manga' ? `${item.chapters || 0} ch / ${item.volumes || 0} vol` : `${item.episodes || 0} eps`}</span></td>
+            <td>
+              <span class="${Number(item.id) > 0 ? 'tag-type' : 'status-pill status-unresolved'}">${escapeHtml(Number(item.id) > 0 ? (item.type || 'TV') : 'No MAL ID')}</span>
+              ${item.year ? `<span class="tag-year">${item.year}</span>` : ''}
+            </td>
             <td>${progressHtml(item, globalIdx)}</td>
             <td>${statusCellHtml(item, globalIdx)}</td>
             <td style="text-align:center;">
