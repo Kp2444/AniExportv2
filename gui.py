@@ -45,37 +45,95 @@ HTML_TEMPLATE = """<!DOCTYPE html>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>AniExport &mdash; Universal XML Generator for MAL &amp; AniList</title>
+  <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24'%3E%3Crect width='24' height='24' rx='5' fill='%233FA796'/%3E%3Cpath d='M12 4 4 9l8 5 8-5-8-5zm-8 8 8 5 8-5' fill='none' stroke='white' stroke-width='2' stroke-linejoin='round'/%3E%3C/svg%3E">
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
   <link href="https://fonts.googleapis.com/css2?family=Figtree:wght@400;500;600;700&family=Fira+Code:wght@400;500&display=swap" rel="stylesheet">
   <style>
     :root {
-      --bg: #090D16;
-      --surface-1: #0F172A;
-      --surface-2: #1E293B;
-      --surface-3: #27354A;
-      --border: rgba(148, 163, 184, 0.12);
-      --border-focus: #6366F1;
-      --text: #F8FAFC;
-      --text-muted: #94A3B8;
-      --text-subtle: #64748B;
-      --primary: #4F46E5;
-      --primary-hover: #4338CA;
-      --primary-active: #3730A3;
-      --success: #10B981;
-      --success-bg: rgba(16, 185, 129, 0.1);
-      --warning: #F59E0B;
-      --warning-bg: rgba(245, 158, 11, 0.1);
-      --danger: #EF4444;
-      --danger-bg: rgba(239, 68, 68, 0.1);
+      --bg: #0C0E12;
+      --surface-1: #12161B;
+      --surface-2: #191E24;
+      --surface-3: #22282F;
+      --border: rgba(170, 180, 190, 0.10);
+      --border-hover: rgba(170, 180, 190, 0.22);
+      --border-focus: var(--accent);
+      --text: #EAE8E4;
+      --text-muted: #9CA3AC;
+      --text-subtle: #6E757F;
+
+      --accent: #3FA796;
+      --accent-hover: #348D7E;
+      --accent-active: #2B766A;
+      --accent-text: #7CC7B9;
+      --accent-bg: rgba(63, 167, 150, 0.14);
+      --accent-tint: rgba(63, 167, 150, 0.30);
+
+      --success: #82B489;
+      --success-bg: rgba(130, 180, 137, 0.12);
+      --warning: #C9A55C;
+      --warning-bg: rgba(201, 165, 92, 0.12);
+      --danger: #C96F62;
+      --danger-bg: rgba(201, 111, 98, 0.12);
+      --planned-text: #9AA4B2;
+      --planned-bg: rgba(154, 164, 178, 0.12);
+      --paused-text: #A8ADB5;
+      --paused-bg: rgba(168, 173, 181, 0.12);
+
+      --panel-tint: rgba(18, 22, 27, 0.6);
+      --table-tint: rgba(18, 22, 27, 0.4);
+      --row-hover: rgba(170, 180, 190, 0.08);
+      --row-excluded-bg: rgba(18, 22, 27, 0.35);
+      --card-tint: rgba(25, 30, 36, 0.5);
+
       --font-sans: 'Figtree', -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
       --font-mono: 'Fira Code', ui-monospace, SFMono-Regular, monospace;
       --radius-sm: 6px;
       --radius-md: 10px;
       --radius-lg: 14px;
-      --shadow-sm: 0 1px 2px 0 rgba(0, 0, 0, 0.3);
-      --shadow-md: 0 4px 12px 0 rgba(0, 0, 0, 0.4);
-      --shadow-lg: 0 12px 28px -4px rgba(0, 0, 0, 0.5);
+      --shadow-sm: 0 1px 2px 0 rgba(6, 8, 12, 0.40);
+      --shadow-md: 0 4px 14px 0 rgba(6, 8, 12, 0.45);
+      --shadow-lg: 0 12px 30px 0 rgba(6, 8, 12, 0.55);
+    }
+
+    body.light {
+      --bg: #EFEBE4;
+      --surface-1: #F7F5F0;
+      --surface-2: #FFFFFF;
+      --surface-3: #E9E5DD;
+      --border: rgba(40, 44, 50, 0.10);
+      --border-hover: rgba(40, 44, 50, 0.22);
+      --text: #1E2126;
+      --text-muted: #5A616B;
+      --text-subtle: #8A919B;
+
+      --accent: #2E8577;
+      --accent-hover: #276F63;
+      --accent-active: #1F5B50;
+      --accent-text: #23705F;
+      --accent-bg: rgba(46, 133, 119, 0.10);
+      --accent-tint: rgba(46, 133, 119, 0.24);
+
+      --success: #43764A;
+      --success-bg: rgba(67, 118, 74, 0.10);
+      --warning: #97742B;
+      --warning-bg: rgba(151, 116, 43, 0.10);
+      --danger: #A85246;
+      --danger-bg: rgba(168, 82, 70, 0.10);
+      --planned-text: #5D6572;
+      --planned-bg: rgba(93, 101, 114, 0.10);
+      --paused-text: #6B727C;
+      --paused-bg: rgba(107, 114, 124, 0.12);
+
+      --panel-tint: rgba(247, 245, 240, 0.75);
+      --table-tint: rgba(247, 245, 240, 0.6);
+      --row-hover: rgba(40, 44, 50, 0.05);
+      --row-excluded-bg: rgba(40, 44, 50, 0.05);
+      --card-tint: rgba(255, 255, 255, 0.55);
+
+      --shadow-sm: 0 1px 2px 0 rgba(60, 56, 48, 0.10);
+      --shadow-md: 0 4px 14px 0 rgba(60, 56, 48, 0.10);
+      --shadow-lg: 0 12px 30px 0 rgba(60, 56, 48, 0.14);
     }
 
     * {
@@ -85,7 +143,7 @@ HTML_TEMPLATE = """<!DOCTYPE html>
     }
 
     ::selection {
-      background: var(--primary);
+      background: var(--accent);
       color: #FFFFFF;
     }
 
@@ -101,7 +159,11 @@ HTML_TEMPLATE = """<!DOCTYPE html>
       border-radius: 3px;
     }
     ::-webkit-scrollbar-thumb:hover {
-      background: #3B4D66;
+      background: rgba(170, 180, 190, 0.25);
+    }
+
+    html {
+      scroll-behavior: smooth;
     }
 
     body {
@@ -114,6 +176,20 @@ HTML_TEMPLATE = """<!DOCTYPE html>
       flex-direction: column;
       -webkit-font-smoothing: antialiased;
       -moz-osx-font-smoothing: grayscale;
+    }
+
+    body::before {
+      content: '';
+      position: fixed;
+      inset: 0;
+      pointer-events: none;
+      z-index: 60;
+      opacity: 0.16;
+      background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='160' height='160'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.9' numOctaves='2'/%3E%3C/filter%3E%3Crect width='160' height='160' filter='url(%23n)' opacity='0.55'/%3E%3C/svg%3E");
+    }
+
+    body.light::before {
+      opacity: 0.07;
     }
 
     /* Header */
@@ -138,13 +214,13 @@ HTML_TEMPLATE = """<!DOCTYPE html>
     .brand-logo {
       width: 32px;
       height: 32px;
-      background: var(--primary);
+      background: var(--accent);
       border-radius: var(--radius-sm);
       display: flex;
       align-items: center;
       justify-content: center;
       color: #FFFFFF;
-      box-shadow: 0 2px 8px rgba(79, 70, 229, 0.4);
+      box-shadow: 0 2px 10px rgba(63, 167, 150, 0.22);
     }
 
     .brand-logo svg {
@@ -188,14 +264,13 @@ HTML_TEMPLATE = """<!DOCTYPE html>
       width: 6px;
       height: 6px;
       border-radius: 50%;
-      background: var(--success);
-      box-shadow: 0 0 8px var(--success);
+      background: var(--accent);
     }
 
     /* Main Container */
     main {
       flex: 1;
-      max-width: 1540px;
+      max-width: 1440px;
       width: 100%;
       margin: 0 auto;
       padding: 1.5rem;
@@ -227,7 +302,7 @@ HTML_TEMPLATE = """<!DOCTYPE html>
       display: flex;
       align-items: center;
       justify-content: space-between;
-      background: rgba(15, 23, 42, 0.6);
+      background: var(--panel-tint);
     }
 
     .panel-title {
@@ -290,7 +365,7 @@ HTML_TEMPLATE = """<!DOCTYPE html>
 
     textarea:focus {
       border-color: var(--border-focus);
-      box-shadow: 0 0 0 2px rgba(99, 102, 241, 0.2);
+      box-shadow: 0 0 0 2px var(--accent-bg);
     }
 
     .line-counter {
@@ -357,15 +432,15 @@ HTML_TEMPLATE = """<!DOCTYPE html>
     }
 
     .btn-primary {
-      background: var(--primary);
+      background: var(--accent);
       color: #FFFFFF;
-      box-shadow: 0 1px 3px rgba(0, 0, 0, 0.3);
+      box-shadow: 0 1px 3px rgba(6, 8, 12, 0.35);
     }
     .btn-primary:hover:not(:disabled) {
-      background: var(--primary-hover);
+      background: var(--accent-hover);
     }
     .btn-primary:active:not(:disabled) {
-      background: var(--primary-active);
+      background: var(--accent-active);
     }
 
     .btn-secondary {
@@ -375,15 +450,24 @@ HTML_TEMPLATE = """<!DOCTYPE html>
     }
     .btn-secondary:hover:not(:disabled) {
       background: var(--surface-3);
-      border-color: rgba(148, 163, 184, 0.25);
+      border-color: var(--border-hover);
     }
 
     .btn-success {
-      background: #059669;
+      background: var(--accent-active);
       color: #FFFFFF;
     }
     .btn-success:hover:not(:disabled) {
-      background: #047857;
+      background: var(--accent-hover);
+    }
+
+    .btn:active:not(:disabled) {
+      transform: translateY(1px);
+    }
+
+    :where(button, a, select, input, textarea):focus-visible {
+      outline: 2px solid var(--accent);
+      outline-offset: 2px;
     }
 
     .btn-icon {
@@ -395,13 +479,13 @@ HTML_TEMPLATE = """<!DOCTYPE html>
     .toggle-card {
       margin-top: 1rem;
       padding: 0.75rem 0.875rem;
-      background: rgba(30, 41, 59, 0.4);
+      background: var(--card-tint);
       border: 1px solid var(--border);
       border-radius: var(--radius-md);
       transition: border-color 150ms ease;
     }
     .toggle-card:hover {
-      border-color: rgba(148, 163, 184, 0.25);
+      border-color: var(--border-hover);
     }
     .toggle-control {
       display: flex;
@@ -440,8 +524,8 @@ HTML_TEMPLATE = """<!DOCTYPE html>
       box-shadow: 0 1px 2px rgba(0, 0, 0, 0.3);
     }
     .toggle-control input:checked + .toggle-switch {
-      background: var(--primary);
-      border-color: var(--primary-hover);
+      background: var(--accent);
+      border-color: var(--accent-hover);
     }
     .toggle-control input:checked + .toggle-switch::after {
       transform: translateX(16px);
@@ -469,7 +553,7 @@ HTML_TEMPLATE = """<!DOCTYPE html>
     .panel-footer {
       padding: 1rem 1.25rem;
       border-top: 1px solid var(--border);
-      background: rgba(15, 23, 42, 0.6);
+      background: var(--panel-tint);
       display: flex;
       align-items: center;
       justify-content: space-between;
@@ -478,7 +562,7 @@ HTML_TEMPLATE = """<!DOCTYPE html>
 
     /* Right column: Export Banner & Results Table */
     .export-card {
-      background: linear-gradient(180deg, var(--surface-1) 0%, rgba(15, 23, 42, 0.7) 100%);
+      background: var(--surface-1);
       border: 1px solid var(--border);
       border-radius: var(--radius-lg);
       padding: 1.25rem;
@@ -509,6 +593,19 @@ HTML_TEMPLATE = """<!DOCTYPE html>
       flex-shrink: 0;
     }
 
+    .text-link {
+      color: var(--text-muted);
+      text-decoration: none;
+      display: inline-flex;
+      align-items: center;
+      gap: 3px;
+      transition: color 120ms ease;
+    }
+
+    .text-link:hover {
+      color: var(--text);
+    }
+
     /* Stats strip */
     .stats-strip {
       display: grid;
@@ -533,8 +630,6 @@ HTML_TEMPLATE = """<!DOCTYPE html>
       font-size: 0.75rem;
       color: var(--text-subtle);
       font-weight: 500;
-      text-transform: uppercase;
-      letter-spacing: 0.04em;
     }
 
     .stat-value {
@@ -563,7 +658,7 @@ HTML_TEMPLATE = """<!DOCTYPE html>
       align-items: center;
       justify-content: space-between;
       gap: 1rem;
-      background: rgba(15, 23, 42, 0.4);
+      background: var(--table-tint);
     }
 
     .search-input-wrapper {
@@ -618,29 +713,29 @@ HTML_TEMPLATE = """<!DOCTYPE html>
 
     td {
       padding: 0.6875rem 1rem;
-      border-bottom: 1px solid rgba(148, 163, 184, 0.06);
+      border-bottom: 1px solid var(--border);
       color: var(--text);
     }
 
     tbody tr:hover {
-      background: rgba(30, 41, 59, 0.5);
+      background: var(--row-hover);
     }
 
     .table-checkbox {
       width: 15px;
       height: 15px;
-      accent-color: var(--primary);
+      accent-color: var(--accent);
       cursor: pointer;
       vertical-align: middle;
     }
 
     tr.row-excluded {
       opacity: 0.45;
-      background: rgba(15, 23, 42, 0.4);
+      background: var(--row-excluded-bg);
     }
 
     tr.row-excluded:hover {
-      background: rgba(30, 41, 59, 0.3);
+      background: var(--row-hover);
     }
 
     tr.row-excluded .cell-title {
@@ -663,10 +758,11 @@ HTML_TEMPLATE = """<!DOCTYPE html>
 
     .cell-id a {
       text-decoration: none;
-      transition: opacity 120ms ease;
+      transition: color 120ms ease;
+      color: var(--text-muted);
     }
     .cell-id a:hover {
-      opacity: 0.85;
+      color: var(--text);
       text-decoration: underline;
     }
 
@@ -686,8 +782,8 @@ HTML_TEMPLATE = """<!DOCTYPE html>
       font-size: 0.6875rem;
       font-weight: 600;
       border-radius: var(--radius-sm);
-      background: rgba(99, 102, 241, 0.15);
-      color: #A5B4FC;
+      background: var(--accent-bg);
+      color: var(--accent-text);
     }
 
     .tag-eps {
@@ -710,16 +806,16 @@ HTML_TEMPLATE = """<!DOCTYPE html>
       color: var(--success);
     }
     .status-watching {
-      background: var(--warning-bg);
-      color: var(--warning);
+      background: var(--accent-bg);
+      color: var(--accent-text);
     }
     .status-planned {
-      background: rgba(99, 102, 241, 0.12);
-      color: #A5B4FC;
+      background: var(--planned-bg);
+      color: var(--planned-text);
     }
     .status-paused {
-      background: rgba(148, 163, 184, 0.14);
-      color: #94A3B8;
+      background: var(--paused-bg);
+      color: var(--paused-text);
     }
     .status-dropped {
       background: var(--danger-bg);
@@ -737,7 +833,7 @@ HTML_TEMPLATE = """<!DOCTYPE html>
       margin: 0 1rem 0.75rem;
       padding: 0.625rem 0.875rem;
       background: var(--danger-bg);
-      border: 1px solid rgba(239, 68, 68, 0.28);
+      border: 1px solid var(--danger);
       border-radius: var(--radius-lg);
       font-size: 0.75rem;
       color: var(--text-muted);
@@ -762,7 +858,7 @@ HTML_TEMPLATE = """<!DOCTYPE html>
       padding: 0.125rem 0.3125rem;
       font-size: 0.6875rem;
       font-family: inherit;
-      color: var(--text-primary);
+      color: var(--text);
       background: var(--surface-2);
       border: 1px solid var(--border);
       border-radius: 4px;
@@ -796,10 +892,10 @@ HTML_TEMPLATE = """<!DOCTYPE html>
     /* Live Progress Card */
     .progress-card {
       background: var(--surface-1);
-      border: 1px solid rgba(99, 102, 241, 0.35);
+      border: 1px solid var(--accent-tint);
       border-radius: var(--radius-lg);
       padding: 1rem 1.25rem;
-      box-shadow: var(--shadow-md), 0 0 0 1px rgba(99, 102, 241, 0.1);
+      box-shadow: var(--shadow-md), 0 0 0 1px var(--accent-bg);
       display: flex;
       flex-direction: column;
       gap: 0.75rem;
@@ -829,8 +925,8 @@ HTML_TEMPLATE = """<!DOCTYPE html>
     .progress-spinner {
       width: 18px;
       height: 18px;
-      border: 2px solid rgba(99, 102, 241, 0.2);
-      border-top-color: var(--primary);
+      border: 2px solid var(--accent-bg);
+      border-top-color: var(--accent);
       border-radius: 50%;
       flex-shrink: 0;
       animation: spin-progress 0.7s linear infinite;
@@ -880,9 +976,9 @@ HTML_TEMPLATE = """<!DOCTYPE html>
       font-size: 0.75rem;
       font-weight: 700;
       padding: 0.25rem 0.625rem;
-      background: rgba(99, 102, 241, 0.15);
+      background: var(--accent-bg);
       border-radius: 9999px;
-      color: #A5B4FC;
+      color: var(--accent-text);
     }
 
     .progress-track {
@@ -897,7 +993,7 @@ HTML_TEMPLATE = """<!DOCTYPE html>
     .progress-fill {
       width: 100%;
       height: 100%;
-      background: linear-gradient(90deg, #4F46E5 0%, #818CF8 100%);
+      background: var(--accent);
       border-radius: 9999px;
       transform-origin: left center;
       transform: scaleX(0);
@@ -953,10 +1049,10 @@ HTML_TEMPLATE = """<!DOCTYPE html>
       opacity: 1;
     }
     .toast.toast-success {
-      border-color: rgba(16, 185, 129, 0.4);
+      border-color: var(--success);
     }
     .toast.toast-error {
-      border-color: rgba(239, 68, 68, 0.4);
+      border-color: var(--danger);
     }
   </style>
 </head>
@@ -979,6 +1075,7 @@ HTML_TEMPLATE = """<!DOCTYPE html>
     </div>
 
     <div class="header-actions">
+      <button id="btnTheme" class="btn btn-secondary" style="padding:0.375rem 0.75rem; font-size:0.75rem;" title="Switch color theme">Light mode</button>
       <div class="badge" title="Universal XML format supported natively by MyAnimeList and AniList import">
         <span class="badge-dot" aria-hidden="true"></span>
         <span>MAL &amp; AniList Compatible</span>
@@ -1086,11 +1183,11 @@ HTML_TEMPLATE = """<!DOCTYPE html>
           <h3 id="exportHeadline">Export Pending</h3>
           <p id="exportSubline">Paste your anime list on the left and click "Normalize &amp; Generate XML".</p>
           <div style="margin-top:0.375rem; display:flex; gap:0.875rem; font-size:0.75rem;">
-            <a href="https://myanimelist.net/import.php" target="_blank" rel="noopener noreferrer" style="color:#A5B4FC; text-decoration:none; display:inline-flex; align-items:center; gap:3px;" title="Open MyAnimeList Import page">
+            <a href="https://myanimelist.net/import.php" target="_blank" rel="noopener noreferrer" class="text-link" title="Open MyAnimeList Import page">
               <span>MyAnimeList Import</span>
               <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="width:11px; height:11px;"><path d="M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6"></path><polyline points="15 3 21 3 21 9"></polyline><line x1="10" y1="14" x2="21" y2="3"></line></svg>
             </a>
-            <a href="https://anilist.co/settings/import" target="_blank" rel="noopener noreferrer" style="color:#38BDF8; text-decoration:none; display:inline-flex; align-items:center; gap:3px;" title="Open AniList Import page">
+            <a href="https://anilist.co/settings/import" target="_blank" rel="noopener noreferrer" class="text-link" title="Open AniList Import page">
               <span>AniList Import</span>
               <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="width:11px; height:11px;"><path d="M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6"></path><polyline points="15 3 21 3 21 9"></polyline><line x1="10" y1="14" x2="21" y2="3"></line></svg>
             </a>
@@ -1655,8 +1752,8 @@ HTML_TEMPLATE = """<!DOCTYPE html>
             </td>
             <td class="cell-id">
               <div style="display:flex; flex-direction:column; gap:2px;">
-                ${malUrl ? `<a href="${malUrl}" target="_blank" rel="noopener noreferrer" style="color:#A5B4FC;" title="View on MyAnimeList"><span style="color:var(--text-subtle); font-size:0.625rem; font-weight:600; margin-right:4px;">MAL</span>${item.id}</a>` : '<span style="color:var(--text-subtle);"><span style="font-size:0.625rem; font-weight:600; margin-right:4px;">MAL</span>-</span>'}
-                ${alUrl ? `<a href="${alUrl}" target="_blank" rel="noopener noreferrer" style="color:#38BDF8;" title="View on AniList"><span style="color:var(--text-subtle); font-size:0.625rem; font-weight:600; margin-right:4px;">AL</span>${item.anilist_id}</a>` : '<span style="color:var(--text-subtle);"><span style="font-size:0.625rem; font-weight:600; margin-right:4px;">AL</span>-</span>'}
+                ${malUrl ? `<a href="${malUrl}" class="id-link" target="_blank" rel="noopener noreferrer" title="View on MyAnimeList"><span style="color:var(--text-subtle); font-size:0.625rem; font-weight:600; margin-right:4px;">MAL</span>${item.id}</a>` : '<span style="color:var(--text-subtle);"><span style="font-size:0.625rem; font-weight:600; margin-right:4px;">MAL</span>-</span>'}
+                ${alUrl ? `<a href="${alUrl}" class="id-link" target="_blank" rel="noopener noreferrer" title="View on AniList"><span style="color:var(--text-subtle); font-size:0.625rem; font-weight:600; margin-right:4px;">AL</span>${item.anilist_id}</a>` : '<span style="color:var(--text-subtle);"><span style="font-size:0.625rem; font-weight:600; margin-right:4px;">AL</span>-</span>'}
               </div>
             </td>
             <td>
@@ -1792,6 +1889,28 @@ HTML_TEMPLATE = """<!DOCTYPE html>
         .replace(/>/g, '&gt;')
         .replace(/"/g, '&quot;');
     }
+
+    const btnTheme = document.getElementById('btnTheme');
+
+    function applyTheme(mode) {
+      document.body.classList.toggle('light', mode === 'light');
+      btnTheme.textContent = mode === 'light' ? 'Dark mode' : 'Light mode';
+    }
+
+    let themeMode = null;
+    try {
+      themeMode = localStorage.getItem('aniexport.theme');
+    } catch (e) {}
+    if (themeMode !== 'light' && themeMode !== 'dark') themeMode = 'dark';
+    applyTheme(themeMode);
+
+    btnTheme.addEventListener('click', () => {
+      themeMode = themeMode === 'light' ? 'dark' : 'light';
+      try {
+        localStorage.setItem('aniexport.theme', themeMode);
+      } catch (e) {}
+      applyTheme(themeMode);
+    });
 
     // Initial load
     updateMediaTypeUI(false);

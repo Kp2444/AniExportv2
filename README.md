@@ -42,6 +42,8 @@ Open `http://127.0.0.1:5000` if the browser does not open automatically.
 
 The server binds to `127.0.0.1` only and never signs in to or modifies any account.
 
+The header includes a light/dark theme toggle; the choice is remembered in the browser.
+
 Use the **Media Type** selector to choose Anime or Manga. Changing the media type clears the current selection and generated export to avoid accidentally mixing media types.
 
 The status selector uses AniList's vocabulary; the server maps it to MAL's values on export:
