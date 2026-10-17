@@ -12,13 +12,20 @@ import json
 from pathlib import Path
 import socket
 import threading
-from typing import Any, Dict, List
+import time
+from typing import Any, Dict, List, Optional
 import urllib.parse
 import webbrowser
+import xml.etree.ElementTree as ET
+import uuid
+from datetime import datetime
 
 # Import core normalization and generation logic
 from generate_mal_xml import (
     MIN_REQUEST_INTERVAL,
+    current_interval,
+    lookup_by_mal_id,
+    search_candidates,
     build_mal_xml,
     build_mal_manga_xml,
     deduplicate_entries,
@@ -32,12 +39,103 @@ BASE_DIR = Path(__file__).resolve().parent
 EXPORT_MEDIA_TYPE = "anime"
 
 # Automatically detect output/ directory
-if (BASE_DIR / "output").is_dir():
-    EXPORT_XML_PATH = BASE_DIR / "output" / "myanimelist_export.xml"
-    EXPORT_GZ_PATH = BASE_DIR / "output" / "myanimelist_export.xml.gz"
-else:
-    EXPORT_XML_PATH = BASE_DIR / "myanimelist_export.xml"
-    EXPORT_GZ_PATH = BASE_DIR / "myanimelist_export.xml.gz"
+_EXPORT_DIR = BASE_DIR / "output" if (BASE_DIR / "output").is_dir() else BASE_DIR
+
+# Anime keeps the original names so existing links and scripts still work; manga
+# gets its own pair so one media can never overwrite or impersonate the other.
+EXPORT_XML_PATH = _EXPORT_DIR / "myanimelist_export.xml"
+EXPORT_GZ_PATH = _EXPORT_DIR / "myanimelist_export.xml.gz"
+EXPORT_MANGA_XML_PATH = _EXPORT_DIR / "myanimelist_manga_export.xml"
+EXPORT_MANGA_GZ_PATH = _EXPORT_DIR / "myanimelist_manga_export.xml.gz"
+
+
+# Only one network run at a time: two concurrent runs would interleave their
+# writes to the same export files and fight over the rate limit.
+_run_lock = threading.Lock()
+_active_runs: Dict[str, Dict[str, threading.Event]] = {}
+_runs_guard = threading.Lock()
+
+MAX_PREVIEW_BYTES = 5 * 1024 * 1024
+ARCHIVE_NAME_CHARS = set("abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_.")
+
+
+def _register_run() -> tuple:
+    run_id = uuid.uuid4().hex
+    control = {"cancel": threading.Event(), "pause": threading.Event()}
+    with _runs_guard:
+        _active_runs[run_id] = control
+    return run_id, control
+
+
+def _unregister_run(run_id: str) -> None:
+    with _runs_guard:
+        _active_runs.pop(run_id, None)
+
+
+def _archive_paths(media_type: str) -> tuple:
+    xml_path, gz_path = _export_paths(media_type)
+    stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    stem = xml_path.name[:-len(".xml")] if xml_path.name.endswith(".xml") else xml_path.stem
+    return (xml_path.with_name(f"{stem}_{stamp}.xml"),
+            gz_path.with_name(f"{stem}_{stamp}.xml.gz"))
+
+
+def _write_archive(media_type: str, xml_bytes: bytes, gz_bytes: bytes) -> str:
+    """Keep a timestamped copy beside the live export so a good run is never lost."""
+    archive_xml, archive_gz = _archive_paths(media_type)
+    archive_xml.write_bytes(xml_bytes)
+    archive_gz.write_bytes(gz_bytes)
+    return archive_xml.name
+
+
+def _latest_archive(media_type: str) -> Optional[str]:
+    xml_path, _ = _export_paths(media_type)
+    stem = xml_path.name[:-len(".xml")] if xml_path.name.endswith(".xml") else xml_path.stem
+    try:
+        names = sorted(q.name for q in xml_path.parent.glob(stem + "_*.xml"))
+    except OSError:
+        return None
+    return names[-1] if names else None
+
+
+def _export_paths(media_type: str) -> tuple:
+    """Resolve the (xml, gz) pair for a media type. Reads module globals on every
+    call so tests can patch them."""
+    if media_type == "manga":
+        return EXPORT_MANGA_XML_PATH, EXPORT_MANGA_GZ_PATH
+    return EXPORT_XML_PATH, EXPORT_GZ_PATH
+
+
+def _export_filenames(media_type: str) -> tuple:
+    if media_type == "manga":
+        return "myanimelist_manga_export.xml", "myanimelist_manga_export.xml.gz"
+    return "myanimelist_export.xml", "myanimelist_export.xml.gz"
+
+
+def _export_state() -> Dict[str, Any]:
+    """What the server actually holds, so the client never guesses."""
+    state: Dict[str, Any] = {"active_media": EXPORT_MEDIA_TYPE}
+    for media in ("anime", "manga"):
+        xml_path, gz_path = _export_paths(media)
+        xml_name, gz_name = _export_filenames(media)
+        info: Dict[str, Any] = {
+            "xml": xml_path.is_file(), "gz": gz_path.is_file(),
+            "xml_name": xml_name, "gz_name": gz_name,
+            "count": None, "updated_at": None,
+            "archive": _latest_archive(media),
+        }
+        if info["xml"]:
+            try:
+                root = ET.fromstring(xml_path.read_bytes())
+                info["count"] = len(root.findall("manga" if media == "manga" else "anime"))
+            except Exception:
+                pass
+            try:
+                info["updated_at"] = int(xml_path.stat().st_mtime)
+            except Exception:
+                pass
+        state[media] = info
+    return state
 
 HTML_TEMPLATE = """<!DOCTYPE html>
 <html lang="en">
@@ -826,6 +924,158 @@ HTML_TEMPLATE = """<!DOCTYPE html>
       color: var(--danger);
     }
 
+    .run-controls {
+      display: none;
+      gap: 0.5rem;
+      margin-top: 0.75rem;
+    }
+    .run-controls.show { display: flex; }
+
+    .chip-row {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 0.375rem;
+      padding: 0 1rem 0.625rem;
+    }
+    .chip {
+      padding: 0.1875rem 0.625rem;
+      font-size: 0.6875rem;
+      font-weight: 500;
+      color: var(--text-muted);
+      background: var(--surface-2);
+      border: 1px solid var(--border);
+      border-radius: 9999px;
+      cursor: pointer;
+    }
+    .chip.active {
+      color: #fff;
+      background: var(--border-focus);
+      border-color: var(--border-focus);
+    }
+
+    th.sortable { cursor: pointer; user-select: none; }
+    th.sortable:hover { color: var(--text-primary); }
+    th .sort-mark { font-size: 0.625rem; color: var(--text-subtle); margin-left: 0.25rem; }
+
+    .cover-thumb {
+      width: 32px;
+      height: 45px;
+      object-fit: cover;
+      border-radius: 3px;
+      background: var(--surface-2);
+      flex-shrink: 0;
+    }
+    .title-row { display: flex; gap: 0.5rem; align-items: flex-start; }
+
+    .fix-row {
+      display: flex;
+      gap: 0.3125rem;
+      margin-top: 0.3125rem;
+    }
+    .fix-input {
+      flex: 1;
+      min-width: 90px;
+      padding: 0.1875rem 0.375rem;
+      font-size: 0.6875rem;
+      font-family: inherit;
+      color: var(--text-primary);
+      background: var(--surface-2);
+      border: 1px solid var(--border);
+      border-radius: 4px;
+    }
+    .fix-input:focus { outline: none; border-color: var(--border-focus); }
+
+    .detail-row td {
+      background: var(--surface-2);
+      padding: 0.625rem 0.75rem;
+    }
+    .detail-grid {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(130px, 1fr));
+      gap: 0.5rem;
+    }
+    .detail-grid label {
+      display: flex;
+      flex-direction: column;
+      gap: 0.1875rem;
+      margin: 0;
+      font-size: 0.6875rem;
+      color: var(--text-subtle);
+    }
+    .detail-grid input {
+      padding: 0.25rem 0.375rem;
+      font-size: 0.6875rem;
+      font-family: inherit;
+      color: var(--text-primary);
+      background: var(--surface-1);
+      border: 1px solid var(--border);
+      border-radius: 4px;
+    }
+    .detail-grid input:focus { outline: none; border-color: var(--border-focus); }
+    .btn-detail {
+      background: none;
+      border: none;
+      color: var(--text-subtle);
+      cursor: pointer;
+      font-size: 0.875rem;
+      padding: 0 0.25rem;
+    }
+    .btn-detail:hover { color: var(--text-primary); }
+
+    .modal-backdrop {
+      display: none;
+      position: fixed;
+      inset: 0;
+      background: rgba(2, 6, 23, 0.72);
+      z-index: 60;
+      padding: 2rem;
+    }
+    .modal-backdrop.show { display: flex; align-items: center; justify-content: center; }
+    .modal-card {
+      display: flex;
+      flex-direction: column;
+      gap: 0.75rem;
+      width: min(900px, 100%);
+      max-height: 100%;
+      padding: 1rem;
+      background: var(--surface-1);
+      border: 1px solid var(--border);
+      border-radius: var(--radius-lg);
+    }
+    .modal-card pre {
+      flex: 1;
+      overflow: auto;
+      margin: 0;
+      padding: 0.75rem;
+      font-size: 0.6875rem;
+      line-height: 1.5;
+      color: var(--text-muted);
+      background: var(--surface-2);
+      border-radius: 6px;
+      white-space: pre-wrap;
+      word-break: break-word;
+    }
+    .modal-head { display: flex; align-items: center; justify-content: space-between; gap: 0.5rem; }
+
+    .row-status {
+      font-family: inherit;
+      font-size: 0.6875rem;
+      font-weight: 500;
+      border: 1px solid transparent;
+      border-radius: 9999px;
+      padding: 0.1875rem 0.5rem;
+      cursor: pointer;
+      max-width: 100%;
+    }
+    .row-status:focus {
+      outline: none;
+      border-color: var(--border-focus);
+    }
+    .row-status:disabled {
+      opacity: 0.45;
+      cursor: not-allowed;
+    }
+
     .unresolved-bar {
       display: none;
       align-items: center;
@@ -1153,6 +1403,17 @@ HTML_TEMPLATE = """<!DOCTYPE html>
         </div>
 
         <div class="toggle-card">
+          <label class="toggle-control" for="toggleArchive">
+            <input type="checkbox" id="toggleArchive">
+            <span class="toggle-switch" aria-hidden="true"></span>
+            <span class="toggle-info">
+              <span class="toggle-title">Keep timestamped copies</span>
+              <span class="toggle-desc">Also saves a dated copy on every write</span>
+            </span>
+          </label>
+        </div>
+
+        <div class="toggle-card">
           <label class="toggle-control" for="toggleSequels">
             <input type="checkbox" id="toggleSequels">
             <span class="toggle-switch" aria-hidden="true"></span>
@@ -1171,6 +1432,10 @@ HTML_TEMPLATE = """<!DOCTYPE html>
           </svg>
           Normalize &amp; Generate XML
         </button>
+        <div id="runControls" class="run-controls">
+          <button id="btnPause" class="btn btn-secondary" style="flex:1;">Pause</button>
+          <button id="btnCancel" class="btn btn-secondary" style="flex:1;">Cancel run</button>
+        </div>
       </div>
     </section>
 
@@ -1194,6 +1459,7 @@ HTML_TEMPLATE = """<!DOCTYPE html>
           </div>
         </div>
         <div class="export-buttons">
+          <button id="btnPreview" class="btn btn-secondary" title="Show the generated XML">Preview XML</button>
           <a id="btnDownloadXml" href="/api/download/xml" class="btn btn-secondary disabled" aria-disabled="true" download="myanimelist_export.xml">
             <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
               <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"></path>
@@ -1254,6 +1520,18 @@ HTML_TEMPLATE = """<!DOCTYPE html>
         </div>
       </section>
 
+      <div id="previewModal" class="modal-backdrop">
+        <div class="modal-card">
+          <div class="modal-head">
+            <strong id="previewTitle">Export preview</strong>
+            <span style="flex:1;"></span>
+            <button id="btnPreviewCopy" class="btn btn-secondary">Copy</button>
+            <button id="btnPreviewClose" class="btn btn-secondary">Close</button>
+          </div>
+          <pre id="previewBody"></pre>
+        </div>
+      </div>
+
       <!-- Table Panel -->
       <section class="table-panel">
         <div id="unresolvedBar" class="unresolved-bar">
@@ -1261,6 +1539,7 @@ HTML_TEMPLATE = """<!DOCTYPE html>
           <span class="spacer"></span>
           <button id="btnCopyUnresolved" class="btn btn-secondary" style="padding:0.1875rem 0.5rem; font-size:0.6875rem;">Copy unmatched titles</button>
         </div>
+        <div id="chipRow" class="chip-row"></div>
         <div class="table-toolbar">
           <div class="search-input-wrapper">
             <svg class="search-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
@@ -1279,12 +1558,13 @@ HTML_TEMPLATE = """<!DOCTYPE html>
                 <th style="width: 42px; text-align: center;">
                   <input type="checkbox" id="selectAllCheckbox" class="table-checkbox" checked title="Select/Deselect all">
                 </th>
-                <th style="width: 105px;">Database IDs</th>
-                <th>Official Title (Full English)</th>
-                <th style="width: 90px;">Type</th>
-                <th style="width: 110px;" id="countColumnHeading">Episodes</th>
+                <th style="width: 105px;" class="sortable" data-sort="id">Database IDs<span class="sort-mark"></span></th>
+                <th class="sortable" data-sort="title">Official Title (Full English)<span class="sort-mark"></span></th>
+                <th style="width: 90px;" class="sortable" data-sort="type">Type<span class="sort-mark"></span></th>
+                <th style="width: 110px;" id="countColumnHeading" class="sortable" data-sort="count">Episodes<span class="sort-mark"></span></th>
                 <th style="width: 125px;" id="progressColumnHeading">Progress</th>
-                <th style="width: 100px;">Status</th>
+                <th style="width: 100px;" class="sortable" data-sort="status">Status<span class="sort-mark"></span></th>
+                <th style="width: 34px;"></th>
               </tr>
             </thead>
             <tbody id="tableBody">
@@ -1292,6 +1572,7 @@ HTML_TEMPLATE = """<!DOCTYPE html>
             </tbody>
           </table>
 
+          <div id="rowCapNotice" style="display:none; padding:0.625rem 1rem; font-size:0.75rem; color:var(--text-muted); border-top:1px solid var(--border);"></div>
           <div id="emptyTableState" class="empty-state">
             <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
               <circle cx="12" cy="12" r="10"></circle>
@@ -1353,6 +1634,27 @@ HTML_TEMPLATE = """<!DOCTYPE html>
     const unresolvedBar = document.getElementById('unresolvedBar');
     const unresolvedText = document.getElementById('unresolvedText');
     const btnCopyUnresolved = document.getElementById('btnCopyUnresolved');
+    const runControls = document.getElementById('runControls');
+    const btnPause = document.getElementById('btnPause');
+    const btnCancel = document.getElementById('btnCancel');
+    const chipRow = document.getElementById('chipRow');
+    const rowCapNotice = document.getElementById('rowCapNotice');
+    const toggleArchive = document.getElementById('toggleArchive');
+    const btnPreview = document.getElementById('btnPreview');
+    const previewModal = document.getElementById('previewModal');
+    const previewBody = document.getElementById('previewBody');
+    const previewTitle = document.getElementById('previewTitle');
+    const btnPreviewCopy = document.getElementById('btnPreviewCopy');
+    const btnPreviewClose = document.getElementById('btnPreviewClose');
+
+    const ROW_CAP = 300;
+    let showAllRows = false;
+    let statusFilter = '';
+    let sortKey = '';
+    let sortDir = 0;            // 0 = off, 1 = asc, -1 = desc
+    let activeRunId = null;
+    let isPaused = false;
+    const expandedRows = new Set();
 
     // AniList's own vocabulary. The server maps these onto MAL's XML values:
     // Paused -> On-Hold, Rereading/Rewatching -> Reading/Watching + the repeat flag.
@@ -1418,7 +1720,7 @@ HTML_TEMPLATE = """<!DOCTYPE html>
       countColumnHeading.textContent = isManga ? 'Chapters / Volumes' : 'Episodes';
       document.getElementById('progressColumnHeading').textContent = isManga ? 'Read' : 'Watched';
       const statLabels = document.querySelectorAll('.stat-label');
-      if (statLabels[2]) statLabels[2].textContent = isManga ? 'Total Chapters' : 'Total Episodes';
+      if (statLabels[2]) statLabels[2].textContent = isManga ? 'Total Chapters / Volumes' : 'Total Episodes';
       toggleSequels.closest('.toggle-card').style.display = isManga ? 'none' : '';
       // NOTE: this template is a plain Python string, so a backslash-n here would
       // become a real newline and break the whole <script>. Build newlines in JS.
@@ -1434,9 +1736,15 @@ HTML_TEMPLATE = """<!DOCTYPE html>
         updateStatsAndExport();
       }
       updateLineCounter();
+      refreshExportState();
     }
 
-    mediaTypeSelect.addEventListener('change', () => updateMediaTypeUI(true));
+    mediaTypeSelect.addEventListener('change', () => {
+      updateMediaTypeUI(true);
+      saveState();
+    });
+
+    toggleSequels.addEventListener('change', saveState);
 
     function showToast(msg, type = 'success') {
       toastMessage.textContent = msg;
@@ -1452,7 +1760,10 @@ HTML_TEMPLATE = """<!DOCTYPE html>
       lineCountLabel.textContent = lines.length + (mediaType() === 'manga' ? ' manga' : ' anime');
     }
 
-    txtArea.addEventListener('input', updateLineCounter);
+    txtArea.addEventListener('input', () => {
+      updateLineCounter();
+      saveState();
+    });
 
     // Paste from clipboard
     btnPaste.addEventListener('click', async () => {
@@ -1476,6 +1787,7 @@ HTML_TEMPLATE = """<!DOCTYPE html>
     btnClear.addEventListener('click', () => {
       txtArea.value = '';
       updateLineCounter();
+      saveState();
       showToast('Text area cleared');
     });
 
@@ -1511,9 +1823,21 @@ HTML_TEMPLATE = """<!DOCTYPE html>
           media_type: mediaType(),
           status: selectStatus.value,
           score: parseInt(inputScore.value, 10) || 0,
-          expand_sequels: mediaType() === 'anime' && toggleSequels.checked
+          expand_sequels: mediaType() === 'anime' && toggleSequels.checked,
+          archive: toggleArchive.checked
         };
 
+        currentAnimes = [];
+        expandedRows.clear();
+        showAllRows = false;
+        renderTable(currentAnimes);
+        updateStats();
+        activeRunId = null;
+        isPaused = false;
+        btnPause.textContent = 'Pause';
+        btnPause.disabled = false;
+        btnCancel.disabled = false;
+        runControls.classList.add('show');
         progressCard.style.display = 'flex';
         progressBarFill.style.transform = 'scaleX(0)';
         progressCountLabel.textContent = '0 / 0';
@@ -1529,14 +1853,20 @@ HTML_TEMPLATE = """<!DOCTYPE html>
 
         if (!res.ok) {
           const errData = await res.json().catch(() => ({}));
-          showToast(errData.error || 'Error processing list', 'error');
+          showToast(errData.error || 'Error processing list', res.status === 409 ? 'warning' : 'error');
           progressCard.style.display = 'none';
+          runControls.classList.remove('show');
           return;
         }
 
         const reader = res.body.getReader();
         const decoder = new TextDecoder('utf-8');
         let buffer = '';
+        let cancelledRun = false;
+        // Set when the server has said all it is going to say. Breaking out of the
+        // chunk loop alone would leave the outer reader awaiting a read that only
+        // resolves when the socket closes.
+        let streamDone = false;
 
         while (true) {
           const { done, value } = await reader.read();
@@ -1567,30 +1897,84 @@ HTML_TEMPLATE = """<!DOCTYPE html>
                 } else {
                   progressCurrentSub.textContent = 'Resolving metadata via AniList & MAL...';
                 }
+                if (Array.isArray(event.entries) && event.entries.length) {
+                  const seen = new Set(currentAnimes.map(entryKey));
+                  let added = false;
+                  event.entries.forEach(entry => {
+                    const key = entryKey(entry);
+                    if (seen.has(key)) return;   // same dedupe the final list applies
+                    seen.add(key);
+                    currentAnimes.push({ ...entry, enabled: Number(entry.id) > 0 });
+                    added = true;
+                  });
+                  if (added) {
+                    renderTable(currentAnimes);
+                    updateStats();   // display only - the run still owns the files
+                  }
+                }
+              } else if (event.type === 'started') {
+                activeRunId = event.run_id;
+              } else if (event.type === 'paused') {
+                isPaused = true;
+                btnPause.textContent = 'Resume';
+                progressCurrentSub.textContent = 'Paused - nothing is being requested.';
+              } else if (event.type === 'resumed') {
+                isPaused = false;
+                btnPause.textContent = 'Pause';
+              } else if (event.type === 'cancelled') {
+                const existing = new Map(currentAnimes.map(i => [entryKey(i), i]));
+                currentAnimes = (event.entries || []).map(e => {
+                  const row = existing.get(entryKey(e));
+                  return row || { ...e, enabled: Number(e.id) > 0 };
+                });
+                renderTable(currentAnimes);
+                showToast('Run cancelled - ' + (event.resolved || 0) + ' titles resolved', 'warning');
+                try { reader.cancel(); } catch (err) {}
+                cancelledRun = true;
+                streamDone = true;
+                break;
+              } else if (event.type === 'error') {
+                showToast(event.error || 'Could not build the export', 'error');
+                progressCard.style.display = 'none';
               } else if (event.type === 'rate_limit') {
                 progressCurrentSub.textContent = `AniList rate limit reached (30 requests/min) - waiting ${event.seconds}s, this is normal for long lists...`;
               } else if (event.type === 'complete' && event.ok) {
                 progressBarFill.style.transform = 'scaleX(1)';
                 progressPercentLabel.textContent = '100%';
-                currentAnimes = event.entries.map(e => ({ ...e, enabled: Number(e.id) > 0 }));
+                // Keep the row objects already on screen so any status/progress edits
+                // made while the run was going are not thrown away; take the server's
+                // deduped order and membership as authoritative.
+                const existing = new Map(currentAnimes.map(i => [entryKey(i), i]));
+                currentAnimes = event.entries.map(e => {
+                  const row = existing.get(entryKey(e));
+                  return row || { ...e, enabled: Number(e.id) > 0 };
+                });
                 selectAllCheckbox.checked = true;
                 selectAllCheckbox.indeterminate = false;
                 renderTable(currentAnimes);
                 updateStatsAndExport();
+                refreshExportState();
                 showToast('XML generated (' + event.entries.length + ' ' + (mediaType() === 'manga' ? 'manga' : 'anime') + ' rows; unresolved rows are excluded)');
                 try { reader.cancel(); } catch(e) {}
+                streamDone = true;
                 break;
               }
             } catch (errParse) {
               // Ignore partial JSON
             }
           }
+          if (streamDone) break;
         }
       } catch (err) {
         showToast('Error communicating with local server', 'error');
       } finally {
         isProcessing = false;
         btnProcess.disabled = false;
+        activeRunId = null;
+        isPaused = false;
+        runControls.classList.remove('show');
+        // A cancelled run wrote nothing, so re-sync the files to what is on screen.
+        updateStatsAndExport();
         setTimeout(() => {
           progressCard.style.display = 'none';
         }, 1500);
@@ -1600,26 +1984,24 @@ HTML_TEMPLATE = """<!DOCTYPE html>
     let exportDebounceTimer = null;
 
     function filteredCount() {
-      const q = searchInput.value.toLowerCase().trim();
-      if (!q) return currentAnimes.length;
-      return currentAnimes.filter(item => {
-        const title = (item.title || '').toLowerCase();
-        const orig = (item.original || '').toLowerCase();
-        const malId = String(item.id || '');
-        const alId = String(item.anilist_id || '');
-        return title.includes(q) || orig.includes(q) || malId.includes(q) || alId.includes(q);
-      }).length;
+      return currentAnimes.filter(matchesFilters).length;
     }
 
-    function updateStatsAndExport() {
+    function updateStats() {
       const enabledItems = currentAnimes.filter(i => i.enabled !== false && Number(i.id) > 0);
       const totalCount = currentAnimes.length;
       const enabledCount = enabledItems.length;
 
       statTotal.textContent = totalCount;
       statNormalized.textContent = enabledCount === totalCount ? String(totalCount) : `${enabledCount} of ${totalCount}`;
-      const totalEps = enabledItems.reduce((acc, curr) => acc + (mediaType() === 'manga' ? (curr.chapters || 0) : (curr.episodes || 0)), 0);
-      statEpisodes.textContent = totalEps.toLocaleString();
+      if (mediaType() === 'manga') {
+        const totalCh = enabledItems.reduce((acc, curr) => acc + (curr.chapters || 0), 0);
+        const totalVol = enabledItems.reduce((acc, curr) => acc + (curr.volumes || 0), 0);
+        statEpisodes.textContent = totalCh.toLocaleString() + ' ch / ' + totalVol.toLocaleString() + ' vol';
+      } else {
+        const totalEps = enabledItems.reduce((acc, curr) => acc + (curr.episodes || 0), 0);
+        statEpisodes.textContent = totalEps.toLocaleString();
+      }
 
       filterCountLabel.textContent = `Showing ${filteredCount()} of ${totalCount} (${enabledCount} selected)`;
 
@@ -1650,35 +2032,88 @@ HTML_TEMPLATE = """<!DOCTYPE html>
         statXmlValid.style.color = 'var(--text-muted)';
       }
 
+      // A run owns the export files until it finishes; never offer a stale download.
+      if (isProcessing) {
+        setDownloadEnabled(btnDownloadXml, false);
+        setDownloadEnabled(btnDownloadGz, false);
+        exportHeadline.textContent = `Resolving... ${enabledCount} ready so far`;
+        exportSubline.textContent = 'Download unlocks when the run finishes.';
+      }
+    }
+
+    function updateStatsAndExport() {
+      updateStats();
+      saveState();
+      const enabledItems = currentAnimes.filter(i => i.enabled !== false && Number(i.id) > 0);
       clearTimeout(exportDebounceTimer);
       exportDebounceTimer = setTimeout(async () => {
         try {
-          await fetch('/api/update-export', {
+          const res = await fetch('/api/update-export', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({
               entries: enabledItems.map(({ candidates, ...rest }) => rest),
               media_type: mediaType(),
               status: selectStatus.value,
-              score: parseInt(inputScore.value, 10) || 0
+              score: parseInt(inputScore.value, 10) || 0,
+              archive: toggleArchive.checked
             })
           });
+          if (!res.ok) {
+            const err = await res.json().catch(() => ({}));
+            if (err.error) showToast(err.error, 'error');
+          }
+          await refreshExportState();
         } catch (e) {
           // ignore background sync error
         }
       }, 250);
     }
 
-    function updateSelectAllState() {
-      const q = searchInput.value.toLowerCase().trim();
-      const visible = currentAnimes.filter(item => {
-        if (!q) return true;
-        const title = (item.title || '').toLowerCase();
-        const orig = (item.original || '').toLowerCase();
-        const malId = String(item.id || '');
-        const alId = String(item.anilist_id || '');
-        return title.includes(q) || orig.includes(q) || malId.includes(q) || alId.includes(q);
+    function setDownloadEnabled(btn, enabled) {
+      btn.classList.toggle('disabled', !enabled);
+      if (enabled) {
+        btn.removeAttribute('aria-disabled');
+      } else {
+        btn.setAttribute('aria-disabled', 'true');
+      }
+    }
+
+    // Ask the server what it actually holds. The client's own guess is used for the
+    // instant feedback; this is the authority once a write has landed.
+    async function refreshExportState() {
+      try {
+        const res = await fetch('/api/export-state');
+        if (!res.ok) return;
+        const state = await res.json();
+        const info = state[mediaType()];
+        if (!info) return;
+        btnDownloadXml.href = '/api/download/xml?media=' + mediaType();
+        btnDownloadGz.href = '/api/download/gz?media=' + mediaType();
+        btnDownloadXml.download = info.xml_name;
+        btnDownloadGz.download = info.gz_name;
+        setDownloadEnabled(btnDownloadXml, info.xml);
+        setDownloadEnabled(btnDownloadGz, info.gz);
+        if (info.xml && info.count !== null && info.count !== undefined) {
+          exportSubline.textContent = info.count + ' entries in ' + info.xml_name
+            + ' - MAL-compatible XML for import through MyAnimeList or AniList.';
+        }
+      } catch (e) {
+        // leave the client-side state as-is
+      }
+    }
+
+    [btnDownloadXml, btnDownloadGz].forEach(btn => {
+      btn.addEventListener('click', (e) => {
+        if (btn.classList.contains('disabled')) {
+          e.preventDefault();
+          showToast('No export generated yet for this media type', 'warning');
+        }
       });
+    });
+
+    function updateSelectAllState() {
+      const visible = currentAnimes.filter(matchesFilters);
       if (visible.length === 0) {
         selectAllCheckbox.checked = false;
         selectAllCheckbox.indeterminate = false;
@@ -1703,6 +2138,226 @@ HTML_TEMPLATE = """<!DOCTYPE html>
       return `<select class="match-picker" data-index="${idx}" title="Pick the correct match for this title">${options}</select>`;
     }
 
+    // Mirrors deduplicate_entries() on the server: MAL id when present, else title.
+    const STATE_KEY = 'aniexport.state';
+    let stateSaveTimer = null;
+
+    function statePayload(includeResults, includeCandidates) {
+      const base = {
+        v: 1,
+        mediaType: mediaType(),
+        status: selectStatus.value,
+        score: parseInt(inputScore.value, 10) || 0,
+        sequels: !!toggleSequels.checked,
+        archive: !!toggleArchive.checked,
+        text: txtArea.value,
+        updated: Date.now(),
+      };
+      if (!includeResults) return base;
+      base.results = currentAnimes.map(item => {
+        if (includeCandidates) return item;
+        const copy = Object.assign({}, item);
+        delete copy.candidates;
+        return copy;
+      });
+      return base;
+    }
+
+    // A long run is expensive to repeat, so the session survives a refresh.
+    // Candidates are the bulky part: drop them before dropping the rows themselves.
+    function saveStateNow() {
+      const attempts = [[true, true], [true, false], [false, false]];
+      for (let i = 0; i < attempts.length; i++) {
+        try {
+          window.localStorage.setItem(STATE_KEY, JSON.stringify(statePayload(attempts[i][0], attempts[i][1])));
+          return;
+        } catch (e) {
+          // quota or disabled storage - try a smaller payload, then give up quietly
+        }
+      }
+    }
+
+    function saveState() {
+      clearTimeout(stateSaveTimer);
+      stateSaveTimer = setTimeout(saveStateNow, 300);
+    }
+
+    function restoreState() {
+      let raw = null;
+      try {
+        raw = window.localStorage.getItem(STATE_KEY);
+      } catch (e) {
+        return false;
+      }
+      if (!raw) return false;
+      let saved;
+      try {
+        saved = JSON.parse(raw);
+      } catch (e) {
+        return false;
+      }
+      if (!saved || saved.v !== 1) return false;
+
+      if (saved.mediaType === 'manga' || saved.mediaType === 'anime') {
+        mediaTypeSelect.value = saved.mediaType;
+      }
+      // Rebuild the media-specific controls first, then restore the values that
+      // depend on them - the status options only exist after this call.
+      updateMediaTypeUI(false);
+      if (typeof saved.status === 'string') {
+        const allowed = STATUS_SETS[mediaType()];
+        if (allowed.indexOf(saved.status) >= 0) selectStatus.value = saved.status;
+      }
+      if (typeof saved.score === 'number') inputScore.value = Math.max(0, Math.min(10, saved.score));
+      toggleSequels.checked = !!saved.sequels;
+      toggleArchive.checked = !!saved.archive;
+      if (typeof saved.text === 'string') txtArea.value = saved.text;
+      updateLineCounter();
+
+      if (Array.isArray(saved.results) && saved.results.length) {
+        currentAnimes = saved.results;
+        renderTable(currentAnimes);
+        // Re-sync the server's files so a download matches what is on screen.
+        updateStatsAndExport();
+        showToast(`Restored ${currentAnimes.length} rows from your last session`);
+      } else {
+        renderTable([]);
+        updateStats();
+      }
+      return true;
+    }
+
+    function sortValue(item) {
+      if (sortKey === 'id') return Number(item.id) || 0;
+      if (sortKey === 'title') return String(item.title || '').toLowerCase();
+      if (sortKey === 'type') return String(item.type || '').toLowerCase();
+      if (sortKey === 'status') return String(item.status || '').toLowerCase();
+      if (sortKey === 'count') {
+        return mediaType() === 'manga' ? (Number(item.chapters) || 0) : (Number(item.episodes) || 0);
+      }
+      return 0;
+    }
+
+    function applySort(list) {
+      if (!sortKey || sortDir === 0) return list;
+      // decorate-sort-undecorate keeps it stable, so equal rows hold their order
+      return list
+        .map((item, i) => ({ item, i }))
+        .sort((a, b) => {
+          const av = sortValue(a.item);
+          const bv = sortValue(b.item);
+          if (av < bv) return -1 * sortDir;
+          if (av > bv) return 1 * sortDir;
+          return a.i - b.i;
+        })
+        .map(pair => pair.item);
+    }
+
+    const CHIPS = [
+      { id: '', label: 'All' },
+      { id: 'reading', label: 'Reading / Watching' },
+      { id: 'completed', label: 'Completed' },
+      { id: 'planned', label: 'Planned' },
+      { id: 'paused', label: 'Paused' },
+      { id: 'dropped', label: 'Dropped' },
+      { id: 'unresolved', label: 'No MAL ID' },
+    ];
+
+    function chipBucket(item) {
+      if (Number(item.id) <= 0) return 'unresolved';
+      const status = String(item.status || '').toLowerCase();
+      if (status === 'reading' || status === 'watching' || status === 'rereading' || status === 'rewatching') return 'reading';
+      if (status === 'completed') return 'completed';
+      if (status === 'plan to read' || status === 'plan to watch') return 'planned';
+      if (status === 'paused' || status === 'on-hold') return 'paused';
+      if (status === 'dropped') return 'dropped';
+      return 'other';
+    }
+
+    function renderChips() {
+      const counts = {};
+      currentAnimes.forEach(item => {
+        const bucket = chipBucket(item);
+        counts[bucket] = (counts[bucket] || 0) + 1;
+      });
+      chipRow.innerHTML = CHIPS.filter(chip => chip.id === '' || counts[chip.id])
+        .map(chip => {
+          const n = chip.id === '' ? currentAnimes.length : (counts[chip.id] || 0);
+          return `<button class="chip ${statusFilter === chip.id ? 'active' : ''}" data-chip="${chip.id}">${escapeHtml(chip.label)} ${n}</button>`;
+        }).join('');
+    }
+
+    function matchesFilters(item) {
+      const q = searchInput.value.toLowerCase().trim();
+      if (statusFilter && chipBucket(item) !== statusFilter) return false;
+      if (!q) return true;
+      const title = (item.title || '').toLowerCase();
+      const orig = (item.original || '').toLowerCase();
+      return title.includes(q) || orig.includes(q)
+        || String(item.id || '').includes(q) || String(item.anilist_id || '').includes(q);
+    }
+
+    function entryKey(entry) {
+      const id = Number(entry.id) || 0;
+      return id > 0 ? 'id:' + id : 'title:' + String(entry.title || '').trim().toLowerCase();
+    }
+
+    function fixRowHtml(item, idx) {
+      if (Number(item.id) > 0) return '';
+      return `<div class="fix-row">
+        <input class="fix-input" data-index="${idx}" placeholder="Search title or MAL ID..."
+          aria-label="Find a match for ${escapeHtml(item.original || item.title)}">
+        <button class="btn btn-secondary btn-fix" data-index="${idx}"
+          style="padding:0.1875rem 0.5rem; font-size:0.6875rem;">Find</button>
+      </div>`;
+    }
+
+    function detailRowHtml(item, idx) {
+      if (!expandedRows.has(idx)) return '';
+      const val = key => (item[key] === undefined || item[key] === null ? '' : String(item[key]));
+      const dateVal = key => {
+        const raw = val(key);
+        return raw === '0000-00-00' ? '' : raw;
+      };
+      return `<tr class="detail-row" data-detail-for="${idx}"><td colspan="8">
+        <div class="detail-grid">
+          <label>Score (0-10)
+            <input type="number" min="0" max="10" class="detail-input" data-index="${idx}" data-field="score" value="${escapeHtml(val('score'))}">
+          </label>
+          <label>Start date
+            <input type="date" class="detail-input" data-index="${idx}" data-field="start_date" value="${escapeHtml(dateVal('start_date'))}">
+          </label>
+          <label>Finish date
+            <input type="date" class="detail-input" data-index="${idx}" data-field="finish_date" value="${escapeHtml(dateVal('finish_date'))}">
+          </label>
+          <label>Tags
+            <input type="text" class="detail-input" data-index="${idx}" data-field="tags" value="${escapeHtml(val('tags'))}">
+          </label>
+          <label>Comments
+            <input type="text" class="detail-input" data-index="${idx}" data-field="comments" value="${escapeHtml(val('comments'))}">
+          </label>
+        </div>
+      </td></tr>`;
+    }
+
+    function statusPillClass(status) {
+      return STATUS_PILL[String(status || '').toLowerCase()] || 'status-completed';
+    }
+
+    function statusCellHtml(item, idx) {
+      // Per-row status. The list-wide dropdown still stamps every row as before;
+      // this only adds the ability to differ, which a real mixed list needs.
+      const current = item.status || 'Completed';
+      const set = STATUS_SETS[mediaType()];
+      const known = set.indexOf(current) >= 0;
+      const options = set.map(v =>
+        `<option value="${escapeHtml(v)}" ${v === current ? 'selected' : ''}>${escapeHtml(v)}</option>`).join('');
+      const orphan = known ? '' : `<option value="${escapeHtml(current)}" selected>${escapeHtml(current)}</option>`;
+      return `<select class="row-status status-pill ${statusPillClass(current)}" data-index="${idx}"
+        ${Number(item.id) > 0 ? '' : 'disabled'}
+        aria-label="Status for ${escapeHtml(item.title)}">${orphan}${options}</select>`;
+    }
+
     function progressHtml(item, idx) {
       const exportable = Number(item.id) > 0;
       return '<div class="progress-cell">' + progressFields().map(([field, unit]) => {
@@ -1717,20 +2372,22 @@ HTML_TEMPLATE = """<!DOCTYPE html>
 
     // Render Table
     function renderTable(items) {
-      const q = searchInput.value.toLowerCase().trim();
-      const filtered = items.filter(item => {
-        if (!q) return true;
-        const title = (item.title || '').toLowerCase();
-        const orig = (item.original || '').toLowerCase();
-        const malId = String(item.id || '');
-        const alId = String(item.anilist_id || '');
-        return title.includes(q) || orig.includes(q) || malId.includes(q) || alId.includes(q);
-      });
+      renderChips();
+      const matched = applySort(items.filter(matchesFilters));
+      const capped = showAllRows ? matched : matched.slice(0, ROW_CAP);
 
       const enabledCount = currentAnimes.filter(i => i.enabled !== false).length;
-      filterCountLabel.textContent = 'Showing ' + filtered.length + ' of ' + items.length + ' (' + enabledCount + ' selected)';
+      filterCountLabel.textContent = 'Showing ' + capped.length + ' of ' + items.length + ' (' + enabledCount + ' selected)';
 
-      if (filtered.length === 0) {
+      if (matched.length > capped.length) {
+        rowCapNotice.style.display = 'block';
+        rowCapNotice.innerHTML = `Showing the first ${capped.length} of ${matched.length} matching rows. <button id="btnShowAll" class="btn btn-secondary" style="padding:0.125rem 0.5rem; font-size:0.6875rem;">Show all</button>`;
+      } else {
+        rowCapNotice.style.display = 'none';
+        rowCapNotice.innerHTML = '';
+      }
+
+      if (capped.length === 0) {
         tableBody.innerHTML = '';
         emptyState.style.display = 'block';
         updateSelectAllState();
@@ -1738,13 +2395,13 @@ HTML_TEMPLATE = """<!DOCTYPE html>
       }
 
       emptyState.style.display = 'none';
-      tableBody.innerHTML = filtered.map(item => {
+      tableBody.innerHTML = capped.map(item => {
         const globalIdx = currentAnimes.indexOf(item);
         const malUrl = item.id ? `https://myanimelist.net/${mediaType()}/${item.id}` : '';
         const alUrl = item.anilist_id ? `https://anilist.co/${mediaType()}/${item.anilist_id}` : '';
         const hasRenamed = item.original && item.original.toLowerCase() !== item.title.toLowerCase();
         const isChecked = item.enabled !== false && Number(item.id) > 0;
-        const pillClass = STATUS_PILL[String(item.status || '').toLowerCase()] || 'status-completed';
+
         return `
           <tr class="${isChecked ? '' : 'row-excluded'}">
             <td class="cell-checkbox" style="text-align: center; cursor: pointer;">
@@ -1757,15 +2414,27 @@ HTML_TEMPLATE = """<!DOCTYPE html>
               </div>
             </td>
             <td>
-              <div class="cell-title">${escapeHtml(item.title)}</div>
-              ${hasRenamed ? `<div class="cell-original">Original: ${escapeHtml(item.original)}</div>` : ''}
-              ${pickerHtml(item, globalIdx)}
+              <div class="title-row">
+                ${item.cover ? `<img class="cover-thumb" src="${escapeHtml(item.cover)}" alt="" loading="lazy">` : ''}
+                <div style="min-width:0; flex:1;">
+                  <div class="cell-title">${escapeHtml(item.title)}</div>
+                  ${hasRenamed ? `<div class="cell-original">Original: ${escapeHtml(item.original)}</div>` : ''}
+                  ${pickerHtml(item, globalIdx)}
+                  ${fixRowHtml(item, globalIdx)}
+                </div>
+              </div>
             </td>
-            <td><span class="${Number(item.id) > 0 ? 'tag-type' : 'status-pill status-unresolved'}">${escapeHtml(Number(item.id) > 0 ? (item.type || 'TV') : 'No MAL ID')}</span></td>
+            <td><span class="${Number(item.id) > 0 ? 'tag-type' : 'status-pill status-unresolved'}">${escapeHtml(Number(item.id) > 0 ? ((item.type || 'TV') + (item.year ? ' - ' + item.year : '')) : 'No MAL ID')}</span></td>
             <td><span class="tag-eps">${mediaType() === 'manga' ? `${item.chapters || 0} ch / ${item.volumes || 0} vol` : `${item.episodes || 0} eps`}</span></td>
             <td>${progressHtml(item, globalIdx)}</td>
-            <td><span class="status-pill ${pillClass}">${escapeHtml(item.status || 'Completed')}</span></td>
+            <td>${statusCellHtml(item, globalIdx)}</td>
+            <td style="text-align:center;">
+              <button class="btn-detail" data-detail="${globalIdx}"
+                aria-label="More fields for ${escapeHtml(item.title)}"
+                title="Score, dates, tags, comments">${expandedRows.has(globalIdx) ? '&#9662;' : '&#8943;'}</button>
+            </td>
           </tr>
+          ${detailRowHtml(item, globalIdx)}
         `;
       }).join('');
 
@@ -1774,20 +2443,9 @@ HTML_TEMPLATE = """<!DOCTYPE html>
 
     selectAllCheckbox.addEventListener('change', () => {
       const isChecked = selectAllCheckbox.checked;
-      const q = searchInput.value.toLowerCase().trim();
       currentAnimes.forEach(item => {
         if (Number(item.id) <= 0) { item.enabled = false; return; }
-        if (!q) {
-          item.enabled = isChecked;
-        } else {
-          const title = (item.title || '').toLowerCase();
-          const orig = (item.original || '').toLowerCase();
-          const malId = String(item.id || '');
-          const alId = String(item.anilist_id || '');
-          if (title.includes(q) || orig.includes(q) || malId.includes(q) || alId.includes(q)) {
-            item.enabled = isChecked;
-          }
-        }
+        if (matchesFilters(item)) item.enabled = isChecked;
       });
       renderTable(currentAnimes);
       updateStatsAndExport();
@@ -1805,6 +2463,35 @@ HTML_TEMPLATE = """<!DOCTYPE html>
         renderTable(currentAnimes);
         updateStatsAndExport();
         showToast('Match changed to ' + pick.title);
+        return;
+      }
+
+      if (e.target && e.target.classList.contains('detail-input')) {
+        const idx = parseInt(e.target.dataset.index, 10);
+        const field = e.target.dataset.field;
+        const item = currentAnimes[idx];
+        if (!item || !field) return;
+        const raw = e.target.value.trim();
+        if (raw === '') {
+          delete item[field];
+        } else if (field === 'score') {
+          item.score = Math.max(0, Math.min(10, Math.floor(Number(raw) || 0)));
+          e.target.value = item.score;
+        } else {
+          item[field] = raw;
+        }
+        updateStatsAndExport();
+        return;
+      }
+
+      if (e.target && e.target.classList.contains('row-status')) {
+        const idx = parseInt(e.target.dataset.index, 10);
+        const item = currentAnimes[idx];
+        if (!item) return;
+        item.status = e.target.value;
+        // Recolour in place rather than re-rendering, so the select keeps focus.
+        e.target.className = 'row-status status-pill ' + statusPillClass(item.status);
+        updateStatsAndExport();
         return;
       }
 
@@ -1841,8 +2528,65 @@ HTML_TEMPLATE = """<!DOCTYPE html>
       }
     });
 
+    async function repairRow(idx, queryText) {
+      const item = currentAnimes[idx];
+      const text = String(queryText || '').trim();
+      if (!item || !text) return;
+      const digitsOnly = text.length > 0 && Array.from(text).every(ch => ch >= '0' && ch <= '9');
+      const url = digitsOnly ? '/api/lookup' : '/api/search';
+      const body = digitsOnly
+        ? { mal_id: text, media_type: mediaType() }
+        : { query: text, media_type: mediaType() };
+      try {
+        const res = await fetch(url, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(body),
+        });
+        const payload = await res.json().catch(() => ({}));
+        if (!res.ok || !payload.ok) {
+          showToast(payload.error || 'Nothing found for that search', 'warning');
+          return;
+        }
+        const found = digitsOnly ? payload.entry : (payload.entries || [])[0];
+        const list = digitsOnly ? [payload.entry] : (payload.entries || []);
+        if (!found) {
+          showToast('Nothing found for that search', 'warning');
+          return;
+        }
+        // Replace identity and metadata; the user's own choices stay put.
+        Object.assign(item, found, { enabled: Number(found.id) > 0 });
+        if (list.length > 1) item.candidates = list;
+        renderTable(currentAnimes);
+        updateStatsAndExport();
+        showToast('Matched to ' + found.title);
+      } catch (err) {
+        showToast('Could not reach the local server', 'error');
+      }
+    }
+
     // Allow clicking anywhere inside the checkbox cell to toggle
     tableBody.addEventListener('click', (e) => {
+      const detailBtn = e.target.closest('.btn-detail');
+      if (detailBtn) {
+        const idx = parseInt(detailBtn.dataset.detail, 10);
+        if (expandedRows.has(idx)) {
+          expandedRows.delete(idx);
+        } else {
+          expandedRows.add(idx);
+        }
+        renderTable(currentAnimes);
+        return;
+      }
+
+      const fixBtn = e.target.closest('.btn-fix');
+      if (fixBtn) {
+        const idx = parseInt(fixBtn.dataset.index, 10);
+        const input = tableBody.querySelector(`.fix-input[data-index="${idx}"]`);
+        if (input) repairRow(idx, input.value);
+        return;
+      }
+
       const cell = e.target.closest('.cell-checkbox');
       if (cell && e.target.tagName !== 'INPUT') {
         const cb = cell.querySelector('.row-checkbox');
@@ -1864,8 +2608,51 @@ HTML_TEMPLATE = """<!DOCTYPE html>
       }
     });
 
+    tableBody.addEventListener('keydown', (e) => {
+      if (e.key !== 'Enter' || !e.target.classList.contains('fix-input')) return;
+      e.preventDefault();
+      repairRow(parseInt(e.target.dataset.index, 10), e.target.value);
+    });
+
     searchInput.addEventListener('input', () => {
+      showAllRows = false;
       renderTable(currentAnimes);
+    });
+
+    chipRow.addEventListener('click', (e) => {
+      const chip = e.target.closest('.chip');
+      if (!chip) return;
+      statusFilter = chip.dataset.chip || '';
+      showAllRows = false;
+      renderTable(currentAnimes);
+      updateStats();
+    });
+
+    rowCapNotice.addEventListener('click', (e) => {
+      if (!e.target.closest('#btnShowAll')) return;
+      showAllRows = true;
+      renderTable(currentAnimes);
+    });
+
+    document.querySelectorAll('th.sortable').forEach(th => {
+      th.addEventListener('click', () => {
+        const key = th.dataset.sort;
+        if (sortKey !== key) {
+          sortKey = key;
+          sortDir = 1;
+        } else if (sortDir === 1) {
+          sortDir = -1;
+        } else {
+          sortKey = '';
+          sortDir = 0;
+        }
+        document.querySelectorAll('th.sortable .sort-mark').forEach(mark => { mark.textContent = ''; });
+        if (sortKey) {
+          const mark = th.querySelector('.sort-mark');
+          if (mark) mark.textContent = sortDir === 1 ? '^' : 'v';
+        }
+        renderTable(currentAnimes);
+      });
     });
 
     selectStatus.addEventListener('change', () => {
@@ -1879,6 +2666,93 @@ HTML_TEMPLATE = """<!DOCTYPE html>
       const newScore = parseInt(inputScore.value, 10) || 0;
       currentAnimes.forEach(item => { item.score = newScore; });
       if (currentAnimes.length > 0) updateStatsAndExport();
+    });
+
+    async function sendRunControl(action) {
+      try {
+        const res = await fetch('/api/run-control', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ action: action, run_id: activeRunId }),
+        });
+        const payload = await res.json().catch(() => ({}));
+        if (!res.ok || !payload.ok) showToast(payload.error || 'Could not control the run', 'warning');
+      } catch (e) {
+        showToast('Could not reach the local server', 'error');
+      }
+    }
+
+    btnCancel.addEventListener('click', () => {
+      btnCancel.disabled = true;
+      sendRunControl('cancel');
+    });
+
+    btnPause.addEventListener('click', () => {
+      isPaused = !isPaused;
+      btnPause.textContent = isPaused ? 'Resume' : 'Pause';
+      sendRunControl(isPaused ? 'pause' : 'resume');
+    });
+
+    btnPreview.addEventListener('click', async () => {
+      try {
+        const res = await fetch('/api/preview-xml?media=' + mediaType());
+        const payload = await res.json().catch(() => ({}));
+        if (!res.ok || !payload.ok) {
+          showToast(payload.error || 'Nothing to preview yet', 'warning');
+          return;
+        }
+        previewTitle.textContent = payload.name + ' (' + payload.bytes.toLocaleString() + ' bytes'
+          + (payload.truncated ? ', truncated' : '') + ')';
+        previewBody.textContent = payload.xml;
+        previewModal.classList.add('show');
+      } catch (e) {
+        showToast('Could not reach the local server', 'error');
+      }
+    });
+
+    btnPreviewClose.addEventListener('click', () => previewModal.classList.remove('show'));
+    previewModal.addEventListener('click', (e) => {
+      if (e.target === previewModal) previewModal.classList.remove('show');
+    });
+    document.addEventListener('keydown', (e) => {
+      if (e.key === 'Escape') previewModal.classList.remove('show');
+      if (e.key === 'Enter' && (e.ctrlKey || e.metaKey) && !isProcessing) {
+        e.preventDefault();
+        btnProcess.click();
+      }
+    });
+    btnPreviewCopy.addEventListener('click', async () => {
+      try {
+        await navigator.clipboard.writeText(previewBody.textContent || '');
+        showToast('XML copied');
+      } catch (e) {
+        showToast('Clipboard blocked by the browser', 'warning');
+      }
+    });
+
+    toggleArchive.addEventListener('change', saveState);
+
+    ['dragenter', 'dragover'].forEach(name => {
+      txtArea.addEventListener(name, (e) => {
+        e.preventDefault();
+        txtArea.style.borderColor = 'var(--border-focus)';
+      });
+    });
+    ['dragleave', 'drop'].forEach(name => {
+      txtArea.addEventListener(name, () => { txtArea.style.borderColor = ''; });
+    });
+    txtArea.addEventListener('drop', async (e) => {
+      e.preventDefault();
+      const file = e.dataTransfer && e.dataTransfer.files && e.dataTransfer.files[0];
+      if (!file) return;
+      try {
+        txtArea.value = await file.text();
+        updateLineCounter();
+        saveState();
+        showToast('Loaded ' + file.name);
+      } catch (err) {
+        showToast('Could not read that file', 'error');
+      }
     });
 
     function escapeHtml(str) {
@@ -1912,9 +2786,18 @@ HTML_TEMPLATE = """<!DOCTYPE html>
       applyTheme(themeMode);
     });
 
-    // Initial load
-    updateMediaTypeUI(false);
-    loadData();
+    window.addEventListener('beforeunload', (e) => {
+      saveStateNow();
+      if (!isProcessing) return;
+      e.preventDefault();
+      e.returnValue = '';
+    });
+
+    // Initial load: restore the previous session, or start clean.
+    if (!restoreState()) {
+      updateMediaTypeUI(false);
+      loadData();
+    }
   </script>
 </body>
 </html>
@@ -1950,30 +2833,62 @@ class MalGuiHandler(BaseHTTPRequestHandler):
             self.wfile.write(body)
             return
 
-        elif path == "/api/download/xml":
-            if not EXPORT_XML_PATH.is_file():
-                self.send_error(HTTPStatus.NOT_FOUND, "Export XML not found")
+        elif path in ("/api/download/xml", "/api/download/gz"):
+            wants_gz = path.endswith("gz")
+            requested = urllib.parse.parse_qs(parsed.query).get("media", [None])[0]
+            if requested is None:
+                requested = EXPORT_MEDIA_TYPE          # omitted = whatever was last built
+            if requested not in ("anime", "manga"):
+                self.send_json({"ok": False, "error": "media must be anime or manga"}, status=400)
                 return
-            content = EXPORT_XML_PATH.read_bytes()
+            xml_path, gz_path = _export_paths(requested)
+            xml_name, gz_name = _export_filenames(requested)
+            target, filename = (gz_path, gz_name) if wants_gz else (xml_path, xml_name)
+
+            archive = urllib.parse.parse_qs(parsed.query).get("archive", [None])[0]
+            if archive:
+                # Whitelist the name outright: no separators, no traversal, and it
+                # must sit in the export directory next to the live files.
+                allowed = archive and set(archive) <= ARCHIVE_NAME_CHARS and ".." not in archive
+                if not allowed or not archive.endswith(".xml.gz" if wants_gz else ".xml"):
+                    self.send_json({"ok": False, "error": "invalid archive name"}, status=400)
+                    return
+                target = xml_path.parent / archive
+                filename = archive
+                if not target.is_file():
+                    self.send_error(HTTPStatus.NOT_FOUND, "Archive not found")
+                    return
+            if not target.is_file():
+                self.send_error(HTTPStatus.NOT_FOUND, f"No {requested} export has been generated yet")
+                return
+            content = target.read_bytes()
             self.send_response(HTTPStatus.OK)
-            self.send_header("Content-Type", "application/xml; charset=utf-8")
-            self.send_header("Content-Disposition", f'attachment; filename="{"myanimelist_manga_export.xml" if EXPORT_MEDIA_TYPE == "manga" else "myanimelist_export.xml"}"')
+            self.send_header("Content-Type", "application/gzip" if wants_gz else "application/xml; charset=utf-8")
+            self.send_header("Content-Disposition", f'attachment; filename="{filename}"')
             self.send_header("Content-Length", str(len(content)))
             self.end_headers()
             self.wfile.write(content)
             return
 
-        elif path == "/api/download/gz":
-            if not EXPORT_GZ_PATH.is_file():
-                self.send_error(HTTPStatus.NOT_FOUND, "Export GZ not found")
+        elif path == "/api/export-state":
+            self.send_json(_export_state())
+            return
+
+        elif path == "/api/preview-xml":
+            query = urllib.parse.parse_qs(parsed.query)
+            requested = query.get("media", [EXPORT_MEDIA_TYPE])[0]
+            if requested not in ("anime", "manga"):
+                self.send_json({"ok": False, "error": "media must be anime or manga"}, status=400)
                 return
-            content = EXPORT_GZ_PATH.read_bytes()
-            self.send_response(HTTPStatus.OK)
-            self.send_header("Content-Type", "application/gzip")
-            self.send_header("Content-Disposition", f'attachment; filename="{"myanimelist_manga_export.xml.gz" if EXPORT_MEDIA_TYPE == "manga" else "myanimelist_export.xml.gz"}"')
-            self.send_header("Content-Length", str(len(content)))
-            self.end_headers()
-            self.wfile.write(content)
+            xml_path, _ = _export_paths(requested)
+            if not xml_path.is_file():
+                self.send_json({"ok": False, "error": f"No {requested} export has been generated yet"}, status=404)
+                return
+            raw = xml_path.read_bytes()
+            truncated = len(raw) > MAX_PREVIEW_BYTES
+            text = raw[:MAX_PREVIEW_BYTES].decode("utf-8", errors="replace")
+            self.send_json({"ok": True, "xml": text, "truncated": truncated,
+                            "name": xml_path.name, "bytes": len(raw)})
             return
 
         else:
@@ -2011,6 +2926,11 @@ class MalGuiHandler(BaseHTTPRequestHandler):
                 self.send_json({"ok": False, "error": f"No valid {media_type} titles found in the list."}, status=400)
                 return
 
+            if not _run_lock.acquire(blocking=False):
+                self.send_json({"ok": False, "error": "A run is already in progress"}, status=409)
+                return
+            run_id, control = _register_run()
+
             self.send_response(HTTPStatus.OK)
             self.send_header("Content-Type", "text/event-stream; charset=utf-8")
             self.send_header("Cache-Control", "no-cache")
@@ -2030,53 +2950,104 @@ class MalGuiHandler(BaseHTTPRequestHandler):
             def notify_rate_limit(seconds: float) -> None:
                 send_event({"type": "rate_limit", "seconds": round(seconds)})
 
+            send_event({"type": "started", "run_id": run_id, "total": total_count})
+
+            def wait_while_paused() -> bool:
+                """Block while paused. Returns False if the run was cancelled."""
+                announced = False
+                while control["pause"].is_set() and not control["cancel"].is_set():
+                    if not announced:
+                        send_event({"type": "paused"})
+                        announced = True
+                    time.sleep(0.2)
+                if announced and not control["cancel"].is_set():
+                    send_event({"type": "resumed"})
+                return not control["cancel"].is_set()
+
+            cancelled = False
             set_rate_limit_notifier(notify_rate_limit)
-            for idx, raw_title in enumerate(cleaned_titles, start=1):
+            try:
+              for idx, raw_title in enumerate(cleaned_titles, start=1):
+                  # Checkpoint between titles: a partially resolved run is still useful.
+                  if not wait_while_paused() or control["cancel"].is_set():
+                      cancelled = True
+                      break
+                  send_event({
+                      "type": "progress",
+                      "current": idx,
+                      "total": total_count,
+                      "title": raw_title,
+                      "percent": round(((idx - 1) / total_count) * 100, 1),
+                      "interval": current_interval(),   # live pacing, not the starting constant
+                  })
+
+                  if media_type == "manga":
+                      entries = resolve_manga_entries(raw_title, session_cache=session_cache, expand_sequels=expand_sequels)
+                  else:
+                      entries = resolve_anime_entries(raw_title, session_cache=session_cache, expand_sequels=expand_sequels)
+                  batch_items = []
+                  for resolved in entries:
+                      item = dict(resolved)
+                      item["original"] = raw_title
+                      item["status"] = default_status
+                      item["score"] = default_score
+                      resolved_list.append(item)
+                      batch_items.append(item)
+
+                  primary_title = entries[0]["title"] if entries else raw_title
+                  send_event({
+                      "type": "progress",
+                      "current": idx,
+                      "total": total_count,
+                      "title": raw_title,
+                      "resolved_title": primary_title,
+                      "percent": round((idx / total_count) * 100, 1),
+                      # Stream the rows as they resolve so the table fills live instead of
+                      # staying empty for the whole run. The client dedupes the same way
+                      # deduplicate_entries() does, and `complete` remains authoritative.
+                      "entries": batch_items,
+                  })
+
+            finally:
+                set_rate_limit_notifier(None)
+                _unregister_run(run_id)
+                _run_lock.release()
+
+            if cancelled:
+                # Write nothing: the files on disk still belong to the last finished
+                # run. The client re-syncs from what it shows, if the user keeps it.
                 send_event({
-                    "type": "progress",
-                    "current": idx,
-                    "total": total_count,
-                    "title": raw_title,
-                    "percent": round(((idx - 1) / total_count) * 100, 1),
-                    "interval": MIN_REQUEST_INTERVAL,
+                    "type": "cancelled",
+                    "entries": deduplicate_entries(resolved_list),
+                    "resolved": len(resolved_list),
                 })
-
-                if media_type == "manga":
-                    entries = resolve_manga_entries(raw_title, session_cache=session_cache, expand_sequels=expand_sequels)
-                else:
-                    entries = resolve_anime_entries(raw_title, session_cache=session_cache, expand_sequels=expand_sequels)
-                for resolved in entries:
-                    item = dict(resolved)
-                    item["original"] = raw_title
-                    item["status"] = default_status
-                    item["score"] = default_score
-                    resolved_list.append(item)
-
-                primary_title = entries[0]["title"] if entries else raw_title
-                send_event({
-                    "type": "progress",
-                    "current": idx,
-                    "total": total_count,
-                    "title": raw_title,
-                    "resolved_title": primary_title,
-                    "percent": round((idx / total_count) * 100, 1),
-                })
-
-            set_rate_limit_notifier(None)
+                self.close_connection = True
+                return
 
             unique_entries = deduplicate_entries(resolved_list)
 
             # Build media-specific XML & GZ. Invalid MAL IDs are omitted by the builders.
-            xml_str = (
-                build_mal_manga_xml(unique_entries, default_status=default_status, default_score=default_score)
-                if media_type == "manga"
-                else build_mal_xml(unique_entries, default_status=default_status, default_score=default_score)
-            )
+            try:
+                xml_str = (
+                    build_mal_manga_xml(unique_entries, default_status=default_status, default_score=default_score)
+                    if media_type == "manga"
+                    else build_mal_xml(unique_entries, default_status=default_status, default_score=default_score)
+                )
+            except ValueError as exc:
+                # Headers are already sent, so this cannot be a 400 - tell the client
+                # over the stream instead of dying with a traceback and no event.
+                send_event({"type": "error", "error": str(exc)})
+                self.close_connection = True
+                return
             xml_bytes = xml_str.encode("utf-8")
 
-            EXPORT_XML_PATH.write_bytes(xml_bytes)
-            with open(EXPORT_GZ_PATH, "wb") as f_out:
-                f_out.write(gzip.compress(xml_bytes, compresslevel=9))
+            xml_path, gz_path = _export_paths(media_type)
+            xml_path.write_bytes(xml_bytes)
+            gz_bytes = gzip.compress(xml_bytes, compresslevel=9)
+            with open(gz_path, "wb") as f_out:
+                f_out.write(gz_bytes)
+            if data.get("archive"):
+                _write_archive(media_type, xml_bytes, gz_bytes)
 
             send_event({
                 "type": "complete",
@@ -2087,6 +3058,59 @@ class MalGuiHandler(BaseHTTPRequestHandler):
             self.close_connection = True
             return
 
+        elif path == "/api/run-control":
+            action = data.get("action")
+            run_id = data.get("run_id")
+            if action not in ("cancel", "pause", "resume"):
+                self.send_json({"ok": False, "error": "action must be cancel, pause or resume"}, status=400)
+                return
+            with _runs_guard:
+                control = _active_runs.get(run_id) if run_id else (
+                    next(iter(_active_runs.values())) if len(_active_runs) == 1 else None)
+            if control is None:
+                self.send_json({"ok": False, "error": "no matching run in progress"}, status=404)
+                return
+            if action == "cancel":
+                control["cancel"].set()
+                control["pause"].clear()      # never leave a cancelled run parked
+            elif action == "pause":
+                control["pause"].set()
+            else:
+                control["pause"].clear()
+            self.send_json({"ok": True, "action": action})
+            return
+
+        elif path == "/api/search":
+            media_type = "manga" if data.get("media_type") == "manga" else "anime"
+            query = str(data.get("query", "")).strip()
+            if not query:
+                self.send_json({"ok": False, "error": "query is required"}, status=400)
+                return
+            try:
+                entries = search_candidates(query, media_type)
+            except Exception as exc:
+                self.send_json({"ok": False, "error": str(exc)}, status=502)
+                return
+            self.send_json({"ok": True, "entries": entries})
+            return
+
+        elif path == "/api/lookup":
+            media_type = "manga" if data.get("media_type") == "manga" else "anime"
+            raw_id = str(data.get("mal_id", "")).strip()
+            if not raw_id.isdigit() or int(raw_id) <= 0:
+                self.send_json({"ok": False, "error": "mal_id must be a positive whole number"}, status=400)
+                return
+            try:
+                entry = lookup_by_mal_id(raw_id, media_type)
+            except Exception as exc:
+                self.send_json({"ok": False, "error": str(exc)}, status=502)
+                return
+            if not entry or int(entry.get("id") or 0) <= 0:
+                self.send_json({"ok": False, "error": f"No {media_type} with MAL ID {raw_id}"}, status=404)
+                return
+            self.send_json({"ok": True, "entry": entry})
+            return
+
         elif path == "/api/update-export":
             media_type = "manga" if data.get("media_type") == "manga" else "anime"
             EXPORT_MEDIA_TYPE = media_type
@@ -2094,22 +3118,31 @@ class MalGuiHandler(BaseHTTPRequestHandler):
             default_status = data.get("status", "Completed")
             default_score = int(data.get("score", 0))
 
+            xml_path, gz_path = _export_paths(media_type)
+
             if not entries:
-                EXPORT_XML_PATH.unlink(missing_ok=True)
-                EXPORT_GZ_PATH.unlink(missing_ok=True)
-                self.send_json({"ok": True, "count": 0})
+                # Deliberately keep whatever is on disk. Deleting here meant that
+                # merely switching media type silently destroyed a finished export.
+                self.send_json({"ok": True, "count": 0, "kept_existing": xml_path.is_file()})
                 return
 
-            xml_str = (
-                build_mal_manga_xml(entries, default_status=default_status, default_score=default_score)
-                if media_type == "manga"
-                else build_mal_xml(entries, default_status=default_status, default_score=default_score)
-            )
+            try:
+                xml_str = (
+                    build_mal_manga_xml(entries, default_status=default_status, default_score=default_score)
+                    if media_type == "manga"
+                    else build_mal_xml(entries, default_status=default_status, default_score=default_score)
+                )
+            except ValueError as exc:
+                self.send_json({"ok": False, "error": str(exc)}, status=400)
+                return
             xml_bytes = xml_str.encode("utf-8")
 
-            EXPORT_XML_PATH.write_bytes(xml_bytes)
-            with open(EXPORT_GZ_PATH, "wb") as f_out:
-                f_out.write(gzip.compress(xml_bytes, compresslevel=9))
+            xml_path.write_bytes(xml_bytes)
+            gz_bytes = gzip.compress(xml_bytes, compresslevel=9)
+            with open(gz_path, "wb") as f_out:
+                f_out.write(gz_bytes)
+            if data.get("archive"):
+                _write_archive(media_type, xml_bytes, gz_bytes)
 
             self.send_json({"ok": True, "count": len(entries)})
             return

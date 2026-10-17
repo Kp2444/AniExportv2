@@ -20,8 +20,13 @@ class MangaGuiEndpointTests(unittest.TestCase):
                 "id": 321, "anilist_id": 654, "title": "Test Manga",
                 "type": "Manga", "chapters": 42, "volumes": 4,
             }]
-            with patch.object(gui, "EXPORT_XML_PATH", output / "export.xml"), \
-                 patch.object(gui, "EXPORT_GZ_PATH", output / "export.xml.gz"), \
+            # Manga writes to its own pair of files now, so redirect both pairs and
+            # assert against the manga one. Redirecting the anime pair as well keeps
+            # any stray write inside the temp dir instead of the repo.
+            with patch.object(gui, "EXPORT_MANGA_XML_PATH", output / "export.xml"), \
+                 patch.object(gui, "EXPORT_MANGA_GZ_PATH", output / "export.xml.gz"), \
+                 patch.object(gui, "EXPORT_XML_PATH", output / "anime.xml"), \
+                 patch.object(gui, "EXPORT_GZ_PATH", output / "anime.xml.gz"), \
                  patch.object(gui, "resolve_manga_entries", return_value=resolved):
                 server = ThreadingHTTPServer(("127.0.0.1", 0), gui.MalGuiHandler)
                 thread = threading.Thread(target=server.serve_forever, daemon=True)
@@ -48,6 +53,43 @@ class MangaGuiEndpointTests(unittest.TestCase):
                     server.shutdown()
                     server.server_close()
                     thread.join(timeout=2)
+
+
+    def test_progress_events_stream_resolved_rows(self):
+        """Rows must reach the client as they resolve, not only at the end."""
+        with tempfile.TemporaryDirectory() as directory:
+            output = Path(directory)
+            def fake(title, session_cache=None, expand_sequels=False):
+                return [{"id": 100 + len(title), "anilist_id": 1, "title": title.upper(),
+                         "type": "Manga", "chapters": 5, "volumes": 1}]
+            with patch.object(gui, "EXPORT_MANGA_XML_PATH", output / "m.xml"),                  patch.object(gui, "EXPORT_MANGA_GZ_PATH", output / "m.xml.gz"),                  patch.object(gui, "resolve_manga_entries", side_effect=fake):
+                server = ThreadingHTTPServer(("127.0.0.1", 0), gui.MalGuiHandler)
+                thread = threading.Thread(target=server.serve_forever, daemon=True)
+                thread.start()
+                try:
+                    request = urllib.request.Request(
+                        f"http://127.0.0.1:{server.server_port}/api/process",
+                        data=json.dumps({"content": "aa" + chr(10) + "bbb",
+                                         "media_type": "manga",
+                                         "status": "Reading", "score": 0}).encode("utf-8"),
+                        headers={"Content-Type": "application/json"}, method="POST",
+                    )
+                    body = urllib.request.urlopen(request, timeout=10).read().decode("utf-8")
+                finally:
+                    server.shutdown()
+                    server.server_close()
+                    thread.join(timeout=2)
+            blocks = body.split(chr(10) + chr(10))
+            events = [json.loads(c[6:]) for c in blocks
+                      if c.strip().startswith("data: ")]
+            streamed = [e for e in events if e.get("type") == "progress" and e.get("entries")]
+            self.assertEqual(len(streamed), 2, "each resolved title should stream its rows")
+            self.assertEqual(streamed[0]["entries"][0]["title"], "AA")
+            # streamed rows carry everything the table needs to render immediately
+            for key in ("id", "anilist_id", "type", "chapters", "status", "score", "original"):
+                self.assertIn(key, streamed[0]["entries"][0])
+            final = [e for e in events if e.get("type") == "complete"][0]
+            self.assertEqual([e["title"] for e in final["entries"]], ["AA", "BBB"])
 
 
 if __name__ == "__main__":

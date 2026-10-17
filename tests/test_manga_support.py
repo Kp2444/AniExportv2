@@ -137,6 +137,28 @@ class MangaExportTests(unittest.TestCase):
         self.assertEqual([c["id"] for c in picks], [44347])
         self.assertEqual(picks[0]["title"], "Real")
 
+    def test_entry_dates_are_emitted_and_validated(self):
+        root = ET.fromstring(gen.build_mal_manga_xml([
+            {"id": 1, "title": "Dated", "chapters": 10, "status": "Completed",
+             "start_date": "2024-03-01", "finish_date": "2025-01-15"},
+        ]))
+        manga = root.find("manga")
+        self.assertEqual(manga.findtext("my_start_date"), "2024-03-01")
+        self.assertEqual(manga.findtext("my_finish_date"), "2025-01-15")
+
+    def test_missing_dates_keep_the_mal_placeholder(self):
+        for builder, tag in ((gen.build_mal_xml, "anime"), (gen.build_mal_manga_xml, "manga")):
+            root = ET.fromstring(builder([{"id": 1, "title": "X", "status": "Completed"}]))
+            node = root.find(tag)
+            self.assertEqual(node.findtext("my_start_date"), "0000-00-00")
+            self.assertEqual(node.findtext("my_finish_date"), "0000-00-00")
+
+    def test_malformed_date_is_rejected(self):
+        for bad in ("2024-13-45", "01/03/2024", "2024-3-1", "not a date"):
+            with self.assertRaises(ValueError, msg=bad):
+                gen.build_mal_manga_xml([
+                    {"id": 1, "title": "X", "status": "Completed", "start_date": bad}])
+
     def test_deduplicate_uses_mal_id(self):
         entries = [
             {"id": 55, "title": "One"},

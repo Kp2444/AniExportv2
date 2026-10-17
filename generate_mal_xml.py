@@ -7,6 +7,7 @@ from __future__ import annotations
 import argparse
 import gzip
 import json
+from datetime import datetime
 from pathlib import Path
 import re
 import sys
@@ -36,16 +37,44 @@ MAX_RATE_LIMIT_WAITS = 6
 # ponytail: process-wide lock serialises every AniList call to stay under the
 # 30/min cap. Correct because the cap is per-IP, not per-thread. Swap for a
 # token bucket only if AniList ever allows bursts.
+# Starting interval, sized for the 30 req/min the API serves while degraded.
+# AniList's documented nominal limit is 90/min, so the real spacing is derived
+# from the X-RateLimit-Limit header once one has been seen.
 MIN_REQUEST_INTERVAL = 2.1
+MIN_INTERVAL_FLOOR = 0.7      # 90 req/min
+MIN_INTERVAL_CEILING = 2.5
 _throttle_lock = threading.Lock()
 _last_request_at = 0.0
+_observed_limit: Optional[int] = None
+
+
+def _record_rate_limit(headers: Any) -> None:
+    """Remember AniList's advertised per-minute limit so pacing can follow it."""
+    global _observed_limit
+    try:
+        value = int(headers.get("X-RateLimit-Limit"))
+    except (AttributeError, TypeError, ValueError):
+        return
+    if value > 0:
+        _observed_limit = value
+
+
+def current_interval() -> float:
+    """Seconds to leave between requests, from the limit AniList last reported.
+
+    The 5% margin keeps us just under the cap; the floor keeps the undocumented
+    burst limiter happy even if a very large limit is ever advertised.
+    """
+    if not _observed_limit:
+        return MIN_REQUEST_INTERVAL
+    return min(MIN_INTERVAL_CEILING, max(MIN_INTERVAL_FLOOR, 60.0 / _observed_limit * 1.05))
 
 
 def _throttle() -> None:
-    """Space out requests so AniList's 30/min limit is not tripped in the first place."""
+    """Space out requests so AniList's per-minute limit is not tripped at all."""
     global _last_request_at
     with _throttle_lock:
-        wait = MIN_REQUEST_INTERVAL - (time.monotonic() - _last_request_at)
+        wait = current_interval() - (time.monotonic() - _last_request_at)
         if wait > 0:
             time.sleep(wait)
         _last_request_at = time.monotonic()
@@ -132,6 +161,9 @@ query ($search: String) {
       id
       idMal
       title { english romaji }
+      startDate { year }
+      popularity
+      coverImage { medium }
       format
       episodes
       status
@@ -176,6 +208,9 @@ query ($search: String) {
       id
       idMal
       title { english romaji }
+      startDate { year }
+      popularity
+      coverImage { medium }
       format
       chapters
       volumes
@@ -210,6 +245,24 @@ query ($id: Int) {
         }
       }
     }
+  }
+}
+"""
+
+ANILIST_BY_MAL_ID_QUERY = """
+query ($idMal: Int, $type: MediaType) {
+  Media (idMal: $idMal, type: $type) {
+    id
+    idMal
+    title { english romaji }
+    format
+    episodes
+    chapters
+    volumes
+    status
+    startDate { year }
+    popularity
+    coverImage { medium }
   }
 }
 """
@@ -286,6 +339,9 @@ def _parse_media_node(media: Dict[str, Any], fallback_title: str = "") -> Dict[s
         "title": official_title,
         "type": series_type,
         "episodes": eps,
+        "year": (media.get("startDate") or {}).get("year"),
+        "popularity": int(media.get("popularity") or 0),
+        "cover": (media.get("coverImage") or {}).get("medium"),
     }
 
 
@@ -334,6 +390,9 @@ def _parse_manga_node(media: Dict[str, Any], fallback_title: str = "") -> Dict[s
         "type": series_type,
         "chapters": int(media.get("chapters") or 0),
         "volumes": int(media.get("volumes") or 0),
+        "year": (media.get("startDate") or {}).get("year"),
+        "popularity": int(media.get("popularity") or 0),
+        "cover": (media.get("coverImage") or {}).get("medium"),
     }
 
 
@@ -352,6 +411,7 @@ def _execute_anilist_request(query: str, variables: Dict[str, Any], max_retries:
             _throttle()
             req = urllib.request.Request(ANILIST_API_URL, data=payload, headers=headers)
             with urllib.request.urlopen(req, timeout=12) as response:
+                _record_rate_limit(response.headers)
                 result = json.loads(response.read().decode("utf-8"))
                 media = (result.get("data") or {}).get(result_key)
                 # AniList can report throttling/outages in a 200 body; retry those
@@ -361,6 +421,7 @@ def _execute_anilist_request(query: str, variables: Dict[str, Any], max_retries:
                     raise RuntimeError(f"AniList transient error: {sorted(st for st in statuses if st)}")
                 return media
         except urllib.error.HTTPError as e:
+            _record_rate_limit(e.headers)
             if e.code == 429:
                 # AniList allows 30 requests/minute. Honour Retry-After and do not
                 # spend a retry attempt on it, or long lists lose most of their titles.
@@ -381,7 +442,9 @@ def _execute_anilist_request(query: str, variables: Dict[str, Any], max_retries:
                 time.sleep(delay)
                 continue
             attempt += 1
-            if e.code == 404 or attempt >= max_retries:
+            # 400 means the query itself is wrong - retrying cannot fix it and only
+            # burns rate limit, so fail fast like a 404.
+            if e.code in (400, 404) or attempt >= max_retries:
                 return None
             time.sleep(1.0)
         except Exception:
@@ -582,6 +645,45 @@ def resolve_manga_entries(
     return [dict(e) for e in entries]
 
 
+def lookup_by_mal_id(mal_id: Any, media_type: str, max_retries: int = 3) -> Optional[Dict[str, Any]]:
+    """Claim a specific MAL ID directly, bypassing title search.
+
+    The only reliable fix when a title cannot be matched by name: the user reads
+    the ID off MyAnimeList and we ask AniList for exactly that entry.
+    """
+    try:
+        numeric = int(str(mal_id).strip())
+    except (TypeError, ValueError):
+        return None
+    if numeric <= 0:
+        return None
+    media = _execute_anilist_request(
+        ANILIST_BY_MAL_ID_QUERY,
+        {"idMal": numeric, "type": "MANGA" if media_type == "manga" else "ANIME"},
+        max_retries=max_retries,
+    )
+    if not media:
+        return None
+    parse = _parse_manga_node if media_type == "manga" else _parse_media_node
+    return parse(media)
+
+
+def search_candidates(query: str, media_type: str, max_retries: int = 3) -> List[Dict[str, Any]]:
+    """Importable matches for a free-text query, best first.
+
+    Reuses the single-title resolver so the ranking stays identical to a normal run.
+    """
+    fetch = fetch_manga_info_online if media_type == "manga" else fetch_anime_info_online
+    results = fetch(query, max_retries=max_retries)
+    if not results:
+        return []
+    root = results[0]
+    candidates = root.get("candidates") or []
+    if candidates:
+        return candidates
+    return [root] if int(root.get("id") or 0) > 0 else []
+
+
 def deduplicate_entries(entries: Sequence[Dict[str, Any]]) -> List[Dict[str, Any]]:
     """
     Deduplicates entries preserving first occurrence order.
@@ -601,6 +703,27 @@ def deduplicate_entries(entries: Sequence[Dict[str, Any]]) -> List[Dict[str, Any
 # AniList offers "Paused" and "Rereading"/"Rewatching"; MAL's XML has neither.
 # Paused is MAL's On-Hold, and a reread is MAL's Reading plus the my_rereading flag.
 REREAD_STATUSES = {"rereading", "re-reading", "rewatching", "re-watching"}
+
+
+def _mal_date(value: Any) -> str:
+    """Validate an entry date for MAL XML.
+
+    Empty/missing stays MAL's "unset" placeholder, so every existing caller is
+    unaffected. Anything else must be a real YYYY-MM-DD date; a malformed value
+    raises rather than silently exporting a date MAL will reject.
+    """
+    text = str(value or "").strip()
+    if not text or text == "0000-00-00":
+        return "0000-00-00"
+    try:
+        parsed = datetime.strptime(text, "%Y-%m-%d")
+    except ValueError:
+        raise ValueError(f"Invalid date {value!r}: expected YYYY-MM-DD") from None
+    # strptime accepts unpadded input like 2024-3-1; MAL wants it zero-padded, so
+    # round-trip the parse and reject anything that does not come back identical.
+    if parsed.strftime("%Y-%m-%d") != text:
+        raise ValueError(f"Invalid date {value!r}: expected zero-padded YYYY-MM-DD")
+    return text
 
 
 def _is_repeat_status(status: Any) -> bool:
@@ -693,8 +816,8 @@ def build_mal_xml(
             f'    <series_type>{series_type}</series_type>',
             f'    <series_episodes>{eps}</series_episodes>',
             f'    <my_watched_episodes>{watched_eps}</my_watched_episodes>',
-            '    <my_start_date>0000-00-00</my_start_date>',
-            '    <my_finish_date>0000-00-00</my_finish_date>',
+            f'    <my_start_date>{_mal_date(entry.get("start_date"))}</my_start_date>',
+            f'    <my_finish_date>{_mal_date(entry.get("finish_date"))}</my_finish_date>',
             '    <my_rated></my_rated>',
             f'    <my_score>{score}</my_score>',
             '    <my_storage></my_storage>',
@@ -788,9 +911,9 @@ def build_mal_manga_xml(
             '    <my_id>0</my_id>',
             '    <my_read_volumes>' + str(read_volumes) + '</my_read_volumes>',
             '    <my_read_chapters>' + str(read_chapters) + '</my_read_chapters>',
-            '    <my_start_date>0000-00-00</my_start_date>',
-            '    <my_finish_date>0000-00-00</my_finish_date>',
-            '    <my_scanslation_group></my_scanslation_group>',
+            f'    <my_start_date>{_mal_date(entry.get("start_date"))}</my_start_date>',
+            f'    <my_finish_date>{_mal_date(entry.get("finish_date"))}</my_finish_date>',
+            '    <my_scanalation_group></my_scanalation_group>',
             f'    <my_score>{score}</my_score>',
             '    <my_storage></my_storage>',
             '    <my_retail_volumes></my_retail_volumes>',

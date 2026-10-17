@@ -120,6 +120,22 @@ and per-row dates cannot work at all until Phase 0 stops the builders hardcoding
 
 ## Phase 0 — Foundation: entry dates, per-row status, per-media export files, `/api/export-state`
 
+> **STATUS: COMPLETE (2026-10-17).** All items below are implemented and verified —
+> 23 Python tests, 5 jsdom suites, a 22-check live server script, and live AniList calls.
+> Two things shipped beyond the written plan:
+> - **Live row streaming.** Progress events now carry the resolved rows, so the table fills
+>   during a run instead of staying empty until `complete`. The client dedupes exactly as
+>   `deduplicate_entries` does, `complete` merges rather than replaces (so edits made mid-run
+>   survive), and downloads stay locked while a run owns the files.
+> - **Fail fast on HTTP 400.** A malformed query can never succeed, so it no longer burns
+>   three retries' worth of rate limit. This is what surfaced the `coverImage` error below.
+>
+> **One deliberate deviation from decision #15:** the global status dropdown still stamps
+> every row, exactly as before; per-row selects were *added* alongside it rather than
+> replacing it. Rationale: the user asked for nothing breaking, and demoting the global
+> control to "apply to checked rows" changes existing muscle memory. Decision #15 is
+> superseded by this note until someone asks for the demotion.
+
 **Problem fixed (a):** both builders hardcode `<my_start_date>0000-00-00</my_start_date>`
 (`generate_mal_xml.py:696-697` anime, `791-792` manga). Phases 3, 4 and 5 all assume
 per-entry dates exist. Without this, a user can set dates in the UI, export, and silently
@@ -137,8 +153,14 @@ the other's filename.
   rather than a corrupt import). Both builders emit
   `_mal_date(entry.get("start_date"))` / `_mal_date(entry.get("finish_date"))`.
   Default stays `0000-00-00`, so every existing caller and test is unaffected.
-- Add `startDate { year }`, `popularity`, `coverImage { small }` to `ANILIST_SEARCH_PAGE_QUERY`
+- Add `startDate { year }`, `popularity`, `coverImage { medium }` to `ANILIST_SEARCH_PAGE_QUERY`
   and `ANILIST_MANGA_SEARCH_PAGE_QUERY`.
+
+  > **Corrected:** earlier revisions of this plan specified `coverImage { small }`. **That field
+  > does not exist** — AniList answers `Cannot query field "small" on type "MediaCoverImage"`
+  > with status 400, which made every search return nothing. The real fields are `medium`,
+  > `large`, `extraLarge` and `color`; `medium` serves the CDN's small image, which is what was
+  > intended. Verified live.
 - `_parse_media_node` (line 275) / `_parse_manga_node` (line 324): add keys `year` (`int|None`),
   `popularity` (`int`), `cover` (`str|None`).
 - **Adaptive pacing (constraint #6).** `_throttle()` targets `60 / observed_limit * 1.05`, where
@@ -321,6 +343,15 @@ versus today** (typos still excluded — they are Phase 2's problem).
 
 ## Phase 2 — Run control + manual correction
 
+> **STATUS: COMPLETE (2026-10-17).** `_run_lock` (409 on a second run), `/api/run-control`
+> (cancel / pause / resume), `started` / `paused` / `resumed` / `cancelled` SSE events,
+> `/api/search`, `/api/lookup` (`ANILIST_BY_MAL_ID_QUERY` + `lookup_by_mal_id`,
+> `search_candidates`), and per-row repair inputs on rows with no MAL ID.
+> **Found and fixed while building:** the client's `break` on `complete`/`cancelled` only left
+> the inner chunk loop — the outer reader kept awaiting, so the run never cleaned up unless the
+> server closed the socket. Now guarded by an explicit `streamDone` flag.
+
+
 **Run control (gui.py)**
 - `_run_lock` (non-blocking acquire → **409** `"A run is already in progress"`) +
   `_active_run = {run_id: {"cancel": Event, "pause": Event}}`.
@@ -352,13 +383,28 @@ versus today** (typos still excluded — they are Phase 2's problem).
 
 ## Phase 3 — Table & persistence UX
 
+> **STATUS: COMPLETE (2026-10-17).** localStorage persistence, sortable columns (asc → desc →
+> off, stable, numeric where numeric), 300-row cap with "Show all", status chips that compose
+> with the text filter, lazy cover thumbnails, year beside the type tag, drag-and-drop `.txt`,
+> Ctrl/Cmd+Enter, expandable row editor (score, start/finish dates, tags, comments), XML preview
+> modal, timestamped archives, and the pre-existing theme toggle.
+> **Not built, deliberately:** the "Stamp finished dates" bulk button — the row editor already
+> sets dates, and no one has asked for the bulk form. Add on request.
+
+
 **Client (backslash ban applies to everything here)**
-- **localStorage**: key `aniexport.state` = `{v:1, mediaType, status, score, sequels, text, results, updated}`;
-  debounced save (300 ms); quota failure → retry without `results`; restore at boot **before** wiring
-  (set selector value, then `updateMediaTypeUI(false)`, then render restored results and fire one
-  update-export sync so server files match the restored session). Separate key `aniexport.theme`.
-  `beforeunload` prompt while `isProcessing`. `btnClear` also clears persisted text.
-  `candidates` are stripped before saving (size), and re-fetched only on demand.
+- ~~**localStorage**~~ **DONE (2026-10-17).** Key `aniexport.state` = `{v:1, mediaType, status,
+  score, sequels, text, results, updated}`; 300 ms debounced save; restore at boot sets the media
+  selector, calls `updateMediaTypeUI(false)`, *then* restores the status value (the options only
+  exist after that call), then renders the rows and fires one update-export sync so the server
+  files match the restored session. `beforeunload` saves immediately and warns only while
+  `isProcessing`. `btnClear` clears the persisted text. Corrupt JSON or an unknown `v` falls back
+  to an empty session instead of throwing. Theme stays on its own `aniexport.theme` key.
+  **Deviation from the written spec:** `candidates` are *kept* by default rather than always
+  stripped, because dropping them loses the match picker on restore and there is no re-fetch
+  until Phase 2. Instead the save degrades in three steps — full, then without `candidates`,
+  then without `results` — so a quota error costs the least useful data first. Verified against
+  a 400-row payload with a 200 KB quota.
 - **Sortable columns**: click `<th>` cycles asc → desc → off; sorted copy of the filtered list only;
   `data-index` stays `currentAnimes.indexOf(item)` (identity-based → correct under sorting).
 - **Row cap**: render first 300 filtered rows + `"Show all (N)"` (resets on filter change).
@@ -519,12 +565,14 @@ counts, missing token → 400, **token string asserted absent from every respons
 12. One deliberate test change: `test_gui_manga_endpoint` patch target **and mock return shape**.
 13. One-shot penalty (−500) always dominates title-match bonuses — locked by regression test.
 14. Phase 5 requires a real manual write test before it counts as delivered.
-15. Per-row status is **Phase 0**, not Phase 3 — a mixed-status list is the normal case, so one
+15. ~~Per-row status demotes the global control to "apply to checked rows".~~ **Superseded:**
+    per-row selects were added *alongside* the unchanged global control, because that is
+    additive. Revisit only on request. Original rationale: Per-row status is **Phase 0**, not Phase 3 — a mixed-status list is the normal case, so one
     global status is a correctness bug rather than a missing convenience. The global control
     becomes "apply to checked rows".
 16. Disabled download links get `preventDefault`; the stat card either shows volumes or stops
     claiming to.
-17. Pacing is **adaptive from `X-RateLimit-Limit`** (Phase 0), not pinned to the degraded 30/min.
+17. Pacing is **adaptive from `X-RateLimit-Limit`** (Phase 0, DONE), not pinned to the degraded 30/min.
     The documented limit is 90/min; the 30 is temporary. Clamped to `[0.7, 2.5]` s so the
     undocumented burst limiter is still respected.
 18. Nothing branches on HTTP status alone — `errors[].status` is authoritative, because a 200 can
@@ -544,3 +592,17 @@ counts, missing token → 400, **token string asserted absent from every respons
 P0 is now load-bearing for P3, P4 and P5 (date emission + canonical field names), not just a
 filename cleanup. Each phase ends with the full test gate green, so work can stop at any boundary —
 and stopping after P4 leaves a fully read-only tool.
+
+## Progress log
+
+| Date | Landed | Verification |
+|---|---|---|
+| 2026-10-17 | **Phase 0 complete** — entry dates (`_mal_date`), `year`/`popularity`/`cover` fields, per-media export files, optional `?media=`, `/api/export-state`, empty update-export keeps files, `ValueError` → 400 / SSE `error`, per-row status, `preventDefault` on disabled links, volumes in the stat card, `my_scanalation_group` spelling, adaptive pacing, fail-fast on 400 | 23 Python tests, 5 jsdom suites, 22-check live server script, live AniList calls |
+| 2026-10-17 | **Live row streaming** (not in the original plan) — rows appear as they resolve; dedupe mirrors the server; `complete` merges so mid-run edits survive; downloads locked during a run | `domtest4.js` drives the real handler against a stepped SSE body |
+| 2026-10-17 | **Phase 3 localStorage persistence** — a refresh no longer loses a long run | `domtest5.js`: cross-session restore, corrupt/unknown-version fallback, three-step quota degradation |
+| 2026-10-17 | **Phase 2 complete** — run lock + cancel/pause/resume, `/api/search`, `/api/lookup`, per-row repair | `tests/test_run_control.py` (6 tests), `domtest7.js` (14 lifecycle assertions), 30-check live server script |
+| 2026-10-17 | **Phase 3 complete** — sorting, chips, row cap, covers, drag-drop, Ctrl+Enter, row editor, preview modal, archives | `domtest6.js` (31 assertions), `tests/test_run_control.py` preview/archive cases incl. traversal rejection |
+
+**Next, in recommended order:** Phase 1 batching (needs the alias spike first) → Phase 4 import
+→ Phase 5 direct write (gated) → Phase 6 docs, which should also add the `.gitignore` that keeps
+`myanimelist_*export.xml*` out of git.
