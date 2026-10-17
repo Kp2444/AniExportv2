@@ -1209,6 +1209,11 @@ HTML_TEMPLATE = """<!DOCTYPE html>
     }
     .unresolved-bar .spacer { display: none; }
     .btn-xs { padding: 0.1875rem 0.5rem; font-size: 0.6875rem; white-space: nowrap; }
+    .btn-danger.btn-danger {
+      color: var(--danger);
+      border-color: var(--danger);
+      background: var(--danger-bg);
+    }
 
     /* ---- table ---- */
     #animeTextInput { min-height: 232px; }
@@ -1873,6 +1878,7 @@ HTML_TEMPLATE = """<!DOCTYPE html>
           </div>
           <div id="chipRow" class="chip-row"></div>
           <span id="filterCountLabel" class="filter-count">Showing 0</span>
+          <button id="btnReset" class="btn btn-secondary btn-xs" title="Clear the saved session and start from an empty list">Start over</button>
         </div>
         <div id="unresolvedBar" class="unresolved-bar">
           <span id="unresolvedText"></span>
@@ -1960,6 +1966,7 @@ HTML_TEMPLATE = """<!DOCTYPE html>
     const unresolvedBar = document.getElementById('unresolvedBar');
     const unresolvedText = document.getElementById('unresolvedText');
     const btnCopyUnresolved = document.getElementById('btnCopyUnresolved');
+    const btnReset = document.getElementById('btnReset');
     const runControls = document.getElementById('runControls');
     const btnPause = document.getElementById('btnPause');
     const btnCancel = document.getElementById('btnCancel');
@@ -2115,7 +2122,9 @@ HTML_TEMPLATE = """<!DOCTYPE html>
       txtArea.value = '';
       updateLineCounter();
       saveState();
-      showToast('Text area cleared');
+      showToast(currentAnimes.length
+        ? 'Text cleared. Use Start over to also clear the results table.'
+        : 'Text area cleared');
     });
 
     // Load sample list
@@ -2350,7 +2359,7 @@ HTML_TEMPLATE = """<!DOCTYPE html>
         statXmlValid.style.color = 'var(--success)';
       } else {
         exportHeadline.textContent = `No ${mediaType() === 'manga' ? 'manga' : 'anime'} selected`;
-        exportSubline.textContent = 'Select at least one anime checkbox to enable export download.';
+        exportSubline.textContent = `Select at least one ${mediaType() === 'manga' ? 'manga' : 'anime'} row to enable the download.`;
         btnDownloadXml.classList.add('disabled');
         btnDownloadXml.setAttribute('aria-disabled', 'true');
         btnDownloadGz.classList.add('disabled');
@@ -2509,7 +2518,67 @@ HTML_TEMPLATE = """<!DOCTYPE html>
       stateSaveTimer = setTimeout(saveStateNow, 300);
     }
 
+    function clearSavedState() {
+      try {
+        window.localStorage.removeItem(STATE_KEY);
+      } catch (e) {
+        // storage unavailable: nothing was saved either
+      }
+    }
+
+    // Everything the session remembers, back to first-run values. Without this
+    // a saved session was permanent: Clear only emptied the textarea and the
+    // rows came back on every reopen.
+    function resetSession() {
+      clearTimeout(stateSaveTimer);
+      clearSavedState();
+      currentAnimes = [];
+      expandedRows.clear();
+      statusFilter = '';
+      sortKey = '';
+      sortDir = 0;
+      showAllRows = false;
+      searchInput.value = '';
+      txtArea.value = '';
+      inputScore.value = '0';
+      toggleSequels.checked = false;
+      toggleArchive.checked = false;
+      mediaTypeSelect.value = 'anime';
+      document.querySelectorAll('th.sortable .sort-mark').forEach(mark => { mark.textContent = ''; });
+      updateMediaTypeUI(false);
+      renderTable(currentAnimes);
+      updateStats();
+      refreshExportState();
+      updateLineCounter();
+    }
+
+    let resetArmed = null;
+    btnReset.addEventListener('click', () => {
+      // Two steps on purpose: a long run is expensive to repeat.
+      if (!resetArmed) {
+        btnReset.textContent = 'Confirm reset';
+        btnReset.classList.add('btn-danger');
+        resetArmed = setTimeout(() => {
+          resetArmed = null;
+          btnReset.textContent = 'Start over';
+          btnReset.classList.remove('btn-danger');
+        }, 4000);
+        return;
+      }
+      clearTimeout(resetArmed);
+      resetArmed = null;
+      btnReset.textContent = 'Start over';
+      btnReset.classList.remove('btn-danger');
+      resetSession();
+      showToast('Session cleared. Files already written to disk are untouched.');
+    });
+
     function restoreState() {
+      // Loading with #reset discards the saved session before it is applied.
+      if (window.location.hash === '#reset') {
+        clearSavedState();
+        return false;
+      }
       let raw = null;
       try {
         raw = window.localStorage.getItem(STATE_KEY);
