@@ -125,7 +125,7 @@ class MangaExportTests(unittest.TestCase):
         ]))
         self.assertEqual(root.find("manga").findtext("my_read_chapters"), "0")
 
-    def test_candidates_only_offer_importable_matches(self):
+    def test_candidates_include_anilist_only_entries(self):
         nodes = [
             {"id": 85364, "idMal": None, "title": {"romaji": "Dupe"}, "format": "MANGA"},
             {"id": 30654, "idMal": 44347, "title": {"romaji": "Real"}, "format": "MANGA",
@@ -133,9 +133,17 @@ class MangaExportTests(unittest.TestCase):
             {"id": 99999, "idMal": 44347, "title": {"romaji": "Duplicate MAL id"},
              "format": "MANGA"},
         ]
-        picks = gen._candidates(nodes, "manga", "Whatever")
-        self.assertEqual([c["id"] for c in picks], [44347])
+        # Candidates are ranked now, so the search title decides which of two
+        # nodes sharing a MAL ID survives the dedupe.
+        picks = gen._candidates(nodes, "manga", "Real")
+        # The MAL-linked entry still ranks first, but the AniList-only one is no
+        # longer discarded: it is exportable by a direct write.
+        self.assertEqual(picks[0]["id"], 44347)
         self.assertEqual(picks[0]["title"], "Real")
+        self.assertTrue(picks[0]["can_export_xml"])
+        anilist_only = [c for c in picks if not c["can_export_xml"]]
+        self.assertEqual(len(anilist_only), 1)
+        self.assertTrue(anilist_only[0]["can_write_anilist"])
 
     def test_entry_dates_are_emitted_and_validated(self):
         root = ET.fromstring(gen.build_mal_manga_xml([

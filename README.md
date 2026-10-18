@@ -1,128 +1,157 @@
 # AniExport
 
-> **Zero-dependency plain-text anime and manga list converter for MyAnimeList-compatible XML and AniList import.**
+> **Zero-dependency converter from a plain list of titles to an AniList or MyAnimeList list.**
 
-AniExport accepts a title list, resolves titles against AniList's GraphQL API, lets you review results in a local web dashboard, and exports MAL-compatible XML and gzip files. AniList imports MAL XML by matching MAL IDs, so a resolved title without a valid MAL ID is not exportable through this path — such rows are shown as unresolved and excluded from export.
+Paste a list of anime or manga titles. AniExport resolves each one against AniList's GraphQL API,
+lets you review and correct the matches in a local web page, and then either writes them straight
+to your AniList account or exports a MAL-compatible XML file.
 
-## Features
+## Two destinations, and why it matters
 
-- Anime and manga media modes in the same GUI and CLI, with separate XML schemas and status vocabularies.
-- Input cleanup: strips leading numbering (`1.`, `2)`), bullets (`-`, `*`, `•`), surrounding quotes, and skips `#` comment lines.
-- Deduplication by MAL ID (by title when the ID is unknown).
-- Import-aware resolution: search hits that carry a MAL ID are preferred over ones without, and full series are preferred over one-shots.
-- An in-table match picker appears for rows with two or more importable candidates; switching a match keeps that row's status, score and progress.
-- Per-entry progress inputs (watched episodes, or read chapters and volumes). Completed entries — and in-progress rereads/rewatches — default to the full known count, everything else defaults to zero. Explicitly set values, including `0`, are kept, and inputs are capped at the known total.
-- Unknown episode/chapter/volume counts remain `0` (unknown); values are never invented.
-- Unresolved titles are disabled in the GUI and excluded from export rather than exported with ID `0`.
-- Optional direct sequel expansion (disabled by default): both media types via the CLI, anime only in the GUI.
-- Review table with MAL and AniList links, filtering by title or ID, select-all with indeterminate state, and per-entry inclusion controls.
-- Global status and score changes re-apply to every row; all exporting rows re-sync to the export files (debounced) as you edit.
-- Live progress in the GUI: streamed step/percentage updates with an ETA, plus an AniList rate-limit wait banner.
-- Unmatched titles get their own banner with a one-click "Copy unmatched titles" action.
-- Standard-library-only Python implementation; XML output is validated by re-parsing before it is reported as generated.
+AniList is the primary target. MAL XML is only a transport, and it is a lossy one:
 
-## Requirements
+| Destination | Identity required | Needs a token | Carries |
+|---|---|---|---|
+| **AniList (direct write)** | AniList id | yes | every title AniList knows |
+| **MAL-compatible XML** | MyAnimeList id | no | only titles that also exist on MAL |
 
-- Python 3.9+
-- Internet access to `https://graphql.anilist.co`
-- Nothing else: the project runs entirely on the Python Standard Library (`requirements.txt` installs no extra packages).
+Plenty of titles exist on AniList with no MyAnimeList id at all. Those rows are labelled
+**AniList only**: they cannot be written into the XML file, but they can be sent directly to your
+account. A row is only called **Not found** when AniList does not know it either.
 
-The GUI page loads two Google Fonts for styling; if that request fails, the interface still renders with your system fonts.
+You pick the destination on first run; it is remembered after that.
+
+## Install
+
+Python 3.9+ and an internet connection. Nothing else: `requirements.txt` installs no packages.
 
 ## GUI
 
 ```bash
-python gui.py
+python gui.py              # opens http://127.0.0.1:5000
 ```
 
-Open `http://127.0.0.1:5000` if the browser does not open automatically.
+- `-p/--port` — local port (default 5000, scanning up to 5049)
+- `--no-browser` — do not open a browser
 
-- `-p/--port` — local port (default 5000; occupied ports up to 5049 are skipped).
-- `--no-browser` — do not open a browser automatically.
+### Resolving a list
 
-The server binds to `127.0.0.1` only and never signs in to or modifies any account.
+Paste titles (one per line), or drag a `.txt` file onto the box, or press `Ctrl/Cmd+Enter` to
+start. Numbering (`1.`, `2)`), bullets and surrounding quotes are stripped; `#` lines are ignored.
 
-The header includes a light/dark theme toggle; the choice is remembered in the browser.
+Rows appear **as they resolve**, not at the end. A run can be **paused or cancelled**; a cancelled
+run writes no files and keeps whatever it already resolved.
 
-Use the **Media Type** selector to choose Anime or Manga. Changing the media type clears the current selection and generated export to avoid accidentally mixing media types.
+Titles are resolved in batches of 8 per request. AniList allows 90 requests/minute (currently
+degraded to 30), and the pacing follows the rate-limit headers automatically, so a 339-title list
+takes roughly a minute and a half rather than twelve.
 
-The status selector uses AniList's vocabulary; the server maps it to MAL's values on export:
+Results are cached in `.anilist_cache.json` for 7 days, so a repeat run is close to instant. Turn
+on **Ignore saved results** to refetch, `--no-cache` on the CLI, or point `ANIEXPORT_CACHE`
+elsewhere.
 
-| GUI status (AniList)      | Anime XML (MAL)                   | Manga XML (MAL)                |
-| ------------------------- | --------------------------------- | ------------------------------ |
-| Watching / Reading        | Watching                          | Reading                        |
-| Plan to watch / read      | Plan to Watch                     | Plan to Read                   |
-| Completed                 | Completed                         | Completed                      |
-| Rewatching / Rereading    | Watching + rewatching flag        | Reading + rereading flag       |
-| Paused                    | On-Hold                           | On-Hold                        |
-| Dropped                   | Dropped                           | Dropped                        |
+### Reviewing and fixing matches
+
+- Every row shows the chosen title, its MAL and AniList ids, type, year and cover.
+- A **match picker** appears when a search returned several plausible entries. Switching keeps
+  that row's status, score, progress and dates.
+- **Fix unmatched** steps through every title that matched nothing, one at a time. For each it
+  shows what you pasted, a prefilled search box, and the **candidates it found** so you choose
+  rather than the tool guessing. The box accepts:
+  - a title to search,
+  - a pasted **anilist.co** or **myanimelist.net** link, which resolves to exactly that entry,
+  - a bare id, looked up as both an AniList id and a MAL id (a dropdown pins it to one if you
+    know which you have).
+
+  Candidates are labelled `MAL 102255` or `AniList 148167 - no MAL ID`, so an AniList-only match
+  is visibly usable rather than looking broken. Choosing one keeps that row's status, score,
+  progress and dates, and moves to the next unmatched title.
+- Per-row **status** and **read/watched progress**, plus an expandable editor (`⋯`) for score,
+  start and finish dates, tags and comments.
+- Sortable columns, status chips, text filter, and a 300-row cap with "Show all".
+- Everything survives a refresh. **Start over** clears the saved session (two clicks, on purpose);
+  loading `#reset` clears it too if the page is ever stuck.
+
+Nothing disappears silently: the notice bar accounts for titles with no MAL id, titles found
+nowhere, lines merged into an existing row, and any title AniList could not be reached for.
+
+### Writing to AniList
+
+With the destination set to AniList, paste an access token and press **Check**. The token is held
+in that browser tab only: it is never saved to disk, never written to the export files, and never
+appears in a server response.
+
+**Write to AniList…** first reads which of the selected titles are already on your list, then
+shows exactly what will happen (*"N entries will be added, M already on your list will be
+updated"*) before anything is sent. Entries you already have are updated in place by their
+existing list-entry id, so running the write twice cannot create duplicates. Failures are reported
+per title using AniList's own validation messages.
+
+> **Status:** the write path is covered by unit tests against a mocked API but has **not** yet been
+> exercised against a live AniList account. Try it on a throwaway account, or with a handful of
+> rows, before pointing it at a list you care about.
+
+### Importing an existing MAL export
+
+**Import XML** reads a MyAnimeList export (`.xml`, or `.gz` in browsers with
+`DecompressionStream`). Matching rows are updated from the file; unknown ids are appended unless
+you turn that off. Imported rows carry no AniList id until you resolve or search for them.
+
+### Export files
+
+`Download XML` / `Download .XML.GZ` serve the current selection. Anime and manga write to separate
+files, so one media type can never overwrite or impersonate the other. **Preview XML** shows the
+generated file, and **Keep timestamped copies** also writes `..._YYYYmmdd_HHMMSS.xml` on every save.
 
 ## CLI
 
-Anime remains the default:
-
 ```bash
-python generate_mal_xml.py anime_list.txt
-python generate_mal_xml.py anime_list.txt --status Watching --score 8
-python generate_mal_xml.py anime_list.txt --expand-sequels
+python generate_mal_xml.py manga.txt --media-type manga --status Reading
+python generate_mal_xml.py animes.txt --expand-sequels --no-cache
 ```
 
-Manga:
+| Flag | Meaning |
+|---|---|
+| `-o/--output`, `-g/--gz-output` | output paths (default depends on media type) |
+| `--status` | default list status (`Reading`/`Watching`, `Plan to read/watch`, `Completed`, `On-Hold`/`Paused`, `Dropped`, `Rereading`/`Rewatching`) |
+| `--score` | default score, 0–10 |
+| `--media-type` | `anime` (default) or `manga` |
+| `--expand-sequels` | follow direct sequel relations |
+| `--no-cache` | ignore and do not write the on-disk cache |
 
-```bash
-python generate_mal_xml.py manga_list.txt --media-type manga
-python generate_mal_xml.py manga_list.txt --media-type manga --status Reading --score 8
-python generate_mal_xml.py manga_list.txt --media-type manga --expand-sequels
-```
+The CLI reports three outcomes rather than two: titles in the export, titles that exist on AniList
+without a MyAnimeList id (named with their AniList id, since only the GUI's direct write can send
+them), and titles that were not found at all.
 
-Notes:
+## Data notes
 
-- With no positional input, `-i/--input-file` or default probing (`notes.txt`, then `animes.txt`, then `input/animes.txt`) is used.
-- `--status` accepts MAL status names (`Watching`, `Plan to Watch`, `Completed`, `On-Hold`, `Dropped` for anime; `Reading`, `Plan to Read`, … for manga) plus the GUI aliases above, case-insensitively. Invalid values raise an error.
-- Default output filenames depend on the media type: `myanimelist_export.xml` / `.xml.gz` for anime, `myanimelist_manga_export.xml` / `.xml.gz` for manga. When an `output/` directory exists, files are written there; `-o` and `-g` override the paths.
-
-## Input format
-
-One title per line. Leading numbering, bullets, and surrounding quotes are removed; blank lines and `#` comment lines are skipped:
-
-```text
-Berserk
-1. One Piece
-2) Vagabond
-- Fullmetal Alchemist
-# a comment
-```
-
-Duplicate titles resolve to a single entry. `manga.txt` in the repository is a larger example input.
-
-## Import
-
-1. Open [AniList import settings](https://anilist.co/settings/import).
-2. Choose **Import from MyAnimeList**.
-3. Upload the generated `.xml` or `.xml.gz`.
-4. Review the import result on AniList before assuming every entry was added.
-
-The generated files are MAL-compatible import files; XML parsing alone cannot guarantee that AniList has a matching entry for every MAL ID. Always review skipped or unresolved entries.
-
-## Tests
-
-Run the offline unit tests (no network access required — resolvers are mocked):
-
-```bash
-python -m unittest discover -s tests -v
-```
-
-Coverage includes manga and anime XML structure, status alias mapping and canonical casing, missing-ID exclusion, XML escaping, importable-candidate selection, duplicate handling, a mocked GUI manga-process endpoint that writes XML and gzip, and GUI template integrity. One test validates the GUI's JavaScript with Node.js and is skipped when `node` is not installed.
+- Unknown chapter, volume and episode counts stay `0`. Counts are never invented.
+- Completed entries (and in-progress rereads) default to the full known count; everything else
+  starts at zero. An explicit `0` is kept.
+- Dates must be `YYYY-MM-DD`. Invalid input is rejected with an error rather than silently dropped.
+- `Paused` maps to MAL's `On-Hold`; `Rereading`/`Rewatching` map to `Reading`/`Watching` plus the
+  repeat flag in XML, and to `REPEATING` on AniList.
 
 ## Limitations
 
-- Resolution ranking follows AniList's relevance order aside from preferring importable entries, and release year is not shown. A wrong match can still look plausible — review the displayed title and exclude anything you do not recognize.
-- The match picker offers only candidates that carry a MAL ID; anything else cannot be imported through this route.
-- A MAL ID is required for this import route. If AniList has a manga entry without a MAL ID, it will be shown but cannot be imported through MAL XML.
-- Sequel expansion follows direct `SEQUEL` relations only and is not a complete franchise crawler. It is optional and should be reviewed. The GUI exposes it for anime only; the CLI supports it for manga as well.
-- AniList allows 30 requests/minute. Requests are spaced accordingly, so long lists resolve at roughly one title every 2 seconds and wait out throttle windows when they occur.
-- The tool generates import files; it does not sign in to or modify either account directly.
+- **Misspellings are not auto-recoverable.** AniList returns zero hits for `Raphsody` or
+  `Aristrocat`, so no destination, retry or ranking change finds them on its own. Fix unmatched is
+  the answer: search the right title, or paste the AniList link.
+- **A confident match can still be wrong.** Ranking prefers exact titles, full series over
+  one-shots and released entries, but it cannot know your intent. Check the picker on rows that
+  matter.
+- The direct AniList write has not been run against a live account (see above).
+- AniList's own rate limit is the floor on speed; nothing here can make a cold run faster than the
+  API allows.
 
-## License
+## Tests
 
-See [LICENSE](LICENSE).
+```bash
+python -m unittest discover -s tests -t .
+```
+
+114 tests covering the XML builders, status and date handling, batched resolution, the disk cache,
+candidate ranking, run control, the GUI event contract, the AniList write payloads, the MAL XML importer,
+the unmatched-title resolver (links, ids and free text)
+and the command line (both media types, input discovery, cache flags, error paths). The browser JavaScript is additionally syntax-checked, and the HTML template is scanned
+for backslash escapes that Python would consume before the browser ever sees them.

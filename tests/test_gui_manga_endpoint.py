@@ -27,7 +27,7 @@ class MangaGuiEndpointTests(unittest.TestCase):
                  patch.object(gui, "EXPORT_MANGA_GZ_PATH", output / "export.xml.gz"), \
                  patch.object(gui, "EXPORT_XML_PATH", output / "anime.xml"), \
                  patch.object(gui, "EXPORT_GZ_PATH", output / "anime.xml.gz"), \
-                 patch.object(gui, "resolve_manga_entries", return_value=resolved):
+                 patch.object(gui, "resolve_many_entries", return_value={"Test Manga": resolved}):
                 server = ThreadingHTTPServer(("127.0.0.1", 0), gui.MalGuiHandler)
                 thread = threading.Thread(target=server.serve_forever, daemon=True)
                 thread.start()
@@ -59,10 +59,19 @@ class MangaGuiEndpointTests(unittest.TestCase):
         """Rows must reach the client as they resolve, not only at the end."""
         with tempfile.TemporaryDirectory() as directory:
             output = Path(directory)
-            def fake(title, session_cache=None, expand_sequels=False):
-                return [{"id": 100 + len(title), "anilist_id": 1, "title": title.upper(),
-                         "type": "Manga", "chapters": 5, "volumes": 1}]
-            with patch.object(gui, "EXPORT_MANGA_XML_PATH", output / "m.xml"),                  patch.object(gui, "EXPORT_MANGA_GZ_PATH", output / "m.xml.gz"),                  patch.object(gui, "resolve_manga_entries", side_effect=fake):
+            def fake(titles, media_type="manga", expand_sequels=False, session_cache=None,
+                     use_cache=True, on_progress=None, should_cancel=None,
+                       prefer_mal_id=True):
+                out = {}
+                for n, title in enumerate(titles, 1):
+                    out[title] = [{"id": 100 + len(title), "anilist_id": 1,
+                                   "title": title.upper(), "type": "Manga",
+                                   "chapters": 5, "volumes": 1}]
+                    if on_progress:
+                        on_progress("resolve", n, len(titles),
+                                    {"title": title, "entries": out[title]})
+                return out
+            with patch.object(gui, "EXPORT_MANGA_XML_PATH", output / "m.xml"),                  patch.object(gui, "EXPORT_MANGA_GZ_PATH", output / "m.xml.gz"),                  patch.object(gui, "resolve_many_entries", side_effect=fake):
                 server = ThreadingHTTPServer(("127.0.0.1", 0), gui.MalGuiHandler)
                 thread = threading.Thread(target=server.serve_forever, daemon=True)
                 thread.start()

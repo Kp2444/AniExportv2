@@ -50,10 +50,20 @@ class ServerCase(unittest.TestCase):
 class RunControlTests(ServerCase):
     """A long run must be stoppable, and only one may hold the export files."""
 
-    def _slow_resolver(self, title, session_cache=None, expand_sequels=False):
-        time.sleep(0.4)
-        return [{"id": 500 + len(title), "anilist_id": 1, "title": title.upper(),
-                 "type": "Manga", "chapters": 3, "volumes": 1}]
+    def _slow_resolver(self, titles, media_type="manga", expand_sequels=False,
+                       session_cache=None, use_cache=True, on_progress=None,
+                       should_cancel=None, prefer_mal_id=True):
+        """Batched resolver that takes real time and honours cancellation."""
+        out = {}
+        for n, title in enumerate(titles, 1):
+            if should_cancel and should_cancel():
+                break
+            time.sleep(0.4)
+            out[title] = [{"id": 500 + len(title), "anilist_id": 1, "title": title.upper(),
+                           "type": "Manga", "chapters": 3, "volumes": 1}]
+            if on_progress:
+                on_progress("resolve", n, len(titles), {"title": title, "entries": out[title]})
+        return out
 
     def test_cancel_stops_the_run_and_writes_nothing(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -61,7 +71,7 @@ class RunControlTests(ServerCase):
             titles = chr(10).join("t" + str(i) for i in range(12))
             captured = {}
 
-            with patch.object(gui, "resolve_manga_entries", side_effect=self._slow_resolver):
+            with patch.object(gui, "resolve_many_entries", side_effect=self._slow_resolver):
                 def run():
                     captured["body"], captured["code"] = self.post(
                         base, "/api/process",
@@ -88,7 +98,7 @@ class RunControlTests(ServerCase):
             titles = chr(10).join("t" + str(i) for i in range(10))
             captured = {}
 
-            with patch.object(gui, "resolve_manga_entries", side_effect=self._slow_resolver):
+            with patch.object(gui, "resolve_many_entries", side_effect=self._slow_resolver):
                 def run():
                     captured["body"], captured["code"] = self.post(
                         base, "/api/process",

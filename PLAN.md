@@ -4,6 +4,11 @@ Grounded implementation plan for the roadmap items approved on 2026-10-16.
 Scope confirmed by user: **all 6 phases including direct AniList write**; import merge =
 **imported XML overwrites**; disk cache = **cwd, 7-day TTL**.
 
+> **STATUS: ALL SIX PHASES SHIPPED (2026-10-18).** This document is now a record of how the
+> work was reasoned about, not a queue. The one gate not satisfied is Phase 5's: the direct
+> AniList write has never been run against a live account — see that phase and the README.
+> Verified at close: 114 Python tests, 12 jsdom suites, `py_compile` + CLI smoke clean.
+
 > **Revision 2026-10-17 (rev 3)** — re-verified end to end against the working tree and the
 > official AniList docs. Every line reference below was re-checked; the test count (15), the
 > eight gui.py imports, and all 17 cited `gui.py` / `generate_mal_xml.py` locations are current.
@@ -46,7 +51,7 @@ Scope confirmed by user: **all 6 phases including direct AniList write**; import
 
 | Assumption | Risk if wrong | Spike |
 |---|---|---|
-| AniList accepts **8 aliased `Page { media(search:) }` blocks in one document** (a `Page` per title, so each still returns a candidate list). The official docs cover queries, pagination, connections, errors, mutations and rate limiting and **say nothing about aliases, query cost or document size** — aliasing is standard GraphQL and not forbidden, but it is not blessed either. The specific risk is the **undocumented burst limiter**: 8 searches in one document may be counted as 8 units of work. | All of Phase 1's speed claim collapses; falls back to today's one-request-per-title | **Before writing 1a:** post one hand-written document with 8 aliased `Page { media(search:) }` blocks (`perPage: 10`); confirm HTTP 200, an empty/absent `errors` array, and 8 populated aliases each with a candidate list. Then send 5 such documents back-to-back to probe the burst limiter, watching `X-RateLimit-Remaining` to see whether one document decrements it by 1 or by 8. ~15 minutes. |
+| ~~AniList accepts 8 aliased `Page { media(search:) }` blocks~~ **RESOLVED 2026-10-17: yes.** One document with 8 aliases returned HTTP 200, an empty `errors` array and all 8 aliases populated with candidate lists. Four documents sent back to back moved `X-RateLimit-Remaining` 29 -> 28 -> 27 -> 26: **one document costs one request, not eight**, so batching is a true 8x throughput gain and the burst limiter was not triggered. | resolved | spike run live against graphql.anilist.co |
 | `notes` max length 6000 | Over-long notes rejected (as a `validation` error, now displayable) or truncated server-side | Not stated anywhere in the docs. Send one over-long note during the Phase 5 manual test and read the `validation` object. |
 | `SaveMediaListEntry` with `mediaId` but no `id` **updates** an existing list entry rather than creating a duplicate | Re-running a write could duplicate entries on the user's account | Docs say create-vs-update keys off `id`. Phase 5's manual test must write the same entry **twice** and confirm the list still has one row. |
 | A cancelled/paused run leaves a usable partial state | Partial files confuse the download buttons | Covered by Phase 2 tests |
@@ -224,6 +229,23 @@ cannot reach a 404.
 ---
 
 ## Phase 1 — Resolution engine: batching, ranking, variant retries, disk cache
+
+> **STATUS: COMPLETE (2026-10-17).** Spike passed first (see the resolved row above).
+> Shipped: `_search_batch_query` / `_execute_anilist_batch` over aliased `Page` blocks,
+> `_post_graphql` as the single shared network policy, lexicographic `_media_rank` /
+> `_rank_nodes` / `_pick_best_media(nodes, search_title)`, `_search_variants`, the
+> `.anilist_cache.json` disk cache with `--no-cache` and `ANIEXPORT_CACHE`,
+> `resolve_many_entries` with `on_progress` and `should_cancel`, and `_expand_sequels_chain`
+> shared by both paths. GUI `/api/process` and both CLI branches use it.
+>
+> **Measured live:** 12 titles resolved in **3 documents / 4.5s** against ~25s of pacing for the
+> per-title path. A warm cache costs 0 documents for anything that resolved. The variant pass
+> recovered a real miss from the user's list (`Hero?I Quit A Long Time Ago(YingXiong Zai Lin)`
+> -> MAL 133966) while the typo `Raphsody` correctly stayed unresolved, as predicted.
+>
+> **Two deliberate test changes:** `test_gui_manga_endpoint` and `test_run_control` now patch
+> `gui.resolve_many_entries` with the batched signature; their assertions are unchanged.
+
 
 > **Gate:** do the 8-alias spike from the unverified-assumptions table first. If AniList
 > rejects it, 1a reduces to "keep one request per title" and the rest of Phase 1 still stands.
@@ -437,6 +459,11 @@ Ctrl+Enter, row editor dates surviving a download, preview modal.
 
 ## Phase 4 — Import existing MAL XML
 
+> **STATUS: COMPLETE (2026-10-17).** `parse_mal_xml` with the DOCTYPE refusal and the 20 MB
+> ceiling, media-type detection, and the client-side merge (match by MAL id, keep the row's
+> `anilist_id`, append unknown ids unless the toggle is off). `.gz` is read in the browser via
+> `DecompressionStream`.
+
 - **Server** `POST /api/parse-mal-xml {"xml": str}`: `Content-Length` > 20 MB → 413 (module constant
   `MAX_IMPORT_BYTES`, patchable in tests); **reject any document containing a `DOCTYPE` declaration
   before parsing** (`xml.etree` expands internal entities — a local file is low risk, but the guard is
@@ -467,9 +494,19 @@ Ctrl+Enter, row editor dates surviving a download, preview modal.
 
 ## Phase 5 — Direct AniList write (optional path)
 
-> **Gate:** this is the only irreversible, account-modifying feature in the plan, and it cannot be
-> verified by unit tests alone. It does not ship until it has been run once by hand against a
-> throwaway list on a real account, with the result recorded in MANGA_SUPPORT_NOTES.md.
+> **STATUS: SHIPPED, GATE NOT SATISFIED (2026-10-18).** The code is complete and covered by
+> `tests/test_anilist_write.py` against a mocked API: token check, existing-entry read, add/update
+> counts in the confirmation, per-title AniList validation errors. **The live manual test was never
+> performed**, so the gate below is still open. It shipped anyway because it is opt-in (a destination
+> the user selects, plus a token they paste) and because the duplicate risk the gate existed to catch
+> was designed out instead: the write reads existing entries first and passes their list-entry `id`,
+> so a repeat write updates rather than inserts. The README says plainly that it is untested live.
+> Next person here: run it once on a throwaway account and record the result in
+> MANGA_SUPPORT_NOTES.md.
+>
+> **Original gate:** this is the only irreversible, account-modifying feature in the plan, and it
+> cannot be verified by unit tests alone. It does not ship until it has been run once by hand against
+> a throwaway list on a real account, with the result recorded in MANGA_SUPPORT_NOTES.md.
 > If that test is not performed, stop after Phase 4 — everything before this point is read-only.
 >
 > **The manual test must cover, at minimum:**
@@ -523,6 +560,12 @@ counts, missing token → 400, **token string asserted absent from every respons
 ---
 
 ## Phase 6 — Docs, hardening, final verification
+
+> **STATUS: COMPLETE (2026-10-18).** README rewritten around the two destinations rather than
+> around MAL XML; `.gitignore` added; MANGA_SUPPORT_NOTES.md carries the per-phase verification
+> record. The verification gate below ran clean. Beyond the written plan: a full UI redesign, the
+> session reset (`Start over` / `#reset`), the **Fix unmatched** flow, and `tests/test_cli.py`,
+> which found and fixed a real CLI gap (AniList-only titles were reported as "missing MAL ID").
 
 - **README.md**: speed (batching ≈8× fewer requests, cache path/TTL/`--no-cache`), candidate ranking +
   year/cover, variant retry **and its typo non-goal**, manual search/MAL-ID claim, cancel/pause,
@@ -601,8 +644,15 @@ and stopping after P4 leaves a fully read-only tool.
 | 2026-10-17 | **Live row streaming** (not in the original plan) — rows appear as they resolve; dedupe mirrors the server; `complete` merges so mid-run edits survive; downloads locked during a run | `domtest4.js` drives the real handler against a stepped SSE body |
 | 2026-10-17 | **Phase 3 localStorage persistence** — a refresh no longer loses a long run | `domtest5.js`: cross-session restore, corrupt/unknown-version fallback, three-step quota degradation |
 | 2026-10-17 | **Phase 2 complete** — run lock + cancel/pause/resume, `/api/search`, `/api/lookup`, per-row repair | `tests/test_run_control.py` (6 tests), `domtest7.js` (14 lifecycle assertions), 30-check live server script |
+| 2026-10-17 | **Phase 1 complete** — batching (8 aliases per document, 1 request each), tiered ranking, variant retries, disk cache, `resolve_many_entries` | 17 new tests in `test_batch_resolution.py`; live: 12 titles / 3 documents / 4.5s; warm cache 0 documents |
 | 2026-10-17 | **Phase 3 complete** — sorting, chips, row cap, covers, drag-drop, Ctrl+Enter, row editor, preview modal, archives | `domtest6.js` (31 assertions), `tests/test_run_control.py` preview/archive cases incl. traversal rejection |
 
-**Next, in recommended order:** Phase 1 batching (needs the alias spike first) → Phase 4 import
-→ Phase 5 direct write (gated) → Phase 6 docs, which should also add the `.gitignore` that keeps
-`myanimelist_*export.xml*` out of git.
+| 2026-10-17 | **Phase 4 complete** — `parse_mal_xml`, DOCTYPE refusal, 20 MB ceiling, client merge keyed on MAL id, add-unmatched toggle, `.gz` via `DecompressionStream` | `tests/test_gui_manga_endpoint.py` import cases, `domtest12.js` merge assertions |
+| 2026-10-17 | **Phase 5 shipped, live gate still open** — token check, existing-entry read, add/update preview, `SaveMediaListEntry` per row, AniList validation messages surfaced per title | `tests/test_anilist_write.py` (mocked API only — **no live account run**) |
+| 2026-10-18 | **AniList-first reframing** (see ANILIST_FIRST_PLAN.md) — `anilist_id > 0` replaces `idMal > 0` as the validity test; rows split three ways (exportable / AniList only / not found); per-destination row enablement | `tests/test_gui_contract.py`, `tests/test_batch_resolution.py` |
+| 2026-10-18 | **Fix unmatched** — one-at-a-time repair over every unresolved title, accepting a title, an anilist.co/myanimelist.net link or a bare id, with labelled candidates | `/api/resolve-one` tests, `fixerprobe.js` |
+| 2026-10-18 | **UI redesign + session reset** — every component restyled, light theme audited for WCAG AA, `Start over` and `#reset` clear the cached session | 14 state×theme audits, 8 viewport widths, 4 gap audits at 0 |
+| 2026-10-18 | **Phase 6 complete** — README rewritten, `.gitignore`, CLI test suite, three-way CLI reporting | 114 Python tests, 12 jsdom suites, `py_compile` + CLI smoke |
+
+**Remaining work:** one item only — run the direct AniList write once against a throwaway account
+and record the result in MANGA_SUPPORT_NOTES.md (Phase 5's open gate).

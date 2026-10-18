@@ -23,7 +23,16 @@ from datetime import datetime
 # Import core normalization and generation logic
 from generate_mal_xml import (
     MIN_REQUEST_INTERVAL,
+    anilist_existing_entries,
+    anilist_viewer,
+    anilist_write_entry,
+    backfill_anilist_ids,
+    iter_write_payloads,
+    resolve_one,
+    _normalize_status,
     current_interval,
+    BATCH_SIZE,
+    resolve_many_entries,
     lookup_by_mal_id,
     search_candidates,
     build_mal_xml,
@@ -112,6 +121,105 @@ def _export_filenames(media_type: str) -> tuple:
     return "myanimelist_export.xml", "myanimelist_export.xml.gz"
 
 
+MAX_IMPORT_BYTES = 20 * 1024 * 1024
+
+
+def _import_text(node: Any) -> str:
+    return (node.text or "").strip() if node is not None else ""
+
+
+def _import_int(node: Any, default: int = 0) -> int:
+    try:
+        return int(_import_text(node))
+    except (TypeError, ValueError):
+        return default
+
+
+def _import_date(value: str) -> Optional[str]:
+    """Keep only values the builders will accept back."""
+    if value == "0000-00-00":
+        return value
+    try:
+        datetime.strptime(value, "%Y-%m-%d")
+    except ValueError:
+        return None
+    return value
+
+
+def parse_mal_xml(raw: str) -> Dict[str, Any]:
+    """Read a MyAnimeList export back into the rows this app works with.
+
+    Returns {ok, media_type, entries, skipped}. Raises ValueError with a
+    user-facing message for anything that is not a MAL export.
+    """
+    if "<!DOCTYPE" in raw[:4096].upper():
+        # ElementTree expands internal entities; a local file is low risk but
+        # the guard costs one line.
+        raise ValueError("XML with a DOCTYPE declaration is not accepted")
+    try:
+        root = ET.fromstring(raw)
+    except ET.ParseError as exc:
+        raise ValueError(f"Not valid XML: {exc}") from None
+    if root.tag != "myanimelist":
+        raise ValueError(f"Expected a <myanimelist> document, found <{root.tag}>")
+
+    export_type = _import_int(root.find("./myinfo/user_export_type"), 0)
+    if export_type == 2:
+        media_type = "manga"
+    elif export_type == 1:
+        media_type = "anime"
+    else:
+        media_type = "manga" if root.find("manga") is not None else "anime"
+
+    entries: List[Dict[str, Any]] = []
+    skipped = 0
+    for node in root.findall("manga" if media_type == "manga" else "anime"):
+        if media_type == "manga":
+            mal_id = _import_int(node.find("manga_mangadb_id"))
+            title = _import_text(node.find("manga_title"))
+            counts = {"chapters": _import_int(node.find("manga_chapters")),
+                      "volumes": _import_int(node.find("manga_volumes")),
+                      "my_read_chapters": _import_int(node.find("my_read_chapters")),
+                      "my_read_volumes": _import_int(node.find("my_read_volumes"))}
+        else:
+            mal_id = _import_int(node.find("series_animedb_id"))
+            title = _import_text(node.find("series_title"))
+            counts = {"episodes": _import_int(node.find("series_episodes")),
+                      "my_watched_episodes": _import_int(node.find("my_watched_episodes"))}
+        if mal_id <= 0:
+            skipped += 1
+            continue
+        try:
+            status = _normalize_status(_import_text(node.find("my_status")), media_type)
+        except ValueError:
+            skipped += 1
+            continue
+
+        entry: Dict[str, Any] = {
+            "id": mal_id,
+            "anilist_id": 0,
+            "title": title or f"MAL {mal_id}",
+            "type": "Manga" if media_type == "manga" else "TV",
+            "status": status,
+            "score": max(0, min(10, _import_int(node.find("my_score")))),
+            "can_export_xml": True,
+            "can_write_anilist": False,   # no AniList id until it is looked up
+            "imported": True,
+        }
+        entry.update(counts)
+        for xml_tag, key in (("my_start_date", "start_date"), ("my_finish_date", "finish_date")):
+            kept = _import_date(_import_text(node.find(xml_tag)))
+            if kept and kept != "0000-00-00":
+                entry[key] = kept
+        for xml_tag, key in (("my_comments", "comments"), ("my_tags", "tags")):
+            text = _import_text(node.find(xml_tag))
+            if text:
+                entry[key] = text
+        entries.append(entry)
+
+    return {"ok": True, "media_type": media_type, "entries": entries, "skipped": skipped}
+
+
 def _export_state() -> Dict[str, Any]:
     """What the server actually holds, so the client never guesses."""
     state: Dict[str, Any] = {"active_media": EXPORT_MEDIA_TYPE}
@@ -160,6 +268,12 @@ HTML_TEMPLATE = """<!DOCTYPE html>
       --text-muted: #A8AFB9;
       --text-subtle: #8A919B;
 
+      /* Filled-accent pairs. Measured: dark ink on the bright accent is 6.4:1;
+         the light theme needs the reverse, white on a darker fill. */
+      --accent-strong: #3FA796;
+      --on-accent: #06211C;
+      --anilist-only-text: #8FD6C8;
+      --danger-text: #DD9089;
       --accent: #3FA796;
       --accent-hover: #348D7E;
       --accent-active: #2B766A;
@@ -202,9 +316,16 @@ HTML_TEMPLATE = """<!DOCTYPE html>
       --border: rgba(40, 44, 50, 0.10);
       --border-hover: rgba(40, 44, 50, 0.22);
       --text: #1E2126;
-      --text-muted: #5A616B;
-      --text-subtle: #8A919B;
+      --text-muted: #525963;
+      --text-subtle: #6A717B;
 
+      --accent-strong: #1F5B50;
+      --on-accent: #FFFFFF;
+      --anilist-only-text: #1A6B5C;
+      --danger-text: #9A3B30;
+      /* Declared on :root as var(--accent), which freezes it to the dark value;
+         it has to be restated here or light surfaces use the dark accent. */
+      --border-focus: #2E8577;
       --accent: #2E8577;
       --accent-hover: #276F63;
       --accent-active: #1F5B50;
@@ -214,7 +335,7 @@ HTML_TEMPLATE = """<!DOCTYPE html>
 
       --success: #43764A;
       --success-bg: rgba(67, 118, 74, 0.10);
-      --warning: #97742B;
+      --warning: #7A5C1E;
       --warning-bg: rgba(151, 116, 43, 0.10);
       --danger: #A85246;
       --danger-bg: rgba(168, 82, 70, 0.10);
@@ -1057,6 +1178,98 @@ HTML_TEMPLATE = """<!DOCTYPE html>
     }
     .modal-head { display: flex; align-items: center; justify-content: space-between; gap: 0.5rem; }
 
+    .anilist-panel {
+      display: none;
+      flex-direction: column;
+      gap: 0.375rem;
+    }
+    .anilist-panel.show { display: flex; }
+    .token-row { display: flex; gap: 0.375rem; }
+    .token-row input { flex: 1; }
+    .token-status {
+      font-size: var(--font-xs);
+      line-height: 1.45;
+      color: var(--text-muted);
+    }
+    .token-status.ok { color: var(--success); }
+    .token-status.bad { color: var(--danger); }
+
+    .write-plan {
+      display: flex;
+      flex-direction: column;
+      gap: 0.5rem;
+      font-size: var(--font-sm);
+      color: var(--text-muted);
+    }
+    .write-plan strong { color: var(--text); }
+    .write-plan .warn { color: var(--warning); }
+
+    .fix-counter {
+      font-size: var(--font-xs);
+      color: var(--text-muted);
+      font-variant-numeric: tabular-nums;
+    }
+    .fix-body { display: flex; flex-direction: column; gap: 0.625rem; }
+    .fix-original { font-size: var(--font-sm); color: var(--text-muted); }
+    .fix-original strong { color: var(--text); }
+    .fix-search { display: flex; gap: 0.375rem; }
+    .fix-search input { flex: 1; }
+    .fix-search select { width: auto; min-height: var(--control-md); padding-top: 0; padding-bottom: 0; font-size: var(--font-xs); }
+    .fix-results {
+      display: flex;
+      flex-direction: column;
+      gap: 0.25rem;
+      max-height: 46vh;
+      overflow-y: auto;
+    }
+    .fix-hint { font-size: var(--font-xs); color: var(--text-muted); padding: 0.5rem 0; }
+    .fix-result {
+      display: flex;
+      gap: 0.625rem;
+      align-items: center;
+      width: 100%;
+      padding: 0.5rem;
+      text-align: left;
+      background: var(--surface-2);
+      border: 1px solid var(--border);
+      border-radius: var(--control-radius);
+      color: var(--text);
+      cursor: pointer;
+      font-family: inherit;
+      font-size: var(--font-sm);
+    }
+    .fix-result:hover { border-color: var(--accent); }
+    .fix-result:focus-visible { outline: none; border-color: var(--accent); box-shadow: var(--ring); }
+    .fix-result .meta {
+      display: flex;
+      gap: 0.625rem;
+      flex-wrap: wrap;
+      font-size: var(--font-xs);
+      color: var(--text-muted);
+    }
+    .fix-result .grow { flex: 1; min-width: 0; }
+    .fix-result .name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+
+    .destination-prompt {
+      display: none;
+      flex-direction: column;
+      gap: 0.375rem;
+      padding: 0.75rem 0.875rem;
+      background: var(--accent-bg);
+      border: 1px solid var(--accent-tint);
+      border-radius: var(--radius-lg);
+      font-size: var(--font-xs);
+      color: var(--text-muted);
+    }
+    .destination-prompt.show { display: flex; }
+    .destination-prompt strong { color: var(--text); font-size: var(--font-sm); }
+    .destination-choice { display: flex; gap: 0.375rem; margin-top: 0.125rem; }
+
+    .status-anilist-only {
+      background: var(--accent-bg);
+      color: var(--accent-text);
+    }
+
     .row-status {
       font-family: inherit;
       font-size: 0.6875rem;
@@ -1219,6 +1432,7 @@ HTML_TEMPLATE = """<!DOCTYPE html>
     #animeTextInput { min-height: 232px; }
 
     #animeTable thead th {
+      color: var(--text-muted);
       position: sticky;
       top: 0;
       z-index: 2;
@@ -1638,6 +1852,103 @@ HTML_TEMPLATE = """<!DOCTYPE html>
     .detail-head strong { color: var(--text); }
     .title-meta .id-link { color: var(--text-muted); }
 
+
+    /* ====================================================================
+       Horizontal overflow fix. A grid item defaults to min-width:auto, so the
+       1fr column could not shrink below the table's min-content width (1105px)
+       and the whole page scrolled sideways under 1920px. Three parts: let the
+       column shrink, let the table scroll inside its own wrapper, and make the
+       table obey its column widths instead of its content.
+       ==================================================================== */
+    main > * { min-width: 0; }
+    .table-wrapper { overflow-x: auto; }
+    #animeTable { table-layout: fixed; }
+    .match-picker.match-picker { width: 100%; }
+    .title-row { min-width: 0; }
+    #animeTable td { overflow: hidden; }
+    .detail-row td { overflow: visible; }
+
+
+    /* ====================================================================
+       Audit fixes. Measured in Chrome, both themes:
+       - white on the accent was 2.93:1, below the 4.5 AA floor, on the most
+         prominent control in the app. Dark ink on the same accent is 6.4:1 and
+         keeps the colour vivid.
+       - the AniList token field is type=password, which every rule in this
+         file missed (they all target text/number/date), so it rendered as a
+         white browser-default box in a dark UI.
+       - the destination select and the row detail button sat outside the
+         three-size control system.
+       ==================================================================== */
+    .btn-primary.btn-primary {
+      background: var(--accent-strong);
+      color: var(--on-accent);
+      border-color: var(--accent-strong);
+      font-weight: 600;
+    }
+    .btn-primary.btn-primary:hover {
+      background: var(--accent-hover);
+      color: var(--on-accent);
+    }
+    .chip.active {
+      background: var(--accent-strong);
+      border-color: var(--accent-strong);
+      color: var(--on-accent);
+    }
+
+    input[type="password"].token-input,
+    .token-row input {
+      width: 100%;
+      min-height: var(--control-md);
+      padding: 0 var(--control-pad-md);
+      font-family: var(--font-sans);
+      font-size: var(--font-sm);
+      color: var(--text);
+      background: var(--surface-2);
+      border: 1px solid var(--border);
+      border-radius: var(--control-radius);
+    }
+    .token-row input::placeholder { color: var(--text-subtle); }
+    .token-row input:focus-visible {
+      outline: none;
+      border-color: var(--accent);
+      box-shadow: var(--ring);
+    }
+
+    /* The base select rule contributes 8px of vertical padding, which pushed
+       this to 37px; the other medium controls zero it out the same way. */
+    #destination {
+      min-height: var(--control-md);
+      padding-top: 0;
+      padding-bottom: 0;
+      font-size: var(--font-sm);
+    }
+
+    /* Four action buttons at 544px kept the page wider than the viewport below
+       about 1250px, because a flex item defaults to min-width:auto. */
+    .export-card { flex-wrap: wrap; }
+    .export-buttons {
+      flex-wrap: wrap;
+      min-width: 0;
+      justify-content: flex-end;
+    }
+    .export-info { min-width: 0; }
+
+    .btn-detail.btn-detail {
+      color: var(--text-muted);
+      min-height: var(--control-sm);
+      min-width: var(--control-sm);
+      font-size: var(--font-sm);
+    }
+
+    /* These two sat at 4.45:1, just under the floor, once their translucent
+       backgrounds were composited properly. */
+    .status-anilist-only { color: var(--anilist-only-text); }
+    /* The danger red sat at 4.46:1 on its own tint: a hair under the floor. */
+    .status-dropped, .status-unresolved, .id-missing,
+    .unresolved-bar strong { color: var(--danger-text); }
+
+
   </style>
 </head>
 <body>
@@ -1693,7 +2004,9 @@ HTML_TEMPLATE = """<!DOCTYPE html>
         <div>
           <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:0.375rem;">
             <label for="animeTextInput" style="margin-bottom:0;">Paste your list (one title per line):</label>
-            <button id="btnPaste" class="btn btn-secondary btn-xs" title="Paste clipboard content">
+            <button id="btnImport" class="btn btn-secondary btn-xs" title="Load an existing MyAnimeList XML export">Import XML</button>
+          <input type="file" id="importFile" accept=".xml,.gz" style="display:none;">
+          <button id="btnPaste" class="btn btn-secondary btn-xs" title="Paste clipboard content">
               <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="width:12px; height:12px;">
                 <path d="M16 4h2a2 2 0 0 1 2 2v14a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2V6a2 2 0 0 1 2-2h2"></path>
                 <rect x="8" y="2" width="8" height="4" rx="1" ry="1"></rect>
@@ -1708,6 +2021,35 @@ HTML_TEMPLATE = """<!DOCTYPE html>
               <span style="font-size:0.6875rem;">Strips numbering and bullets</span>
             </div>
           </div>
+        </div>
+
+        <div id="anilistPanel" class="anilist-panel">
+          <label for="anilistToken">AniList access token:</label>
+          <div class="token-row">
+            <input type="password" id="anilistToken" class="token-input" autocomplete="off"
+                   spellcheck="false" placeholder="Paste your token (kept in this tab only)">
+            <button id="btnTokenTest" class="btn btn-secondary btn-xs">Check</button>
+          </div>
+          <span id="tokenStatus" class="token-status">Not connected. The token is held in this
+            browser tab only: never saved to disk, never written to the export files.</span>
+        </div>
+
+        <div id="destinationPrompt" class="destination-prompt">
+          <strong>Where is this list going?</strong>
+          <span>AniList can take titles that MyAnimeList has never heard of. Pick once; change it any time.</span>
+          <div class="destination-choice">
+            <button class="btn btn-primary btn-xs" data-destination="anilist">AniList (direct)</button>
+            <button class="btn btn-secondary btn-xs" data-destination="xml">MAL-compatible XML</button>
+          </div>
+        </div>
+
+        <div>
+          <label for="destination">Importing into:</label>
+          <select id="destination">
+            <option value="">Choose a destination...</option>
+            <option value="anilist">AniList (direct)</option>
+            <option value="xml">MAL-compatible XML file</option>
+          </select>
         </div>
 
         <div>
@@ -1734,6 +2076,28 @@ HTML_TEMPLATE = """<!DOCTYPE html>
             <label for="inputScore">Score (0-10):</label>
             <input type="number" id="inputScore" min="0" max="10" value="0" placeholder="0 = Unscored">
           </div>
+        </div>
+
+        <div class="toggle-card">
+          <label class="toggle-control" for="addUnmatchedImports">
+            <input type="checkbox" id="addUnmatchedImports" checked>
+            <span class="toggle-switch" aria-hidden="true"></span>
+            <span class="toggle-info">
+              <span class="toggle-title">Add imported entries not in my list</span>
+              <span class="toggle-desc">Off: an imported XML only updates rows you already have</span>
+            </span>
+          </label>
+        </div>
+
+        <div class="toggle-card">
+          <label class="toggle-control" for="toggleFresh">
+            <input type="checkbox" id="toggleFresh">
+            <span class="toggle-switch" aria-hidden="true"></span>
+            <span class="toggle-info">
+              <span class="toggle-title">Ignore saved results</span>
+              <span class="toggle-desc">Ask AniList again instead of reusing the 7-day cache</span>
+            </span>
+          </label>
         </div>
 
         <div class="toggle-card">
@@ -1793,6 +2157,7 @@ HTML_TEMPLATE = """<!DOCTYPE html>
           </div>
         </div>
         <div class="export-buttons">
+          <button id="btnWrite" class="btn btn-primary" title="Write the selected rows to your AniList account">Write to AniList...</button>
           <button id="btnPreview" class="btn btn-secondary" title="Show the generated XML">Preview XML</button>
           <a id="btnDownloadXml" href="/api/download/xml" class="btn btn-secondary disabled" aria-disabled="true" download="myanimelist_export.xml">
             <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
@@ -1854,6 +2219,45 @@ HTML_TEMPLATE = """<!DOCTYPE html>
         </div>
       </section>
 
+      <div id="fixModal" class="modal-backdrop">
+        <div class="modal-card" style="max-width:720px;">
+          <div class="modal-head">
+            <strong>Fix unmatched titles</strong>
+            <span id="fixCounter" class="fix-counter"></span>
+            <span style="flex:1;"></span>
+            <button id="btnFixSkip" class="btn btn-secondary">Skip</button>
+            <button id="btnFixClose" class="btn btn-secondary">Done</button>
+          </div>
+          <div class="fix-body">
+            <div class="fix-original">You pasted: <strong id="fixOriginal"></strong></div>
+            <div class="fix-search">
+              <input type="text" id="fixQuery" class="token-input"
+                     placeholder="Title, AniList id, MAL id, or a pasted anilist.co / myanimelist.net link"
+                     aria-label="Search for a match">
+              <select id="fixIdKind" aria-label="What a bare number means">
+                <option value="">Number = either</option>
+                <option value="anilist">Number = AniList id</option>
+                <option value="mal">Number = MAL id</option>
+              </select>
+              <button id="btnFixSearch" class="btn btn-primary">Search</button>
+            </div>
+            <div id="fixResults" class="fix-results"></div>
+          </div>
+        </div>
+      </div>
+
+      <div id="writeModal" class="modal-backdrop">
+        <div class="modal-card" style="max-width:560px;">
+          <div class="modal-head">
+            <strong>Write to AniList</strong>
+            <span style="flex:1;"></span>
+            <button id="btnWriteCancel" class="btn btn-secondary">Cancel</button>
+            <button id="btnWriteConfirm" class="btn btn-primary">Write now</button>
+          </div>
+          <div id="writePlan" class="write-plan"></div>
+        </div>
+      </div>
+
       <div id="previewModal" class="modal-backdrop">
         <div class="modal-card">
           <div class="modal-head">
@@ -1882,6 +2286,7 @@ HTML_TEMPLATE = """<!DOCTYPE html>
         </div>
         <div id="unresolvedBar" class="unresolved-bar">
           <span id="unresolvedText"></span>
+          <button id="btnFixUnmatched" class="btn btn-primary btn-xs">Fix unmatched</button>
           <button id="btnCopyUnresolved" class="btn btn-secondary btn-xs">Copy unmatched</button>
         </div>
 
@@ -1967,12 +2372,37 @@ HTML_TEMPLATE = """<!DOCTYPE html>
     const unresolvedText = document.getElementById('unresolvedText');
     const btnCopyUnresolved = document.getElementById('btnCopyUnresolved');
     const btnReset = document.getElementById('btnReset');
+    const btnImport = document.getElementById('btnImport');
+    const fixModal = document.getElementById('fixModal');
+    const fixOriginal = document.getElementById('fixOriginal');
+    const fixQuery = document.getElementById('fixQuery');
+    const fixIdKind = document.getElementById('fixIdKind');
+    const fixResults = document.getElementById('fixResults');
+    const fixCounter = document.getElementById('fixCounter');
+    const btnFixSearch = document.getElementById('btnFixSearch');
+    const btnFixSkip = document.getElementById('btnFixSkip');
+    const btnFixClose = document.getElementById('btnFixClose');
+    const btnFixUnmatched = document.getElementById('btnFixUnmatched');
+    const anilistPanel = document.getElementById('anilistPanel');
+    const anilistToken = document.getElementById('anilistToken');
+    const btnTokenTest = document.getElementById('btnTokenTest');
+    const tokenStatus = document.getElementById('tokenStatus');
+    const btnWrite = document.getElementById('btnWrite');
+    const writeModal = document.getElementById('writeModal');
+    const writePlan = document.getElementById('writePlan');
+    const btnWriteConfirm = document.getElementById('btnWriteConfirm');
+    const btnWriteCancel = document.getElementById('btnWriteCancel');
+    const importFile = document.getElementById('importFile');
+    const destinationSelect = document.getElementById('destination');
+    const destinationPrompt = document.getElementById('destinationPrompt');
     const runControls = document.getElementById('runControls');
     const btnPause = document.getElementById('btnPause');
     const btnCancel = document.getElementById('btnCancel');
     const chipRow = document.getElementById('chipRow');
     const rowCapNotice = document.getElementById('rowCapNotice');
     const toggleArchive = document.getElementById('toggleArchive');
+    const toggleFresh = document.getElementById('toggleFresh');
+    const addUnmatchedImports = document.getElementById('addUnmatchedImports');
     const btnPreview = document.getElementById('btnPreview');
     const previewModal = document.getElementById('previewModal');
     const previewBody = document.getElementById('previewBody');
@@ -1987,6 +2417,15 @@ HTML_TEMPLATE = """<!DOCTYPE html>
     let sortDir = 0;            // 0 = off, 1 = asc, -1 = desc
     let activeRunId = null;
     let isPaused = false;
+    let networkFailures = 0;
+    let mergedTitles = [];
+    // '' until the user picks. Not defaulted on their behalf: the two
+    // destinations accept different titles, so guessing hides rows.
+    let destination = '';
+    let exportFileInfo = null;
+    // Memory only, deliberately: not localStorage, not the saved session, never
+    // sent anywhere except this machine's own server.
+    let anilistUser = null;
     const expandedRows = new Set();
 
     // AniList's own vocabulary. The server maps these onto MAL's XML values:
@@ -2160,12 +2599,16 @@ HTML_TEMPLATE = """<!DOCTYPE html>
           status: selectStatus.value,
           score: parseInt(inputScore.value, 10) || 0,
           expand_sequels: mediaType() === 'anime' && toggleSequels.checked,
-          archive: toggleArchive.checked
+          archive: toggleArchive.checked,
+          use_cache: !toggleFresh.checked,
+          destination: destination
         };
 
         currentAnimes = [];
         expandedRows.clear();
         showAllRows = false;
+        networkFailures = 0;
+        mergedTitles = [];
         renderTable(currentAnimes);
         updateStats();
         activeRunId = null;
@@ -2220,15 +2663,22 @@ HTML_TEMPLATE = """<!DOCTYPE html>
                 const ratio = Math.min(1, Math.max(0, event.percent / 100));
                 progressBarFill.style.transform = 'scaleX(' + ratio + ')';
                 progressCountLabel.textContent = event.current + ' / ' + event.total;
-                if (event.interval) {
-                  const left = Math.max(0, event.total - event.current) * event.interval;
+                if (event.eta_seconds !== undefined || event.interval) {
+                  // Server knows the batch size; per-title maths overestimated by ~8x.
+                  const left = event.eta_seconds !== undefined
+                    ? event.eta_seconds
+                    : Math.max(0, event.total - event.current) * event.interval;
                   const mins = Math.floor(left / 60), secs = Math.round(left % 60);
                   progressCountLabel.title = `~${mins > 0 ? mins + 'm ' : ''}${secs}s remaining at AniList's rate limit`;
                   etaLabel.textContent = left > 0 ? `~${mins > 0 ? mins + 'm ' : ''}${secs}s left` : 'finishing...';
                 }
                 progressPercentLabel.textContent = Math.round(event.percent) + '%';
                 progressCurrentTitle.textContent = `[${event.current}/${event.total}] ${event.title}`;
-                if (event.resolved_title) {
+                if (event.stage === 'retry') {
+                  // `done` does not advance during retries; say so rather than
+                  // letting the bar sit still and look stuck.
+                  progressCurrentSub.textContent = 'Retrying titles that did not match on the first pass...';
+                } else if (event.resolved_title) {
                   progressCurrentSub.textContent = '-> ' + event.resolved_title;
                 } else {
                   progressCurrentSub.textContent = 'Resolving metadata via AniList & MAL...';
@@ -2240,7 +2690,7 @@ HTML_TEMPLATE = """<!DOCTYPE html>
                     const key = entryKey(entry);
                     if (seen.has(key)) return;   // same dedupe the final list applies
                     seen.add(key);
-                    currentAnimes.push({ ...entry, enabled: Number(entry.id) > 0 });
+                    currentAnimes.push({ ...entry, enabled: isActionable(entry) });
                     added = true;
                   });
                   if (added) {
@@ -2261,7 +2711,7 @@ HTML_TEMPLATE = """<!DOCTYPE html>
                 const existing = new Map(currentAnimes.map(i => [entryKey(i), i]));
                 currentAnimes = (event.entries || []).map(e => {
                   const row = existing.get(entryKey(e));
-                  return row || { ...e, enabled: Number(e.id) > 0 };
+                  return row || { ...e, enabled: isActionable(e) };
                 });
                 renderTable(currentAnimes);
                 showToast('Run cancelled - ' + (event.resolved || 0) + ' titles resolved', 'warning');
@@ -2269,6 +2719,10 @@ HTML_TEMPLATE = """<!DOCTYPE html>
                 cancelledRun = true;
                 streamDone = true;
                 break;
+              } else if (event.type === 'network_error') {
+                networkFailures = event.count || 0;
+                progressCurrentSub.textContent = 'AniList could not be reached for '
+                  + networkFailures + ' titles - they are not necessarily missing.';
               } else if (event.type === 'error') {
                 showToast(event.error || 'Could not build the export', 'error');
                 progressCard.style.display = 'none';
@@ -2283,12 +2737,13 @@ HTML_TEMPLATE = """<!DOCTYPE html>
                 const existing = new Map(currentAnimes.map(i => [entryKey(i), i]));
                 currentAnimes = event.entries.map(e => {
                   const row = existing.get(entryKey(e));
-                  return row || { ...e, enabled: Number(e.id) > 0 };
+                  return row || { ...e, enabled: isActionable(e) };
                 });
                 selectAllCheckbox.checked = true;
                 selectAllCheckbox.indeterminate = false;
                 renderTable(currentAnimes);
                 updateStatsAndExport();
+                mergedTitles = event.merged || [];
                 refreshExportState();
                 showToast('XML generated (' + event.entries.length + ' ' + (mediaType() === 'manga' ? 'manga' : 'anime') + ' rows; unresolved rows are excluded)');
                 try { reader.cancel(); } catch(e) {}
@@ -2324,7 +2779,7 @@ HTML_TEMPLATE = """<!DOCTYPE html>
     }
 
     function updateStats() {
-      const enabledItems = currentAnimes.filter(i => i.enabled !== false && Number(i.id) > 0);
+      const enabledItems = currentAnimes.filter(i => i.enabled !== false && isActionable(i));
       const totalCount = currentAnimes.length;
       const enabledCount = enabledItems.length;
 
@@ -2341,16 +2796,40 @@ HTML_TEMPLATE = """<!DOCTYPE html>
 
       filterCountLabel.textContent = `Showing ${filteredCount()} of ${totalCount} (${enabledCount} selected)`;
 
-      const missed = currentAnimes.filter(i => Number(i.id) <= 0);
-      unresolvedBar.classList.toggle('show', missed.length > 0);
+      const missed = currentAnimes.filter(i => !canXml(i) && !canWrite(i));
+      const anilistOnly = currentAnimes.filter(i => !canXml(i) && canWrite(i));
+      const notes = [];
+      const noun = mediaType() === 'manga' ? 'manga' : 'anime';
       if (missed.length > 0) {
-        const noun = mediaType() === 'manga' ? 'manga' : 'anime';
-        unresolvedText.innerHTML = `<strong>${missed.length}</strong> ${noun} ${missed.length === 1 ? 'title has' : 'titles have'} no MyAnimeList ID on AniList and cannot be exported. Check the spelling, or try the romaji title.`;
+        // Blaming the list for a network outage is how a tool loses trust.
+        notes.push(networkFailures > 0
+          ? `<strong>${missed.length}</strong> ${noun} ${missed.length === 1 ? 'title' : 'titles'} could not be checked: AniList was unreachable for ${networkFailures} of them. Re-run before assuming the titles are wrong.`
+          : `<strong>${missed.length}</strong> ${noun} ${missed.length === 1 ? 'title has' : 'titles have'} no MyAnimeList ID on AniList and cannot be exported. Check the spelling, or try the romaji title.`);
+      }
+      if (anilistOnly.length > 0) {
+        notes.push(destination === 'xml'
+          ? `<strong>${anilistOnly.length}</strong> ${anilistOnly.length === 1 ? 'title exists' : 'titles exist'} on AniList but ${anilistOnly.length === 1 ? 'has' : 'have'} no MyAnimeList ID, so MAL XML cannot carry ${anilistOnly.length === 1 ? 'it' : 'them'}. Switch the destination to AniList to keep ${anilistOnly.length === 1 ? 'it' : 'them'}.`
+          : `<strong>${anilistOnly.length}</strong> ${anilistOnly.length === 1 ? 'title is' : 'titles are'} on AniList without a MyAnimeList ID. ${anilistOnly.length === 1 ? 'It' : 'They'} cannot go into the MAL XML file; the direct AniList write that handles ${anilistOnly.length === 1 ? 'it' : 'them'} is not built yet.`);
+      }
+      if (mergedTitles.length > 0) {
+        const names = mergedTitles.slice(0, 4).map(m => escapeHtml(m.original || m.title)).join(', ');
+        const more = mergedTitles.length > 4 ? ` and ${mergedTitles.length - 4} more` : '';
+        notes.push(`<strong>${mergedTitles.length}</strong> pasted ${mergedTitles.length === 1 ? 'line' : 'lines'} matched an entry already in the list and ${mergedTitles.length === 1 ? 'was' : 'were'} merged: ${names}${more}.`);
+      }
+      unresolvedBar.classList.toggle('show', notes.length > 0);
+      if (notes.length > 0) {
+        unresolvedText.innerHTML = notes.join('<br>');
       }
 
       if (enabledCount > 0) {
-        exportHeadline.textContent = `Export files ready (${enabledCount} ${mediaType() === 'manga' ? 'manga' : 'anime'})`;
-        exportSubline.textContent = 'MAL-compatible XML for import through MyAnimeList or AniList.';
+        const xmlable = enabledItems.filter(canXml).length;
+        exportHeadline.textContent = `${enabledCount} ${mediaType() === 'manga' ? 'manga' : 'anime'} selected`;
+        const onDisk = exportFileInfo
+          ? `${exportFileInfo.count} ${exportFileInfo.count === 1 ? 'entry' : 'entries'} in ${exportFileInfo.name}. `
+          : '';
+        exportSubline.textContent = onDisk + (xmlable === enabledCount
+          ? 'MAL-compatible XML for import through MyAnimeList or AniList.'
+          : `Only ${xmlable} of ${enabledCount} can travel in MAL XML; the rest have no MyAnimeList ID.`);
         btnDownloadXml.classList.remove('disabled');
         btnDownloadXml.removeAttribute('aria-disabled');
         btnDownloadGz.classList.remove('disabled');
@@ -2380,7 +2859,7 @@ HTML_TEMPLATE = """<!DOCTYPE html>
     function updateStatsAndExport() {
       updateStats();
       saveState();
-      const enabledItems = currentAnimes.filter(i => i.enabled !== false && Number(i.id) > 0);
+      const enabledItems = currentAnimes.filter(i => i.enabled !== false && isActionable(i));
       clearTimeout(exportDebounceTimer);
       exportDebounceTimer = setTimeout(async () => {
         try {
@@ -2430,10 +2909,12 @@ HTML_TEMPLATE = """<!DOCTYPE html>
         btnDownloadGz.download = info.gz_name;
         setDownloadEnabled(btnDownloadXml, info.xml);
         setDownloadEnabled(btnDownloadGz, info.gz);
-        if (info.xml && info.count !== null && info.count !== undefined) {
-          exportSubline.textContent = info.count + ' entries in ' + info.xml_name
-            + ' - MAL-compatible XML for import through MyAnimeList or AniList.';
-        }
+        // Record what the server holds; updateStats owns the wording so the two
+        // do not overwrite each other's message.
+        exportFileInfo = (info.xml && info.count !== null && info.count !== undefined)
+          ? { name: info.xml_name, count: info.count }
+          : null;
+        updateStats();
       } catch (e) {
         // leave the client-side state as-is
       }
@@ -2468,10 +2949,50 @@ HTML_TEMPLATE = """<!DOCTYPE html>
         const counts = mediaType() === 'manga'
           ? `${c.chapters || '?'} ch`
           : `${c.episodes || '?'} eps`;
-        const label = `${c.title} - MAL ${c.id} - ${c.type} - ${counts}`;
+        // A candidate with no MAL id is still valid for a direct AniList write;
+        // labelling it "MAL 0" would read as broken.
+        const ident = Number(c.id) > 0 ? `MAL ${c.id}` : `AniList ${c.anilist_id} (no MAL ID)`;
+        const label = `${c.title} - ${ident} - ${c.type} - ${counts}`;
         return `<option value="${i}" ${Number(c.id) === Number(item.id) ? 'selected' : ''}>${escapeHtml(label)}</option>`;
       }).join('');
       return `<select class="match-picker" data-index="${idx}" title="Pick the correct match for this title">${options}</select>`;
+    }
+
+    // A row can be exportable by one route and not the other. Older saved rows
+    // predate the flags, so fall back to the ids they do carry.
+    function canXml(item) {
+      return item.can_export_xml !== undefined
+        ? !!item.can_export_xml
+        : Number(item.id) > 0;
+    }
+
+    function canWrite(item) {
+      return item.can_write_anilist !== undefined
+        ? !!item.can_write_anilist
+        : Number(item.anilist_id) > 0;
+    }
+
+    function isActionable(item) {
+      if (destination === 'xml') return canXml(item);
+      if (destination === 'anilist') return canWrite(item);
+      return canXml(item) || canWrite(item);   // no destination chosen yet
+    }
+
+    function rowBadge(item) {
+      if (canXml(item)) return { cls: 'tag-type', text: item.type || 'TV' };
+      if (canWrite(item)) return { cls: 'status-pill status-anilist-only', text: 'AniList only' };
+      return { cls: 'status-pill status-unresolved', text: 'Not found' };
+    }
+
+    function setDestination(value, persist) {
+      destination = (value === 'anilist' || value === 'xml') ? value : '';
+      destinationSelect.value = destination;
+      destinationPrompt.classList.toggle('show', destination === '');
+      anilistPanel.classList.toggle('show', destination === 'anilist');
+      btnWrite.style.display = destination === 'anilist' ? '' : 'none';
+      renderTable(currentAnimes);
+      updateStats();
+      if (persist !== false) saveState();
     }
 
     // Mirrors deduplicate_entries() on the server: MAL id when present, else title.
@@ -2486,6 +3007,8 @@ HTML_TEMPLATE = """<!DOCTYPE html>
         score: parseInt(inputScore.value, 10) || 0,
         sequels: !!toggleSequels.checked,
         archive: !!toggleArchive.checked,
+        fresh: !!toggleFresh.checked,
+        destination: destination,
         text: txtArea.value,
         updated: Date.now(),
       };
@@ -2543,6 +3066,8 @@ HTML_TEMPLATE = """<!DOCTYPE html>
       inputScore.value = '0';
       toggleSequels.checked = false;
       toggleArchive.checked = false;
+      toggleFresh.checked = false;
+      setDestination('', false);
       mediaTypeSelect.value = 'anime';
       document.querySelectorAll('th.sortable .sort-mark').forEach(mark => { mark.textContent = ''; });
       updateMediaTypeUI(false);
@@ -2607,6 +3132,8 @@ HTML_TEMPLATE = """<!DOCTYPE html>
       if (typeof saved.score === 'number') inputScore.value = Math.max(0, Math.min(10, saved.score));
       toggleSequels.checked = !!saved.sequels;
       toggleArchive.checked = !!saved.archive;
+      toggleFresh.checked = !!saved.fresh;
+      setDestination(saved.destination, false);
       if (typeof saved.text === 'string') txtArea.value = saved.text;
       updateLineCounter();
 
@@ -2656,11 +3183,13 @@ HTML_TEMPLATE = """<!DOCTYPE html>
       { id: 'planned', label: 'Planned' },
       { id: 'paused', label: 'Paused' },
       { id: 'dropped', label: 'Dropped' },
-      { id: 'unresolved', label: 'No MAL ID' },
+      { id: 'anilistonly', label: 'AniList only' },
+      { id: 'unresolved', label: 'Not found' },
     ];
 
     function chipBucket(item) {
-      if (Number(item.id) <= 0) return 'unresolved';
+      if (!canXml(item) && !canWrite(item)) return 'unresolved';
+      if (!canXml(item)) return 'anilistonly';
       const status = String(item.status || '').toLowerCase();
       if (status === 'reading' || status === 'watching' || status === 'rereading' || status === 'rewatching') return 'reading';
       if (status === 'completed') return 'completed';
@@ -2699,7 +3228,7 @@ HTML_TEMPLATE = """<!DOCTYPE html>
     }
 
     function fixRowHtml(item, idx) {
-      if (Number(item.id) > 0) return '';
+      if (isActionable(item)) return '';
       return `<div class="fix-row">
         <input class="fix-input" data-index="${idx}" placeholder="Search title or MAL ID..."
           aria-label="Find a match for ${escapeHtml(item.original || item.title)}">
@@ -2750,12 +3279,12 @@ HTML_TEMPLATE = """<!DOCTYPE html>
         `<option value="${escapeHtml(v)}" ${v === current ? 'selected' : ''}>${escapeHtml(v)}</option>`).join('');
       const orphan = known ? '' : `<option value="${escapeHtml(current)}" selected>${escapeHtml(current)}</option>`;
       return `<select class="row-status status-pill ${statusPillClass(current)}" data-index="${idx}"
-        ${Number(item.id) > 0 ? '' : 'disabled'}
+        ${isActionable(item) ? '' : 'disabled'}
         aria-label="Status for ${escapeHtml(item.title)}">${orphan}${options}</select>`;
     }
 
     function progressHtml(item, idx) {
-      const exportable = Number(item.id) > 0;
+      const exportable = isActionable(item);
       // One column, not two: an editable count against its total reads as progress.
       // Separate "total" and "read" columns forced the eye to join them every row.
       return '<div class="progress-cell">' + progressFields().map(([field, unit]) => {
@@ -2801,12 +3330,12 @@ HTML_TEMPLATE = """<!DOCTYPE html>
         const malUrl = item.id ? `https://myanimelist.net/${mediaType()}/${item.id}` : '';
         const alUrl = item.anilist_id ? `https://anilist.co/${mediaType()}/${item.anilist_id}` : '';
         const hasRenamed = item.original && item.original.toLowerCase() !== item.title.toLowerCase();
-        const isChecked = item.enabled !== false && Number(item.id) > 0;
+        const isChecked = item.enabled !== false && isActionable(item);
 
         return `
           <tr class="${isChecked ? '' : 'row-excluded'}">
             <td class="cell-checkbox" style="text-align: center; cursor: pointer;">
-              <input type="checkbox" class="table-checkbox row-checkbox" data-index="${globalIdx}" ${isChecked ? 'checked' : ''} ${Number(item.id) > 0 ? '' : 'disabled'} aria-label="Include ${escapeHtml(item.title)}">
+              <input type="checkbox" class="table-checkbox row-checkbox" data-index="${globalIdx}" ${isChecked ? 'checked' : ''} ${isActionable(item) ? '' : 'disabled'} aria-label="Include ${escapeHtml(item.title)}">
             </td>
             <td>
               <div class="title-row">
@@ -2826,7 +3355,7 @@ HTML_TEMPLATE = """<!DOCTYPE html>
               </div>
             </td>
             <td>
-              <span class="${Number(item.id) > 0 ? 'tag-type' : 'status-pill status-unresolved'}">${escapeHtml(Number(item.id) > 0 ? (item.type || 'TV') : 'No MAL ID')}</span>
+              <span class="${rowBadge(item).cls}">${escapeHtml(rowBadge(item).text)}</span>
               ${item.year ? `<span class="tag-year">${item.year}</span>` : ''}
             </td>
             <td>${progressHtml(item, globalIdx)}</td>
@@ -2847,7 +3376,7 @@ HTML_TEMPLATE = """<!DOCTYPE html>
     selectAllCheckbox.addEventListener('change', () => {
       const isChecked = selectAllCheckbox.checked;
       currentAnimes.forEach(item => {
-        if (Number(item.id) <= 0) { item.enabled = false; return; }
+        if (!isActionable(item)) { item.enabled = false; return; }
         if (matchesFilters(item)) item.enabled = isChecked;
       });
       renderTable(currentAnimes);
@@ -2862,7 +3391,7 @@ HTML_TEMPLATE = """<!DOCTYPE html>
           ? item.candidates[parseInt(e.target.value, 10)] : null;
         if (!pick) return;
         // Replace the identity/metadata only; status, score and progress stay.
-        Object.assign(item, pick, { enabled: Number(pick.id) > 0 });
+        Object.assign(item, pick, { enabled: isActionable(pick) });
         renderTable(currentAnimes);
         updateStatsAndExport();
         showToast('Match changed to ' + pick.title);
@@ -2958,7 +3487,7 @@ HTML_TEMPLATE = """<!DOCTYPE html>
           return;
         }
         // Replace identity and metadata; the user's own choices stay put.
-        Object.assign(item, found, { enabled: Number(found.id) > 0 });
+        Object.assign(item, found, { enabled: isActionable(found) });
         if (list.length > 1) item.candidates = list;
         renderTable(currentAnimes);
         updateStatsAndExport();
@@ -2986,7 +3515,12 @@ HTML_TEMPLATE = """<!DOCTYPE html>
       if (fixBtn) {
         const idx = parseInt(fixBtn.dataset.index, 10);
         const input = tableBody.querySelector(`.fix-input[data-index="${idx}"]`);
-        if (input) repairRow(idx, input.value);
+        const typed = input ? input.value.trim() : '';
+        if (typed) {
+          repairRow(idx, typed);            // they already typed something specific
+        } else {
+          openFixer(idx);                   // otherwise show them the candidates
+        }
         return;
       }
 
@@ -3118,7 +3652,11 @@ HTML_TEMPLATE = """<!DOCTYPE html>
       if (e.target === previewModal) previewModal.classList.remove('show');
     });
     document.addEventListener('keydown', (e) => {
-      if (e.key === 'Escape') previewModal.classList.remove('show');
+      if (e.key === 'Escape') {
+        previewModal.classList.remove('show');
+        writeModal.classList.remove('show');
+        fixModal.classList.remove('show');
+      }
       if (e.key === 'Enter' && (e.ctrlKey || e.metaKey) && !isProcessing) {
         e.preventDefault();
         btnProcess.click();
@@ -3134,6 +3672,386 @@ HTML_TEMPLATE = """<!DOCTYPE html>
     });
 
     toggleArchive.addEventListener('change', saveState);
+    toggleFresh.addEventListener('change', saveState);
+
+    // ---- fixing unmatched rows -------------------------------------------
+    let fixQueue = [];
+    let fixPos = 0;
+    let fixFixed = 0;
+
+    // Every row that cannot be used for the current destination, which is
+    // exactly the set that shows a Find button. Keying this off "no ids at all"
+    // instead meant clicking Find on an AniList-only row under the XML
+    // destination opened the fixer on a different title.
+    function unmatchedIndexes() {
+      return currentAnimes.map((item, i) => isActionable(item) ? -1 : i).filter(i => i >= 0);
+    }
+
+    function openFixer(startIndex) {
+      fixQueue = unmatchedIndexes();
+      if (!fixQueue.length) {
+        showToast('Nothing left to fix');
+        return;
+      }
+      fixFixed = 0;
+      let wanted = fixQueue.indexOf(startIndex);
+      if (wanted < 0 && startIndex >= 0 && currentAnimes[startIndex]) {
+        fixQueue.unshift(startIndex);      // asked for a specific row: honour it
+        wanted = 0;
+      }
+      fixPos = wanted >= 0 ? wanted : 0;
+      fixModal.classList.add('show');
+      showFixCurrent();
+    }
+
+    function showFixCurrent() {
+      if (fixPos >= fixQueue.length) {
+        fixModal.classList.remove('show');
+        showToast(fixFixed ? `Fixed ${fixFixed} of ${fixQueue.length}` : 'Nothing changed');
+        return;
+      }
+      const item = currentAnimes[fixQueue[fixPos]];
+      if (!item) { fixPos += 1; showFixCurrent(); return; }
+      const text = item.original || item.title || '';
+      fixOriginal.textContent = text;
+      fixQuery.value = text;
+      fixCounter.textContent = `${fixPos + 1} of ${fixQueue.length}`;
+      fixResults.innerHTML = '<div class="fix-hint">Press Search, or paste an AniList link and press Enter.</div>';
+      fixQuery.focus();
+      fixQuery.select();
+    }
+
+    function resultRowHtml(entry, i) {
+      const ident = Number(entry.id) > 0
+        ? `MAL ${entry.id}`
+        : `AniList ${entry.anilist_id} - no MAL ID`;
+      const counts = mediaType() === 'manga'
+        ? `${entry.chapters || '?'} ch / ${entry.volumes || '?'} vol`
+        : `${entry.episodes || '?'} eps`;
+      const bits = [escapeHtml(entry.type || ''), entry.year ? String(entry.year) : '',
+                    escapeHtml(ident), counts].filter(Boolean);
+      return `<button class="fix-result" data-pick="${i}">
+        ${entry.cover ? `<img class="cover-thumb" src="${escapeHtml(entry.cover)}" alt="" loading="lazy">`
+                      : '<span class="cover-thumb cover-empty" aria-hidden="true"></span>'}
+        <span class="grow">
+          <span class="name">${escapeHtml(entry.title || '')}</span>
+          <span class="meta">${bits.map(b => `<span>${b}</span>`).join('')}</span>
+        </span>
+      </button>`;
+    }
+
+    let fixCandidates = [];
+
+    async function runFixSearch() {
+      const query = fixQuery.value.trim();
+      if (!query) return;
+      fixResults.innerHTML = '<div class="fix-hint">Searching AniList...</div>';
+      try {
+        const res = await fetch('/api/resolve-one', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ query: query, media_type: mediaType(), id_kind: fixIdKind.value }),
+        });
+        const payload = await res.json().catch(() => ({}));
+        if (!payload.ok) {
+          fixCandidates = [];
+          fixResults.innerHTML = `<div class="fix-hint">${escapeHtml(payload.error || 'Nothing found.')}</div>`;
+          return;
+        }
+        fixCandidates = payload.entries || [];
+        fixResults.innerHTML = fixCandidates.map(resultRowHtml).join('')
+          || '<div class="fix-hint">Nothing found.</div>';
+      } catch (e) {
+        fixResults.innerHTML = '<div class="fix-hint">Could not reach the local server.</div>';
+      }
+    }
+
+    function applyFix(entry) {
+      const idx = fixQueue[fixPos];
+      const item = currentAnimes[idx];
+      if (!item || !entry) return;
+      // Identity and metadata change; the user's status, score and progress stay.
+      Object.assign(item, entry, { enabled: isActionable(entry) });
+      if (fixCandidates.length > 1) item.candidates = fixCandidates;
+      fixFixed += 1;
+      fixPos += 1;
+      renderTable(currentAnimes);
+      updateStatsAndExport();
+      showFixCurrent();
+    }
+
+    btnFixUnmatched.addEventListener('click', () => openFixer(-1));
+    btnFixSearch.addEventListener('click', runFixSearch);
+    fixIdKind.addEventListener('change', runFixSearch);
+    fixQuery.addEventListener('keydown', (e) => {
+      if (e.key === 'Enter') { e.preventDefault(); runFixSearch(); }
+    });
+    fixResults.addEventListener('click', (e) => {
+      const pick = e.target.closest('[data-pick]');
+      if (pick) applyFix(fixCandidates[parseInt(pick.dataset.pick, 10)]);
+    });
+    btnFixSkip.addEventListener('click', () => { fixPos += 1; showFixCurrent(); });
+    btnFixClose.addEventListener('click', () => {
+      fixModal.classList.remove('show');
+      if (fixFixed) showToast(`Fixed ${fixFixed} title${fixFixed === 1 ? '' : 's'}`);
+    });
+    fixModal.addEventListener('click', (e) => {
+      if (e.target === fixModal) fixModal.classList.remove('show');
+    });
+
+    function writableRows() {
+      return currentAnimes.filter(i => i.enabled !== false && canWrite(i));
+    }
+
+    function stripForServer(item) {
+      const { candidates, ...rest } = item;
+      return rest;
+    }
+
+    btnTokenTest.addEventListener('click', async () => {
+      const token = anilistToken.value.trim();
+      if (!token) {
+        tokenStatus.textContent = 'Paste a token first.';
+        tokenStatus.className = 'token-status bad';
+        return;
+      }
+      tokenStatus.textContent = 'Checking...';
+      tokenStatus.className = 'token-status';
+      try {
+        const res = await fetch('/api/anilist-test', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ token: token }),
+        });
+        const payload = await res.json().catch(() => ({}));
+        if (!res.ok || !payload.ok) {
+          anilistUser = null;
+          tokenStatus.textContent = payload.error || 'That token did not work.';
+          tokenStatus.className = 'token-status bad';
+          return;
+        }
+        anilistUser = { id: payload.id, name: payload.name };
+        tokenStatus.textContent = 'Connected as ' + payload.name + '.';
+        tokenStatus.className = 'token-status ok';
+      } catch (e) {
+        tokenStatus.textContent = 'Could not reach the local server.';
+        tokenStatus.className = 'token-status bad';
+      }
+    });
+
+    btnWrite.addEventListener('click', async () => {
+      const token = anilistToken.value.trim();
+      const rows = writableRows();
+      if (!token) {
+        showToast('Paste and check an AniList token first', 'warning');
+        return;
+      }
+      if (!rows.length) {
+        showToast('No rows with an AniList id are selected', 'warning');
+        return;
+      }
+      writePlan.innerHTML = 'Checking your AniList list...';
+      writeModal.classList.add('show');
+      try {
+        const res = await fetch('/api/anilist-preview', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            token: token,
+            media_type: mediaType(),
+            status: selectStatus.value,
+            score: parseInt(inputScore.value, 10) || 0,
+            entries: rows.map(stripForServer),
+          }),
+        });
+        const plan = await res.json().catch(() => ({}));
+        if (!res.ok || !plan.ok) {
+          writePlan.innerHTML = escapeHtml(plan.error || 'Could not read your AniList list.');
+          return;
+        }
+        const skippedNote = plan.skipped.length
+          ? `<div>${plan.skipped.length} row${plan.skipped.length === 1 ? '' : 's'} will be skipped: ${escapeHtml(plan.skipped.slice(0, 3).map(sk => sk.title).join(', '))}${plan.skipped.length > 3 ? '...' : ''}</div>`
+          : '';
+        writePlan.innerHTML = `
+          <div>Account: <strong>${escapeHtml(plan.viewer)}</strong></div>
+          <div><strong>${plan.creates}</strong> ${plan.creates === 1 ? 'entry' : 'entries'} will be added,
+               <strong>${plan.updates}</strong> already on your list will be updated.</div>
+          ${skippedNote}
+          <div class="warn">This modifies your AniList account. Entries already on your list are
+            updated in place, never duplicated.</div>`;
+      } catch (e) {
+        writePlan.innerHTML = 'Could not reach the local server.';
+      }
+    });
+
+    btnWriteCancel.addEventListener('click', () => writeModal.classList.remove('show'));
+    writeModal.addEventListener('click', (e) => {
+      if (e.target === writeModal) writeModal.classList.remove('show');
+    });
+
+    btnWriteConfirm.addEventListener('click', async () => {
+      const token = anilistToken.value.trim();
+      const rows = writableRows();
+      if (!token || !rows.length) return;
+      writeModal.classList.remove('show');
+      isProcessing = true;
+      btnWrite.disabled = true;
+      progressCard.style.display = 'flex';
+      progressBarFill.style.transform = 'scaleX(0)';
+      progressCurrentTitle.textContent = 'Writing to AniList...';
+      progressCurrentSub.textContent = '';
+      try {
+        const res = await fetch('/api/anilist-write', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            token: token,
+            confirm: true,
+            media_type: mediaType(),
+            status: selectStatus.value,
+            score: parseInt(inputScore.value, 10) || 0,
+            entries: rows.map(stripForServer),
+          }),
+        });
+        if (!res.ok) {
+          const err = await res.json().catch(() => ({}));
+          showToast(err.error || 'The write could not start', 'error');
+          return;
+        }
+        const reader = res.body.getReader();
+        const decoder = new TextDecoder('utf-8');
+        let buffer = '';
+        let done = false;
+        while (!done) {
+          const chunk = await reader.read();
+          if (chunk.done) break;
+          buffer += decoder.decode(chunk.value, { stream: true });
+          const parts = buffer.split(String.fromCharCode(10) + String.fromCharCode(10));
+          buffer = parts.pop();
+          for (const part of parts) {
+            const trimmed = part.trim();
+            if (!trimmed.startsWith('data: ')) continue;
+            let event;
+            try {
+              event = JSON.parse(trimmed.slice(6));
+            } catch (errParse) {
+              continue;
+            }
+            if (event.type === 'write_progress') {
+              progressBarFill.style.transform = 'scaleX(' + Math.min(1, event.percent / 100) + ')';
+              progressCountLabel.textContent = event.current + ' / ' + event.total;
+              progressPercentLabel.textContent = Math.round(event.percent) + '%';
+              progressCurrentTitle.textContent = `[${event.current}/${event.total}] ${event.title}`;
+              progressCurrentSub.textContent = event.ok ? 'Saved' : 'Failed';
+            } else if (event.type === 'plan') {
+              progressCurrentSub.textContent = `${event.creates} to add, ${event.updates} to update`;
+            } else if (event.type === 'write_complete') {
+              const failedCount = (event.failed || []).length;
+              showToast(`AniList updated: ${event.created} added, ${event.updated} updated`
+                + (failedCount ? `, ${failedCount} failed` : ''), failedCount ? 'warning' : 'success');
+              if (failedCount) {
+                unresolvedBar.classList.add('show');
+                unresolvedText.innerHTML = `<strong>${failedCount}</strong> AniList ${failedCount === 1 ? 'write' : 'writes'} failed: `
+                  + event.failed.slice(0, 3).map(f => escapeHtml(f.title + ' (' + f.error + ')')).join('; ');
+              }
+              done = true;
+              break;
+            } else if (event.type === 'cancelled') {
+              showToast('Write cancelled after ' + event.written + ' entries', 'warning');
+              done = true;
+              break;
+            }
+          }
+        }
+        try { reader.cancel(); } catch (e) {}
+      } catch (e) {
+        showToast('Lost contact with the local server', 'error');
+      } finally {
+        isProcessing = false;
+        btnWrite.disabled = false;
+        setTimeout(() => { progressCard.style.display = 'none'; }, 1500);
+      }
+    });
+
+    btnImport.addEventListener('click', () => importFile.click());
+
+    importFile.addEventListener('change', async () => {
+      const file = importFile.files && importFile.files[0];
+      importFile.value = '';            // let the same file be picked twice
+      if (!file) return;
+      let text;
+      try {
+        if (file.name.toLowerCase().endsWith('.gz')) {
+          if (typeof DecompressionStream === 'undefined') {
+            showToast('This browser cannot unpack .gz - import the .xml instead', 'warning');
+            return;
+          }
+          const stream = file.stream().pipeThrough(new DecompressionStream('gzip'));
+          text = await new Response(stream).text();
+        } else {
+          text = await file.text();
+        }
+      } catch (err) {
+        showToast('Could not read that file', 'error');
+        return;
+      }
+
+      let payload;
+      try {
+        const res = await fetch('/api/parse-mal-xml', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ xml: text }),
+        });
+        payload = await res.json().catch(() => ({}));
+        if (!res.ok || !payload.ok) {
+          showToast(payload.error || 'That file could not be imported', 'error');
+          return;
+        }
+      } catch (err) {
+        showToast('Could not reach the local server', 'error');
+        return;
+      }
+
+      if (payload.media_type !== mediaType()) {
+        mediaTypeSelect.value = payload.media_type;
+        updateMediaTypeUI(false);       // keep the rows; only the labels change
+      }
+
+      // Imported values win on the fields the file actually carries; the row's
+      // AniList identity and candidate list are kept.
+      const byId = new Map(currentAnimes.filter(i => Number(i.id) > 0).map(i => [Number(i.id), i]));
+      let matched = 0;
+      let added = 0;
+      payload.entries.forEach(entry => {
+        const existing = byId.get(Number(entry.id));
+        if (existing) {
+          const keep = {
+            anilist_id: existing.anilist_id,
+            candidates: existing.candidates,
+            cover: existing.cover,
+            year: existing.year,
+            original: existing.original,
+            can_write_anilist: existing.can_write_anilist,
+          };
+          Object.assign(existing, entry, keep);
+          existing.enabled = isActionable(existing);
+          matched += 1;
+        } else if (addUnmatchedImports.checked) {
+          currentAnimes.push({ ...entry, original: entry.title, enabled: isActionable(entry) });
+          added += 1;
+        }
+      });
+      renderTable(currentAnimes);
+      updateStatsAndExport();
+      showToast(`Imported: ${matched} matched, ${added} added, ${payload.skipped} skipped`);
+    });
+
+    destinationSelect.addEventListener('change', () => setDestination(destinationSelect.value));
+    destinationPrompt.addEventListener('click', (e) => {
+      const choice = e.target.closest('[data-destination]');
+      if (choice) setDestination(choice.dataset.destination);
+    });
 
     ['dragenter', 'dragover'].forEach(name => {
       txtArea.addEventListener(name, (e) => {
@@ -3200,6 +4118,7 @@ HTML_TEMPLATE = """<!DOCTYPE html>
     if (!restoreState()) {
       updateMediaTypeUI(false);
       loadData();
+      setDestination('', false);   // first run: ask rather than assume
     }
   </script>
 </body>
@@ -3345,7 +4264,9 @@ class MalGuiHandler(BaseHTTPRequestHandler):
                 self.wfile.write(payload)
                 self.wfile.flush()
 
-            total_count = len(cleaned_titles)
+            # Duplicates resolve once, so progress and the final event both count
+            # unique titles rather than pasted lines.
+            total_count = len(dict.fromkeys(cleaned_titles))
             expand_sequels = bool(data.get("expand_sequels", False))
             session_cache: Dict[str, List[Dict[str, Any]]] = {}
             resolved_list: List[Dict[str, Any]] = []
@@ -3369,48 +4290,76 @@ class MalGuiHandler(BaseHTTPRequestHandler):
 
             cancelled = False
             set_rate_limit_notifier(notify_rate_limit)
+
+            def should_cancel() -> bool:
+                # Checked between batches: pause parks here, cancel unwinds.
+                if not wait_while_paused():
+                    return True
+                return control["cancel"].is_set()
+
+            network_failures: List[str] = []
+
+            def decorate(resolved: Dict[str, Any], raw_title: str) -> Dict[str, Any]:
+                item = dict(resolved)
+                item["original"] = raw_title
+                item["status"] = default_status
+                item["score"] = default_score
+                return item
+
+            def on_progress(stage: str, done: int, total: int, info=None) -> None:
+                """Stream rows for the live table only.
+
+                The authoritative list is rebuilt from the resolver's return value
+                after the run; appending here as well dropped sequel rows, which
+                are added after a title has already streamed.
+                """
+                if stage == "network_error":
+                    failed_titles = (info or {}).get("titles") or []
+                    network_failures.extend(failed_titles)
+                    send_event({"type": "network_error", "titles": failed_titles,
+                                "count": len(network_failures)})
+                    return
+                title = (info or {}).get("title") or ""
+                batch_items = [decorate(r, title) for r in ((info or {}).get("entries") or [])]
+                remaining = max(0, total - done)
+                # One request covers a whole batch, so pace the estimate by batches.
+                batches_left = (remaining + BATCH_SIZE - 1) // BATCH_SIZE
+                send_event({
+                    "type": "progress",
+                    "current": done,
+                    "total": total,
+                    "title": title,
+                    "resolved_title": batch_items[0]["title"] if batch_items else title,
+                    "percent": round((done / total) * 100, 1) if total else 100.0,
+                    "interval": current_interval(),
+                    "eta_seconds": round(batches_left * current_interval() + remaining * 0.05, 1),
+                    "stage": stage,
+                    "entries": batch_items,
+                })
+
             try:
-              for idx, raw_title in enumerate(cleaned_titles, start=1):
-                  # Checkpoint between titles: a partially resolved run is still useful.
-                  if not wait_while_paused() or control["cancel"].is_set():
-                      cancelled = True
-                      break
-                  send_event({
-                      "type": "progress",
-                      "current": idx,
-                      "total": total_count,
-                      "title": raw_title,
-                      "percent": round(((idx - 1) / total_count) * 100, 1),
-                      "interval": current_interval(),   # live pacing, not the starting constant
-                  })
-
-                  if media_type == "manga":
-                      entries = resolve_manga_entries(raw_title, session_cache=session_cache, expand_sequels=expand_sequels)
-                  else:
-                      entries = resolve_anime_entries(raw_title, session_cache=session_cache, expand_sequels=expand_sequels)
-                  batch_items = []
-                  for resolved in entries:
-                      item = dict(resolved)
-                      item["original"] = raw_title
-                      item["status"] = default_status
-                      item["score"] = default_score
-                      resolved_list.append(item)
-                      batch_items.append(item)
-
-                  primary_title = entries[0]["title"] if entries else raw_title
-                  send_event({
-                      "type": "progress",
-                      "current": idx,
-                      "total": total_count,
-                      "title": raw_title,
-                      "resolved_title": primary_title,
-                      "percent": round((idx / total_count) * 100, 1),
-                      # Stream the rows as they resolve so the table fills live instead of
-                      # staying empty for the whole run. The client dedupes the same way
-                      # deduplicate_entries() does, and `complete` remains authoritative.
-                      "entries": batch_items,
-                  })
-
+                resolved_map = resolve_many_entries(
+                    cleaned_titles,
+                    media_type=media_type,
+                    expand_sequels=expand_sequels,
+                    session_cache=session_cache,
+                    use_cache=bool(data.get("use_cache", True)),
+                    prefer_mal_id=data.get("destination") != "anilist",
+                    on_progress=on_progress,
+                    should_cancel=should_cancel,
+                )
+                if control["cancel"].is_set():
+                    cancelled = True
+                # The resolver's return value is the single source of truth, in
+                # the order the titles were pasted. Includes expanded sequels,
+                # cache hits and unresolved rows alike.
+                handled: set = set()
+                for raw_title in cleaned_titles:
+                    if raw_title in handled:
+                        continue
+                    handled.add(raw_title)
+                    for resolved in resolved_map.get(raw_title, []):
+                        resolved_list.append(decorate(resolved, raw_title))
             finally:
                 set_rate_limit_notifier(None)
                 _unregister_run(run_id)
@@ -3428,6 +4377,15 @@ class MalGuiHandler(BaseHTTPRequestHandler):
                 return
 
             unique_entries = deduplicate_entries(resolved_list)
+            # Two different pasted lines can resolve to the same MAL entry. The
+            # second one is dropped, and used to vanish without a word, which is
+            # how a 185-title list quietly becomes 150 rows.
+            kept = {id(entry) for entry in unique_entries}
+            merged = [
+                {"original": entry.get("original"), "title": entry.get("title"),
+                 "id": entry.get("id")}
+                for entry in resolved_list if id(entry) not in kept
+            ]
 
             # Build media-specific XML & GZ. Invalid MAL IDs are omitted by the builders.
             try:
@@ -3457,6 +4415,8 @@ class MalGuiHandler(BaseHTTPRequestHandler):
                 "ok": True,
                 "total": total_count,
                 "entries": unique_entries,
+                "network_failures": len(network_failures),
+                "merged": merged,
             })
             self.close_connection = True
             return
@@ -3481,6 +4441,171 @@ class MalGuiHandler(BaseHTTPRequestHandler):
             else:
                 control["pause"].clear()
             self.send_json({"ok": True, "action": action})
+            return
+
+        elif path == "/api/anilist-test":
+            # The token lives in this request only: never logged, never stored,
+            # never echoed back in a response body.
+            token = str(data.get("token") or "").strip()
+            if not token:
+                self.send_json({"ok": False, "error": "Paste an AniList access token first."}, status=400)
+                return
+            self.send_json(anilist_viewer(token))
+            return
+
+        elif path == "/api/anilist-preview":
+            token = str(data.get("token") or "").strip()
+            if not token:
+                self.send_json({"ok": False, "error": "Paste an AniList access token first."}, status=400)
+                return
+            viewer = anilist_viewer(token)
+            if not viewer.get("ok"):
+                self.send_json(viewer, status=401)
+                return
+            media_type = "manga" if data.get("media_type") == "manga" else "anime"
+            entries = data.get("entries", [])
+            # Rows imported from a MAL export carry only a MAL id; without this
+            # they can never be written to AniList.
+            filled = backfill_anilist_ids(entries, media_type)
+            existing = anilist_existing_entries(
+                token, viewer["id"], media_type,
+                [e.get("anilist_id") for e in entries],
+            )
+            payloads, skipped = iter_write_payloads(
+                entries, media_type, existing,
+                default_status=data.get("status", "Completed"),
+                default_score=int(data.get("score", 0)),
+            )
+            self.send_json({
+                "ok": True,
+                "viewer": viewer.get("name", ""),
+                "backfilled": filled,
+                "updates": sum(1 for p in payloads if p["update"]),
+                "creates": sum(1 for p in payloads if not p["update"]),
+                "skipped": skipped,
+                "total": len(payloads),
+            })
+            return
+
+        elif path == "/api/anilist-write":
+            token = str(data.get("token") or "").strip()
+            if not token:
+                self.send_json({"ok": False, "error": "Paste an AniList access token first."}, status=400)
+                return
+            if not data.get("confirm"):
+                self.send_json({"ok": False, "error": "This writes to your AniList account and needs confirmation."}, status=400)
+                return
+            entries = data.get("entries", [])
+            if not entries:
+                self.send_json({"ok": False, "error": "Nothing selected to write."}, status=400)
+                return
+            if not _run_lock.acquire(blocking=False):
+                self.send_json({"ok": False, "error": "A run is already in progress"}, status=409)
+                return
+            run_id, control = _register_run()
+
+            media_type = "manga" if data.get("media_type") == "manga" else "anime"
+            viewer = anilist_viewer(token)
+            if not viewer.get("ok"):
+                _unregister_run(run_id)
+                _run_lock.release()
+                self.send_json(viewer, status=401)
+                return
+
+            self.send_response(HTTPStatus.OK)
+            self.send_header("Content-Type", "text/event-stream; charset=utf-8")
+            self.send_header("Cache-Control", "no-cache")
+            self.send_header("Connection", "keep-alive")
+            self.end_headers()
+
+            def send_event(event_dict: Dict[str, Any]) -> None:
+                payload = f"data: {json.dumps(event_dict, ensure_ascii=False)}\n\n".encode("utf-8")
+                self.wfile.write(payload)
+                self.wfile.flush()
+
+            updated = 0
+            created = 0
+            failed: List[Dict[str, str]] = []
+            try:
+                send_event({"type": "started", "run_id": run_id, "viewer": viewer.get("name", "")})
+                backfill_anilist_ids(entries, media_type)
+                existing = anilist_existing_entries(
+                    token, viewer["id"], media_type,
+                    [e.get("anilist_id") for e in entries],
+                )
+                payloads, skipped = iter_write_payloads(
+                    entries, media_type, existing,
+                    default_status=data.get("status", "Completed"),
+                    default_score=int(data.get("score", 0)),
+                )
+                total = len(payloads)
+                send_event({"type": "plan", "total": total,
+                            "updates": sum(1 for p in payloads if p["update"]),
+                            "creates": sum(1 for p in payloads if not p["update"]),
+                            "skipped": skipped})
+                for index, payload in enumerate(payloads, start=1):
+                    if control["cancel"].is_set():
+                        send_event({"type": "cancelled", "written": updated + created})
+                        break
+                    outcome = anilist_write_entry(token, payload)
+                    if outcome.get("ok"):
+                        if payload["update"]:
+                            updated += 1
+                        else:
+                            created += 1
+                    else:
+                        failed.append({"title": payload["title"], "error": outcome.get("error", "")})
+                    send_event({
+                        "type": "write_progress",
+                        "current": index,
+                        "total": total,
+                        "title": payload["title"],
+                        "ok": bool(outcome.get("ok")),
+                        "percent": round((index / total) * 100, 1) if total else 100.0,
+                        "interval": current_interval(),
+                    })
+                else:
+                    send_event({
+                        "type": "write_complete",
+                        "updated": updated,
+                        "created": created,
+                        "failed": failed,
+                        "skipped": skipped,
+                    })
+            finally:
+                token = ""
+                _unregister_run(run_id)
+                _run_lock.release()
+            self.close_connection = True
+            return
+
+        elif path == "/api/resolve-one":
+            # One entry point for fixing a row: a title, a bare id, or a pasted
+            # AniList / MyAnimeList link.
+            media_type = "manga" if data.get("media_type") == "manga" else "anime"
+            query = str(data.get("query", "")).strip()
+            if not query:
+                self.send_json({"ok": False, "error": "Type a title, an id, or paste a link."}, status=400)
+                return
+            id_kind = data.get("id_kind")
+            try:
+                result = resolve_one(query, media_type,
+                                     id_kind if id_kind in ("anilist", "mal") else None)
+            except Exception as exc:
+                self.send_json({"ok": False, "error": str(exc)}, status=502)
+                return
+            self.send_json(result, status=200 if result.get("ok") else 404)
+            return
+
+        elif path == "/api/parse-mal-xml":
+            raw = data.get("xml", "")
+            if len(raw.encode("utf-8", "ignore")) > MAX_IMPORT_BYTES:
+                self.send_json({"ok": False, "error": "That file is too large to import."}, status=413)
+                return
+            try:
+                self.send_json(parse_mal_xml(raw))
+            except ValueError as exc:
+                self.send_json({"ok": False, "error": str(exc)}, status=400)
             return
 
         elif path == "/api/search":
@@ -3529,6 +4654,10 @@ class MalGuiHandler(BaseHTTPRequestHandler):
                 self.send_json({"ok": True, "count": 0, "kept_existing": xml_path.is_file()})
                 return
 
+            # Two rows can end up on the same entry (for instance after fixing two
+            # unmatched titles to the same series). /api/process dedupes; this
+            # path did not, and wrote the same id twice into one file.
+            entries = deduplicate_entries(entries)
             try:
                 xml_str = (
                     build_mal_manga_xml(entries, default_status=default_status, default_score=default_score)

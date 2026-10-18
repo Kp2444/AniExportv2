@@ -1,0 +1,17 @@
+# Python
+__pycache__/
+*.py[cod]
+
+# Generated exports (regenerate them, never commit them)
+myanimelist_export*.xml
+myanimelist_export*.xml.gz
+myanimelist_manga_export*.xml
+myanimelist_manga_export*.xml.gz
+output/
+
+# AniList response cache (safe to delete; rebuilt on the next run)
+.anilist_cache.json
+
+# Local lists (manga.txt is tracked on purpose: the README's CLI example uses it)
+notes.txt
+animes.txt
