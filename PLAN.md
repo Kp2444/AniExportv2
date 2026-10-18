@@ -7,7 +7,7 @@ Scope confirmed by user: **all 6 phases including direct AniList write**; import
 > **STATUS: ALL SIX PHASES SHIPPED (2026-10-18).** This document is now a record of how the
 > work was reasoned about, not a queue. The one gate not satisfied is Phase 5's: the direct
 > AniList write has never been run against a live account — see that phase and the README.
-> Verified at close: 122 Python tests, 14 jsdom suites, `py_compile` + CLI smoke clean.
+> Verified at close: 127 Python tests, 15 jsdom suites, `py_compile` + CLI smoke clean.
 
 > **Revision 2026-10-17 (rev 3)** — re-verified end to end against the working tree and the
 > official AniList docs. Every line reference below was re-checked; the test count (15), the

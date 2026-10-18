@@ -69,6 +69,8 @@ elsewhere.
 - Per-row **status** and **read/watched progress**, plus an expandable editor (`⋯`) for score,
   start and finish dates, tags and comments.
 - Sortable columns, status chips, text filter, and a 300-row cap with "Show all".
+- The window can be narrowed to a phone width: the table scrolls sideways rather than crushing the
+  title column, and the action rows stack instead of running off the edge.
 - Keyboard and screen-reader usable throughout: sortable headers take focus and respond to
   Enter/Space while announcing their direction, every control has a name, the dialogs move focus
   in and hand it back on close, and `prefers-reduced-motion` turns the transitions off.
@@ -153,11 +155,12 @@ them), and titles that were not found at all.
 python -m unittest discover -s tests -t .
 ```
 
-122 tests covering the XML builders, status and date handling, batched resolution, the disk cache,
+127 tests covering the XML builders, status and date handling, batched resolution, the disk cache,
 candidate ranking, run control, the GUI event contract, the AniList write payloads, the MAL XML importer,
 the unmatched-title resolver (links, ids and free text)
 the command line (both media types, input discovery, cache flags, error paths), the
 no-store headers on the page and the downloads, and the markup's accessibility contract
-(header scope, focusable sortable headers, dialog roles, named fields). The browser JavaScript is
+(header scope, focusable sortable headers, dialog roles, named fields) and its copy (the primary
+action naming the chosen destination, no stale claims about unbuilt features). The browser JavaScript is
 additionally syntax-checked, and the HTML template is scanned for backslash escapes that Python
 would consume before the browser ever sees them.

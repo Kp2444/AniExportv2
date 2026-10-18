@@ -124,6 +124,42 @@ class AccessibilityTests(unittest.TestCase):
         self.assertRegex(css, r":root \{\s*color-scheme: dark")
         self.assertRegex(css, r"body\.light \{\s*color-scheme: light")
 
+class InterfaceCopyTests(unittest.TestCase):
+    """The page described features that had since shipped, and named the wrong
+    destination on its own primary button. Both are invisible to a test that
+    only checks behaviour, so they are asserted here."""
+
+    def _script(self) -> str:
+        return SCRIPT_RE.findall(gui.HTML_TEMPLATE)[-1]
+
+    def test_the_anilist_write_is_not_described_as_unbuilt(self):
+        self.assertNotIn("is not built yet", gui.HTML_TEMPLATE,
+                         "the direct AniList write shipped; the notice still disclaims it")
+
+    def test_the_primary_action_is_named_per_destination(self):
+        script = self._script()
+        self.assertIn("'Resolve titles'", script,
+                      "an AniList run must not promise an XML file")
+        self.assertIn("btnProcessLabel", gui.HTML_TEMPLATE)
+        self.assertIn("emptyStateAction", gui.HTML_TEMPLATE)
+
+    def test_one_destination_control_is_offered_at_a_time(self):
+        script = self._script()
+        self.assertIn("destinationField.style.display", script,
+                      "the picker card and the select both asked the same question")
+
+    def test_the_status_chip_names_one_media_type(self):
+        script = self._script()
+        self.assertNotIn("Reading / Watching", gui.HTML_TEMPLATE)
+        self.assertIn("function chipLabel(", script)
+
+    def test_the_narrow_layout_has_a_breakpoint(self):
+        css = gui.HTML_TEMPLATE.split("<style>", 1)[1].split("</style>", 1)[0]
+        self.assertIn("max-width: 760px", css,
+                      "below ~760px the title column collapsed and the buttons overflowed")
+        self.assertIn("min-width: 780px", css,
+                      "the table must scroll rather than crush the title column")
+
 
 if __name__ == "__main__":
     unittest.main()

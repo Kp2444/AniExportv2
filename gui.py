@@ -833,6 +833,44 @@ HTML_TEMPLATE = """<!DOCTYPE html>
       }
     }
 
+    /* Below this the right column has no room to lay things out side by side.
+       Measured: at 600px the title column was squeezed to 10px, and at 430px it
+       disappeared entirely while the export buttons ran off the page. */
+    @media (max-width: 760px) {
+      .export-card {
+        align-items: stretch;
+        gap: 1rem;
+      }
+      .export-buttons {
+        justify-content: flex-start;
+        width: 100%;
+      }
+      .export-buttons .btn {
+        flex: 1 1 auto;
+        justify-content: center;
+      }
+      /* decorative, and it wraps to three lines down here */
+      .badge { display: none; }
+      .toolbar-end {
+        margin-left: 0;
+        width: 100%;
+        justify-content: space-between;
+      }
+      .unresolved-bar {
+        flex-direction: column;
+        align-items: stretch;
+      }
+      .unresolved-bar .btn {
+        flex: 1 1 auto;
+        justify-content: center;
+      }
+      /* Scroll the table instead of crushing the title out of existence. */
+      #animeTable {
+        table-layout: auto;
+        min-width: 780px;
+      }
+    }
+
     .stat-box {
       background: var(--surface-1);
       border: 1px solid var(--border);
@@ -1372,8 +1410,13 @@ HTML_TEMPLATE = """<!DOCTYPE html>
       padding: 0.75rem 1rem;
     }
     .table-toolbar .search-input-wrapper { flex: 0 1 280px; }
-    .filter-count {
+    .toolbar-end {
       margin-left: auto;
+      display: flex;
+      align-items: center;
+      gap: 0.625rem;
+    }
+    .filter-count {
       font-size: 0.75rem;
       font-variant-numeric: tabular-nums;
       color: var(--text-subtle);
@@ -1932,7 +1975,7 @@ HTML_TEMPLATE = """<!DOCTYPE html>
       </div>
       <div>
         <h1 class="brand-title">AniExport</h1>
-        <p class="brand-subtitle">Universal Title Normalizer &bull; XML Export for MyAnimeList &amp; AniList</p>
+        <p class="brand-subtitle">Plain title lists &rarr; your AniList account, or a MAL-compatible XML file</p>
       </div>
     </div>
 
@@ -2010,7 +2053,7 @@ HTML_TEMPLATE = """<!DOCTYPE html>
           </div>
         </div>
 
-        <div>
+        <div id="destinationField">
           <label for="destination">Importing into:</label>
           <select id="destination">
             <option value="">Choose a destination...</option>
@@ -2095,7 +2138,7 @@ HTML_TEMPLATE = """<!DOCTYPE html>
           <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
             <polygon points="5 3 19 12 5 21 5 3"></polygon>
           </svg>
-          Normalize &amp; Generate XML
+          <span id="btnProcessLabel">Normalize &amp; Generate XML</span>
         </button>
         <div id="runControls" class="run-controls">
           <button id="btnPause" class="btn btn-secondary" style="flex:1;">Pause</button>
@@ -2111,7 +2154,7 @@ HTML_TEMPLATE = """<!DOCTYPE html>
       <section class="export-card">
         <div class="export-info">
           <h3 id="exportHeadline">Export Pending</h3>
-          <p id="exportSubline">Paste your anime list on the left and click "Normalize &amp; Generate XML".</p>
+          <p id="exportSubline">Paste your anime list on the left to begin.</p>
           <div style="margin-top:0.375rem; display:flex; gap:0.875rem; font-size:0.75rem;">
             <a href="https://myanimelist.net/import.php" target="_blank" rel="noopener noreferrer" class="text-link" title="Open MyAnimeList Import page">
               <span>MyAnimeList Import</span>
@@ -2203,9 +2246,9 @@ HTML_TEMPLATE = """<!DOCTYPE html>
                      placeholder="Title, AniList id, MAL id, or a pasted anilist.co / myanimelist.net link"
                      aria-label="Search for a match">
               <select id="fixIdKind" aria-label="What a bare number means">
-                <option value="">Number = either</option>
-                <option value="anilist">Number = AniList id</option>
-                <option value="mal">Number = MAL id</option>
+                <option value="">Number: either id</option>
+                <option value="anilist">Number: AniList id</option>
+                <option value="mal">Number: MAL id</option>
               </select>
               <button id="btnFixSearch" class="btn btn-primary">Search</button>
             </div>
@@ -2252,8 +2295,10 @@ HTML_TEMPLATE = """<!DOCTYPE html>
                   placeholder="Filter by title, MAL ID, or AniList ID...">
           </div>
           <div id="chipRow" class="chip-row"></div>
-          <span id="filterCountLabel" class="filter-count">Showing 0</span>
-          <button id="btnReset" class="btn btn-secondary btn-xs" title="Clear the saved session and start from an empty list">Start over</button>
+          <div class="toolbar-end">
+            <span id="filterCountLabel" class="filter-count">Showing 0</span>
+            <button id="btnReset" class="btn btn-secondary btn-xs" title="Clear the saved session and start from an empty list">Start over</button>
+          </div>
         </div>
         <div id="unresolvedBar" class="unresolved-bar">
           <span id="unresolvedText"></span>
@@ -2292,7 +2337,7 @@ HTML_TEMPLATE = """<!DOCTYPE html>
               <line x1="12" y1="16" x2="12.01" y2="16"></line>
             </svg>
             <h4>No titles processed yet</h4>
-            <p>Paste your list of titles on the left and click <strong>Normalize &amp; Generate XML</strong>.</p>
+            <p>Paste your list of titles on the left and press <strong id="emptyStateAction">Normalize &amp; Generate XML</strong>.</p>
           </div>
         </div>
       </section>
@@ -2370,6 +2415,7 @@ HTML_TEMPLATE = """<!DOCTYPE html>
     const importFile = document.getElementById('importFile');
     const destinationSelect = document.getElementById('destination');
     const destinationPrompt = document.getElementById('destinationPrompt');
+    const destinationField = document.getElementById('destinationField');
     const runControls = document.getElementById('runControls');
     const btnPause = document.getElementById('btnPause');
     const btnCancel = document.getElementById('btnCancel');
@@ -2784,7 +2830,7 @@ HTML_TEMPLATE = """<!DOCTYPE html>
       if (anilistOnly.length > 0) {
         notes.push(destination === 'xml'
           ? `<strong>${anilistOnly.length}</strong> ${anilistOnly.length === 1 ? 'title exists' : 'titles exist'} on AniList but ${anilistOnly.length === 1 ? 'has' : 'have'} no MyAnimeList ID, so MAL XML cannot carry ${anilistOnly.length === 1 ? 'it' : 'them'}. Switch the destination to AniList to keep ${anilistOnly.length === 1 ? 'it' : 'them'}.`
-          : `<strong>${anilistOnly.length}</strong> ${anilistOnly.length === 1 ? 'title is' : 'titles are'} on AniList without a MyAnimeList ID. ${anilistOnly.length === 1 ? 'It' : 'They'} cannot go into the MAL XML file; the direct AniList write that handles ${anilistOnly.length === 1 ? 'it' : 'them'} is not built yet.`);
+          : `<strong>${anilistOnly.length}</strong> ${anilistOnly.length === 1 ? 'title is' : 'titles are'} on AniList without a MyAnimeList ID. ${anilistOnly.length === 1 ? 'It' : 'They'} cannot go into the MAL XML file, but <strong>Write to AniList</strong> sends ${anilistOnly.length === 1 ? 'it' : 'them'} straight to your account.`);
       }
       if (mergedTitles.length > 0) {
         const names = mergedTitles.slice(0, 4).map(m => escapeHtml(m.original || m.title)).join(', ');
@@ -2963,8 +3009,14 @@ HTML_TEMPLATE = """<!DOCTYPE html>
       destination = (value === 'anilist' || value === 'xml') ? value : '';
       destinationSelect.value = destination;
       destinationPrompt.classList.toggle('show', destination === '');
+      destinationField.style.display = destination === '' ? 'none' : '';
       anilistPanel.classList.toggle('show', destination === 'anilist');
       btnWrite.style.display = destination === 'anilist' ? '' : 'none';
+      // Naming the file format while the user is sending rows to an account
+      // is the kind of small lie that makes people distrust the rest.
+      const action = destination === 'anilist' ? 'Resolve titles' : 'Normalize & Generate XML';
+      document.querySelectorAll('#btnProcessLabel, #emptyStateAction')
+        .forEach(el => { el.textContent = action; });
       renderTable(currentAnimes);
       updateStats();
       if (persist !== false) saveState();
@@ -3157,7 +3209,7 @@ HTML_TEMPLATE = """<!DOCTYPE html>
 
     const CHIPS = [
       { id: '', label: 'All' },
-      { id: 'reading', label: 'Reading / Watching' },
+      { id: 'reading', label: 'Reading' },
       { id: 'completed', label: 'Completed' },
       { id: 'planned', label: 'Planned' },
       { id: 'paused', label: 'Paused' },
@@ -3165,6 +3217,12 @@ HTML_TEMPLATE = """<!DOCTYPE html>
       { id: 'anilistonly', label: 'AniList only' },
       { id: 'unresolved', label: 'Not found' },
     ];
+
+    function chipLabel(chip) {
+      // The list is one media type at a time; naming both is noise.
+      if (chip.id === 'reading') return mediaType() === 'manga' ? 'Reading' : 'Watching';
+      return chip.label;
+    }
 
     function chipBucket(item) {
       if (!canXml(item) && !canWrite(item)) return 'unresolved';
@@ -3187,7 +3245,7 @@ HTML_TEMPLATE = """<!DOCTYPE html>
       chipRow.innerHTML = CHIPS.filter(chip => chip.id === '' || counts[chip.id])
         .map(chip => {
           const n = chip.id === '' ? currentAnimes.length : (counts[chip.id] || 0);
-          return `<button class="chip ${statusFilter === chip.id ? 'active' : ''}" data-chip="${chip.id}">${escapeHtml(chip.label)} ${n}</button>`;
+          return `<button class="chip ${statusFilter === chip.id ? 'active' : ''}" data-chip="${chip.id}">${escapeHtml(chipLabel(chip))} ${n}</button>`;
         }).join('');
     }
 

@@ -41,7 +41,7 @@ lives in [README.md](README.md); the reasoning lives in [PLAN.md](PLAN.md) and
 | 4 | MAL XML import: `parse_mal_xml`, DOCTYPE refusal, 20 MB ceiling, merge keyed on MAL id, add-unmatched toggle, `.gz` via `DecompressionStream` | import cases in `tests/test_gui_manga_endpoint.py`, `domtest12.js` |
 | 5 | Direct AniList write: token check, existing-entry read, add/update preview, `SaveMediaListEntry`, per-title validation messages | `tests/test_anilist_write.py` — **mocked API only** |
 | 6 | README rewrite, `.gitignore`, `tests/test_cli.py`, three-way CLI reporting | 114 Python tests, 12 jsdom suites, `py_compile`, CLI smoke |
-| polish | Dead code removed, accessibility and cache-header fixes (below) | 122 Python tests, 14 jsdom suites |
+| polish | Dead code removed, accessibility, cache-header, layout and copy fixes (below) | 127 Python tests, 15 jsdom suites |
 
 ### AniList-first reframing (2026-10-18)
 
@@ -86,18 +86,36 @@ Fixes:
 - The page and the export downloads send `Cache-Control: no-store`. Both change between runs; a
   cached download would hand back the previous selection's XML.
 
+### Design pass (2026-10-18)
+
+Done by rendering the page in Chrome at seven widths and reading the screenshots, not by reasoning
+about the CSS. Three of the five findings were invisible from the source.
+
+- **The page broke below ~760px.** Measured: at 600px the title column was squeezed to 10px; at
+  430px it vanished entirely and the export buttons ran 159px off the page. One breakpoint now
+  stacks the action rows and gives the table a 780px minimum so it scrolls sideways instead.
+  Clean at 1440, 1280, 1080, 900, 768, 600 and 430.
+- **The notice said the direct AniList write "is not built yet"** — while the Write to AniList
+  button sat two inches above it. It now names that button as the answer.
+- **The primary button said "Normalize & Generate XML" with the AniList destination selected.**
+  It reads "Resolve titles" there, and the empty state follows the same label from one source.
+- **The first run asked the same question twice**, once in the picker card and once in a
+  "Choose a destination..." select below it. The select now appears only after a choice exists,
+  which is what the card already promised ("Pick once; change it any time").
+- **One chip read "Reading / Watching"** on a list that is only ever one media type.
+
 ## Verified
 
 ```bash
-python -m unittest discover -s tests -t .    # 122 tests
+python -m unittest discover -s tests -t .    # 127 tests
 python -m py_compile generate_mal_xml.py gui.py
 python generate_mal_xml.py --help
 ```
 
-Plus 14 jsdom suites, 277 assertions, driving the real handlers (theme, sample, clipboard, clear,
+Plus 15 jsdom suites, 295 assertions, driving the real handlers (theme, sample, clipboard, clear,
 select-all under a filter, copy-unmatched, Ctrl+Enter, Escape, drag-drop, import merge, run
-lifecycle, persistence, fixer, sorting, dialog focus), four gap audits at zero, 14 state×theme
-contrast checks, and 8 viewport widths.
+lifecycle, persistence, fixer, sorting, dialog focus, destination copy), four gap audits at zero,
+14 state×theme contrast checks, and seven viewport widths measured in Chrome.
 
 ## Not verified
 
