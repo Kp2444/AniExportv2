@@ -119,11 +119,44 @@ select-all under a filter, copy-unmatched, Ctrl+Enter, Escape, drag-drop, import
 lifecycle, persistence, fixer, sorting, dialog focus, destination copy), four gap audits at zero,
 14 state×theme contrast checks, and seven viewport widths measured in Chrome.
 
+## Known defects
+
+Found while researching [ROADMAP.md](ROADMAP.md) by reading the write path and the GUI. Each was
+verified in the code, none is a regression from the passes above — they all predate them. Listed
+worst first, with the phase that closes it.
+
+1. **The direct write overwrites what is already on the account.** `iter_write_payloads`
+   (`generate_mal_xml.py:1379-1450`) sends `status`, `scoreRaw` and `progress` on *every* row
+   unconditionally, and takes only `id` from the existing entry. If the account is at chapter 224
+   and the pasted row says 142, 142 is written. If the row is blank, `_clamp_progress` makes it
+   `0` and `0` is written. The existing `status`, `progress`, `progressVolumes` and `score` *are*
+   fetched (`ANILIST_EXISTING_ENTRIES_QUERY`, `:1219-1232`) and then never read. The confirm step
+   shows counts only (`gui.py:4553-4561`), so none of this is visible before it happens.
+   → ROADMAP Phase 1.
+2. **The list-wide score box re-stamps every row on every keystroke.** `inputScore`
+   (`gui.py:3652-3657`) is bound to `input` and does `currentAnimes.forEach(...)`. With defect 1,
+   one stray keypress before a write can zero the score of every entry it touches on the account.
+   The status select behaves the same way. Both also overwrite rows the user hand-edited, rows
+   left unchecked, and rows hidden by the filter. → ROADMAP Phase 4.
+3. **A failed existing-entries chunk is swallowed.** `anilist_existing_entries` does
+   `if result.get("error"): continue` (`:1358-1359`), so 50 rows silently become creates with no
+   `id` — exactly the mediaId-only behaviour the design comment at `:1209-1213` says it refuses to
+   rely on. → ROADMAP Phase 1.
+4. **The inline Find button guesses.** `repairRow` (`gui.py:3500-3535`) applies `entries[0]`
+   without showing the candidate list, unlike the fixer modal. → ROADMAP Phase 4.
+5. **Match confidence is computed and thrown away.** `_media_rank` (`:328-364`) runs
+   `difflib.SequenceMatcher` against both titles but the ratio only ever serves as a sort key, so
+   a confidently-wrong match renders identically to a perfect one. → ROADMAP Phase 4.
+
+Not a defect but a limitation worth stating: the write is one `SaveMediaListEntry` per row through
+`_throttle()`, so 339 rows take roughly twelve minutes. → ROADMAP Phase 2.
+
 ## Not verified
 
 - **The direct AniList write has never been run against a live account.** All its coverage is
-  mocked. The duplicate risk is designed out — existing entries are read first and updated by
-  their list-entry `id` — but the live path is untested. Try a throwaway account or a handful of
+  mocked. Duplicate *creation* is designed out — existing entries are read first and updated by
+  their list-entry `id` — but that is a narrower guarantee than it sounds: an update still
+  overwrites the account's values, per defect 1 above. Try a throwaway account or a handful of
   rows first, and record the result here.
 - The XML is structurally tested against a public description of the MAL format, not against a
   real MyAnimeList import. Import a small sample before a list you care about.
