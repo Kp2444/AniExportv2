@@ -1,12 +1,71 @@
+<div align="center">
+
 # AniExport
 
-> **Zero-dependency converter from a plain list of titles to an AniList or MyAnimeList list.**
+**Turn a plain list of titles into a real AniList or MyAnimeList list.**
+
+[![Python](https://img.shields.io/badge/python-3.9%2B-3776AB?logo=python&logoColor=white)](https://www.python.org/)
+[![Dependencies](https://img.shields.io/badge/dependencies-zero-success)](requirements.txt)
+[![Tests](https://img.shields.io/badge/tests-127%20passing-success)](#-tests)
+[![License](https://img.shields.io/badge/license-MIT-lightgrey)](LICENSE)
+
+</div>
+
+---
 
 Paste a list of anime or manga titles. AniExport resolves each one against AniList's GraphQL API,
 lets you review and correct the matches in a local web page, and then either writes them straight
 to your AniList account or exports a MAL-compatible XML file.
 
-## Two destinations, and why it matters
+```bash
+python gui.py          # opens http://127.0.0.1:5000
+```
+
+No install step, no packages, no account needed to try it.
+
+<table>
+<tr>
+<td width="33%" valign="top">
+
+**🔎 Resolves**
+
+339 titles in about 90 seconds, 8 per request, paced off AniList's own rate-limit headers.
+Cached for 7 days, so a repeat run is near-instant.
+
+</td>
+<td width="33%" valign="top">
+
+**✅ Reviews**
+
+Rows stream in as they resolve. Pick between candidates, fix what matched nothing, edit status,
+progress, score and dates per row.
+
+</td>
+<td width="33%" valign="top">
+
+**🚀 Delivers**
+
+Straight to your AniList account, or out as a MAL-compatible XML file — including the titles MAL
+has never heard of.
+
+</td>
+</tr>
+</table>
+
+### Contents
+
+[Two destinations](#-two-destinations-and-why-it-matters) ·
+[Install](#-install) ·
+[GUI](#-gui) ·
+[CLI](#-cli) ·
+[Data notes](#-data-notes) ·
+[Limitations](#-limitations) ·
+[Tests](#-tests) ·
+[Project docs](#-project-docs)
+
+---
+
+## 🎯 Two destinations, and why it matters
 
 AniList is the primary target. MAL XML is only a transport, and it is a lossy one:
 
@@ -21,18 +80,20 @@ account. A row is only called **Not found** when AniList does not know it either
 
 You pick the destination on first run; it is remembered after that.
 
-## Install
+## 📦 Install
 
 Python 3.9+ and an internet connection. Nothing else: `requirements.txt` installs no packages.
 
-## GUI
+## 🖥️ GUI
 
 ```bash
 python gui.py              # opens http://127.0.0.1:5000
 ```
 
-- `-p/--port` — local port (default 5000, scanning up to 5049)
-- `--no-browser` — do not open a browser
+| Flag | Meaning |
+|---|---|
+| `-p/--port` | local port (default 5000, scanning up to 5049) |
+| `--no-browser` | do not open a browser |
 
 ### Resolving a list
 
@@ -87,14 +148,21 @@ in that browser tab only: it is never saved to disk, never written to the export
 appears in a server response.
 
 **Write to AniList…** first reads which of the selected titles are already on your list, then
-shows exactly what will happen (*"N entries will be added, M already on your list will be
-updated"*) before anything is sent. Entries you already have are updated in place by their
-existing list-entry id, so running the write twice cannot create duplicates. Failures are reported
-per title using AniList's own validation messages.
+shows what will happen (*"N entries will be added, M already on your list will be updated"*)
+before anything is sent. Entries you already have are updated in place by their existing
+list-entry id, so running the write twice cannot create duplicates. Failures are reported per
+title using AniList's own validation messages.
 
-> **Status:** the write path is covered by unit tests against a mocked API but has **not** yet been
-> exercised against a live AniList account. Try it on a throwaway account, or with a handful of
-> rows, before pointing it at a list you care about.
+> [!WARNING]
+> **Two things to know before pointing this at a list you care about.**
+>
+> 1. **It has never been run against a live account.** The write path is covered by unit tests
+>    against a mocked API only. Try a throwaway account, or a handful of rows, first.
+> 2. **An update overwrites, it does not merge.** Status, score and progress are sent for every
+>    selected row and replace whatever is on the account — so a row showing chapter 142 will
+>    overwrite an account already at 224, and a row left blank writes `0`. Duplicate *creation* is
+>    prevented; overwriting is not. A conflict guard and a pre-write diff are the first item in
+>    [ROADMAP.md](ROADMAP.md).
 
 ### Importing an existing MAL export
 
@@ -108,7 +176,7 @@ you turn that off. Imported rows carry no AniList id until you resolve or search
 files, so one media type can never overwrite or impersonate the other. **Preview XML** shows the
 generated file, and **Keep timestamped copies** also writes `..._YYYYmmdd_HHMMSS.xml` on every save.
 
-## CLI
+## ⌨️ CLI
 
 ```bash
 python generate_mal_xml.py manga.txt --media-type manga --status Reading
@@ -128,7 +196,11 @@ The CLI reports three outcomes rather than two: titles in the export, titles tha
 without a MyAnimeList id (named with their AniList id, since only the GUI's direct write can send
 them), and titles that were not found at all.
 
-## Data notes
+> [!NOTE]
+> The CLI has no write path — it produces XML files. Sending titles to an AniList account is
+> GUI-only.
+
+## 📐 Data notes
 
 - Unknown chapter, volume and episode counts stay `0`. Counts are never invented.
 - Completed entries (and in-progress rereads) default to the full known count; everything else
@@ -137,7 +209,7 @@ them), and titles that were not found at all.
 - `Paused` maps to MAL's `On-Hold`; `Rereading`/`Rewatching` map to `Reading`/`Watching` plus the
   repeat flag in XML, and to `REPEATING` on AniList.
 
-## Limitations
+## ⚠️ Limitations
 
 - **Misspellings are not auto-recoverable.** AniList returns zero hits for `Raphsody` or
   `Aristrocat`, so no destination, retry or ranking change finds them on its own. Fix unmatched is
@@ -145,22 +217,39 @@ them), and titles that were not found at all.
 - **A confident match can still be wrong.** Ranking prefers exact titles, full series over
   one-shots and released entries, but it cannot know your intent. Check the picker on rows that
   matter.
-- The direct AniList write has not been run against a live account (see above).
+- **The direct AniList write is untested live and overwrites on update** — see the warning above.
 - AniList's own rate limit is the floor on speed; nothing here can make a cold run faster than the
   API allows.
 
-## Tests
+Known defects, each with the code that causes them, are listed in
+[MANGA_SUPPORT_NOTES.md](MANGA_SUPPORT_NOTES.md#known-defects).
+
+## 🧪 Tests
 
 ```bash
 python -m unittest discover -s tests -t .
 ```
 
-127 tests covering the XML builders, status and date handling, batched resolution, the disk cache,
-candidate ranking, run control, the GUI event contract, the AniList write payloads, the MAL XML importer,
-the unmatched-title resolver (links, ids and free text)
-the command line (both media types, input discovery, cache flags, error paths), the
-no-store headers on the page and the downloads, and the markup's accessibility contract
-(header scope, focusable sortable headers, dialog roles, named fields) and its copy (the primary
-action naming the chosen destination, no stale claims about unbuilt features). The browser JavaScript is
-additionally syntax-checked, and the HTML template is scanned for backslash escapes that Python
-would consume before the browser ever sees them.
+**127 tests** covering the XML builders, status and date handling, batched resolution, the disk
+cache, candidate ranking, run control, the GUI event contract, the AniList write payloads, the MAL
+XML importer, the unmatched-title resolver (links, ids and free text), the command line (both
+media types, input discovery, cache flags, error paths), the no-store headers on the page and the
+downloads, and the markup's accessibility contract (header scope, focusable sortable headers,
+dialog roles, named fields) and its copy (the primary action naming the chosen destination, no
+stale claims about unbuilt features).
+
+The browser JavaScript is additionally syntax-checked, and the HTML template is scanned for
+backslash escapes that Python would consume before the browser ever sees them.
+
+## 📚 Project docs
+
+| Document | What it holds |
+|---|---|
+| [ROADMAP.md](ROADMAP.md) | What is queued next, and why — including the write-safety work |
+| [MANGA_SUPPORT_NOTES.md](MANGA_SUPPORT_NOTES.md) | What shipped, what was verified, and the known defects |
+
+<div align="center">
+
+MIT licensed · Built against AniList's public GraphQL API
+
+</div>
