@@ -132,6 +132,22 @@ class ExportStateTests(unittest.TestCase):
             self.assertEqual(root.findtext("./myinfo/user_total_completed"), "1")
             self.assertEqual(root.findtext("./myinfo/user_total_dropped"), "1")
 
+    def test_the_page_and_the_downloads_are_never_cached(self):
+        """Both change between runs: a cached page hides an update, and a cached
+        download hands back the previous selection's XML."""
+        with tempfile.TemporaryDirectory() as directory:
+            out, base = self._serve(directory)
+            page = urllib.request.urlopen(base + "/", timeout=10)
+            self.assertEqual(page.headers.get("Cache-Control"), "no-store")
+
+            self._post(base, "/api/update-export", {
+                "entries": [{"id": 5, "title": "An Anime", "type": "TV",
+                             "episodes": 12, "status": "Completed"}],
+                "media_type": "anime", "status": "Completed", "score": 0})
+            self.assertTrue((out / "a.xml").is_file())
+            download = urllib.request.urlopen(base + "/api/download/xml?media=anime", timeout=10)
+            self.assertEqual(download.headers.get("Cache-Control"), "no-store")
+
 
 if __name__ == "__main__":
     unittest.main()

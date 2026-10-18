@@ -41,6 +41,7 @@ lives in [README.md](README.md); the reasoning lives in [PLAN.md](PLAN.md) and
 | 4 | MAL XML import: `parse_mal_xml`, DOCTYPE refusal, 20 MB ceiling, merge keyed on MAL id, add-unmatched toggle, `.gz` via `DecompressionStream` | import cases in `tests/test_gui_manga_endpoint.py`, `domtest12.js` |
 | 5 | Direct AniList write: token check, existing-entry read, add/update preview, `SaveMediaListEntry`, per-title validation messages | `tests/test_anilist_write.py` — **mocked API only** |
 | 6 | README rewrite, `.gitignore`, `tests/test_cli.py`, three-way CLI reporting | 114 Python tests, 12 jsdom suites, `py_compile`, CLI smoke |
+| polish | Dead code removed, accessibility and cache-header fixes (below) | 122 Python tests, 14 jsdom suites |
 
 ### AniList-first reframing (2026-10-18)
 
@@ -57,17 +58,46 @@ and accepts a search, an anilist.co / myanimelist.net link, or a bare id.
 The same mislabel existed on the CLI, which reported AniList-only titles as
 `omitted (missing MAL ID)`. It now reports three populations and prints the AniList ids.
 
+## Polish pass (2026-10-18)
+
+Removals — all verified unreachable before deleting, not assumed:
+
+- `ANILIST_SEARCH_QUERY` and `ANILIST_MANGA_SEARCH_QUERY`: superseded by `_search_batch_query`.
+  A top-level `Media` query returns one node, so it cannot carry a candidate list.
+- Nine CSS rules no selector could match (`.btn-success`, `.btn-icon`, `.cell-id`, `.tag-eps`,
+  `.unresolved-bar .spacer`). The only class name this template builds dynamically is
+  `'toast-' + type`, so `.toast-success` / `.toast-error` were kept.
+- `textarea { font-family: var(--font-mono) }`: the control system's later `textarea` rule sets
+  the family at equal specificity, so the box has always rendered sans. Confirmed by reading the
+  computed style in Chrome rather than from the cascade on paper.
+
+Fixes:
+
+- **Sortable headers were mouse-only and silent.** They now take focus, respond to Enter and
+  Space, carry `aria-sort`, and only one column claims a sort at a time.
+- **Dialogs were not dialogs.** `role`, `aria-modal` and `aria-labelledby` added; opening one
+  moves focus inside and closing it returns focus to whatever opened it. All 14 call sites now go
+  through `showModal` / `hideModal`, and a test fails the build if one toggles the class directly.
+- The filter box and the select-all checkbox had no accessible name (a placeholder is not one).
+- Every `<th>` carries `scope="col"`.
+- `prefers-reduced-motion: reduce` disables the 14 transitions and animations.
+- `color-scheme` is declared per theme, so the browser's own scrollbars, spinners and date picker
+  follow the page instead of staying light on a dark page.
+- The page and the export downloads send `Cache-Control: no-store`. Both change between runs; a
+  cached download would hand back the previous selection's XML.
+
 ## Verified
 
 ```bash
-python -m unittest discover -s tests -t .    # 114 tests
+python -m unittest discover -s tests -t .    # 122 tests
 python -m py_compile generate_mal_xml.py gui.py
 python generate_mal_xml.py --help
 ```
 
-Plus 12 jsdom suites driving the real handlers (theme, sample, clipboard, clear, select-all under
-a filter, copy-unmatched, Ctrl+Enter, Escape, drag-drop, import merge, run lifecycle, persistence,
-fixer), four gap audits at zero, 14 state×theme contrast checks, and 8 viewport widths.
+Plus 14 jsdom suites, 277 assertions, driving the real handlers (theme, sample, clipboard, clear,
+select-all under a filter, copy-unmatched, Ctrl+Enter, Escape, drag-drop, import merge, run
+lifecycle, persistence, fixer, sorting, dialog focus), four gap audits at zero, 14 state×theme
+contrast checks, and 8 viewport widths.
 
 ## Not verified
 

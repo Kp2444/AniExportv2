@@ -91,38 +91,6 @@ def set_rate_limit_notifier(callback: Optional[Any]) -> None:
     """Register a callback(seconds) invoked whenever a request waits out a 429."""
     _rate_limit_hook.callback = callback
 
-ANILIST_SEARCH_QUERY = """
-query ($search: String) {
-  Media (search: $search, type: ANIME) {
-    id
-    idMal
-    title {
-      english
-      romaji
-    }
-    format
-    episodes
-    status
-    relations {
-      edges {
-        relationType
-        node {
-          id
-          idMal
-          title {
-            english
-            romaji
-          }
-          format
-          episodes
-          type
-          status
-        }
-      }
-    }
-  }
-}
-"""
 
 ANILIST_BY_ID_QUERY = """
 query ($id: Int) {
@@ -176,34 +144,6 @@ query ($search: String) {
 }
 """
 
-ANILIST_MANGA_SEARCH_QUERY = """
-query ($search: String) {
-  Media (search: $search, type: MANGA) {
-    id
-    idMal
-    title { english romaji }
-    format
-    chapters
-    volumes
-    status
-    relations {
-      edges {
-        relationType
-        node {
-          id
-          idMal
-          title { english romaji }
-          format
-          chapters
-          volumes
-          type
-          status
-        }
-      }
-    }
-  }
-}
-"""
 
 ANILIST_MANGA_SEARCH_PAGE_QUERY = """
 query ($search: String) {
@@ -451,6 +391,8 @@ def _pick_best_media(nodes: Sequence[Dict[str, Any]], search_title: str = "",
 # Deterministic rewrites tried when a title resolves to nothing. These fix
 # formatting, never spelling: AniList returns zero hits for "Raphsody" or
 # "Aristrocat", so no rule here can recover a typo.
+
+
 def _search_variants(title: str, media_type: str = "manga") -> List[str]:
     original = " ".join(str(title or "").split())
     out: List[str] = []
@@ -997,7 +939,6 @@ def search_candidates(query: str, media_type: str, max_retries: int = 3) -> List
     return [root] if int(root.get("anilist_id") or 0) > 0 else []
 
 
-
 # ---------------------------------------------------------------------------
 # Disk cache
 # ---------------------------------------------------------------------------
@@ -1260,7 +1201,6 @@ def _expand_sequels_chain(root_media: Dict[str, Any], media_type: str, fallback_
         out.append(parse(detailed, fallback_title=fallback_title))
         current = detailed
     return out
-
 
 
 # ---------------------------------------------------------------------------

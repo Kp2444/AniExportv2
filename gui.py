@@ -57,7 +57,6 @@ EXPORT_GZ_PATH = _EXPORT_DIR / "myanimelist_export.xml.gz"
 EXPORT_MANGA_XML_PATH = _EXPORT_DIR / "myanimelist_manga_export.xml"
 EXPORT_MANGA_GZ_PATH = _EXPORT_DIR / "myanimelist_manga_export.xml.gz"
 
-
 # Only one network run at a time: two concurrent runs would interleave their
 # writes to the same export files and fight over the rate limit.
 _run_lock = threading.Lock()
@@ -119,7 +118,6 @@ def _export_filenames(media_type: str) -> tuple:
     if media_type == "manga":
         return "myanimelist_manga_export.xml", "myanimelist_manga_export.xml.gz"
     return "myanimelist_export.xml", "myanimelist_export.xml.gz"
-
 
 MAX_IMPORT_BYTES = 20 * 1024 * 1024
 
@@ -257,6 +255,7 @@ HTML_TEMPLATE = """<!DOCTYPE html>
   <link href="https://fonts.googleapis.com/css2?family=Figtree:wght@400;500;600;700&family=Fira+Code:wght@400;500&display=swap" rel="stylesheet">
   <style>
     :root {
+      color-scheme: dark;
       --bg: #0C0E12;
       --surface-1: #12161B;
       --surface-2: #191E24;
@@ -309,6 +308,7 @@ HTML_TEMPLATE = """<!DOCTYPE html>
     }
 
     body.light {
+      color-scheme: light;
       --bg: #EFEBE4;
       --surface-1: #F7F5F0;
       --surface-2: #FFFFFF;
@@ -574,7 +574,6 @@ HTML_TEMPLATE = """<!DOCTYPE html>
       border: 1px solid var(--border);
       border-radius: var(--radius-md);
       color: var(--text);
-      font-family: var(--font-mono);
       font-size: 0.8125rem;
       line-height: 1.6;
       resize: vertical;
@@ -672,26 +671,22 @@ HTML_TEMPLATE = """<!DOCTYPE html>
       border-color: var(--border-hover);
     }
 
-    .btn-success {
-      background: var(--accent-active);
-      color: #FFFFFF;
-    }
-    .btn-success:hover:not(:disabled) {
-      background: var(--accent-hover);
-    }
-
     .btn:active:not(:disabled) {
       transform: translateY(1px);
+    }
+
+    @media (prefers-reduced-motion: reduce) {
+      *, *::before, *::after {
+        animation-duration: 0.01ms !important;
+        animation-iteration-count: 1 !important;
+        transition-duration: 0.01ms !important;
+        scroll-behavior: auto !important;
+      }
     }
 
     :where(button, a, select, input, textarea):focus-visible {
       outline: 2px solid var(--accent);
       outline-offset: 2px;
-    }
-
-    .btn-icon {
-      padding: 0.5rem;
-      border-radius: var(--radius-sm);
     }
 
     /* Toggle switch control */
@@ -963,26 +958,8 @@ HTML_TEMPLATE = """<!DOCTYPE html>
     }
 
     tr.row-excluded .tag-type,
-    tr.row-excluded .tag-eps,
     tr.row-excluded .status-pill {
       opacity: 0.6;
-    }
-
-    .cell-id {
-      font-family: var(--font-mono);
-      font-size: 0.75rem;
-      color: var(--text-muted);
-      line-height: 1.35;
-    }
-
-    .cell-id a {
-      text-decoration: none;
-      transition: color 120ms ease;
-      color: var(--text-muted);
-    }
-    .cell-id a:hover {
-      color: var(--text);
-      text-decoration: underline;
     }
 
     .cell-title {
@@ -1003,12 +980,6 @@ HTML_TEMPLATE = """<!DOCTYPE html>
       border-radius: var(--radius-sm);
       background: var(--accent-bg);
       color: var(--accent-text);
-    }
-
-    .tag-eps {
-      font-family: var(--font-mono);
-      font-size: 0.75rem;
-      color: var(--text-muted);
     }
 
     .status-pill {
@@ -1076,6 +1047,10 @@ HTML_TEMPLATE = """<!DOCTYPE html>
 
     th.sortable { cursor: pointer; user-select: none; }
     th.sortable:hover { color: var(--text-primary); }
+    th.sortable:focus-visible {
+      outline: 2px solid var(--accent);
+      outline-offset: -2px;
+    }
     th .sort-mark { font-size: 0.625rem; color: var(--text-subtle); margin-left: 0.25rem; }
 
     .cover-thumb {
@@ -1350,8 +1325,6 @@ HTML_TEMPLATE = """<!DOCTYPE html>
       border-color: var(--border-focus);
     }
     .unresolved-bar strong { color: var(--danger); }
-    .unresolved-bar .spacer { flex: 1; }
-
 
     /* ---- redesign pass -------------------------------------------------
        The table is the work surface. Everything above it was competing with
@@ -1420,7 +1393,6 @@ HTML_TEMPLATE = """<!DOCTYPE html>
       font-size: 0.75rem;
       line-height: 1.45;
     }
-    .unresolved-bar .spacer { display: none; }
     .btn-xs { padding: 0.1875rem 0.5rem; font-size: 0.6875rem; white-space: nowrap; }
     .btn-danger.btn-danger {
       color: var(--danger);
@@ -1826,8 +1798,6 @@ HTML_TEMPLATE = """<!DOCTYPE html>
     }
     .detail-input.detail-input { min-height: var(--control-md); padding-top: 0; padding-bottom: 0; }
 
-
-
     /* ====================================================================
        Contrast. Audited at 11-12px: chips 2.93, detail head 3.6, stat
        labels / meta / counts 3.9 - all under the 4.5 AA floor for small
@@ -1852,7 +1822,6 @@ HTML_TEMPLATE = """<!DOCTYPE html>
     .detail-head strong { color: var(--text); }
     .title-meta .id-link { color: var(--text-muted); }
 
-
     /* ====================================================================
        Horizontal overflow fix. A grid item defaults to min-width:auto, so the
        1fr column could not shrink below the table's min-content width (1105px)
@@ -1867,7 +1836,6 @@ HTML_TEMPLATE = """<!DOCTYPE html>
     .title-row { min-width: 0; }
     #animeTable td { overflow: hidden; }
     .detail-row td { overflow: visible; }
-
 
     /* ====================================================================
        Audit fixes. Measured in Chrome, both themes:
@@ -1947,7 +1915,6 @@ HTML_TEMPLATE = """<!DOCTYPE html>
     /* The danger red sat at 4.46:1 on its own tint: a hair under the floor. */
     .status-dropped, .status-unresolved, .id-missing,
     .unresolved-bar strong { color: var(--danger-text); }
-
 
   </style>
 </head>
@@ -2219,10 +2186,11 @@ HTML_TEMPLATE = """<!DOCTYPE html>
         </div>
       </section>
 
-      <div id="fixModal" class="modal-backdrop">
+      <div id="fixModal" class="modal-backdrop" role="dialog" aria-modal="true"
+           aria-labelledby="fixModalTitle">
         <div class="modal-card" style="max-width:720px;">
           <div class="modal-head">
-            <strong>Fix unmatched titles</strong>
+            <strong id="fixModalTitle">Fix unmatched titles</strong>
             <span id="fixCounter" class="fix-counter"></span>
             <span style="flex:1;"></span>
             <button id="btnFixSkip" class="btn btn-secondary">Skip</button>
@@ -2246,10 +2214,11 @@ HTML_TEMPLATE = """<!DOCTYPE html>
         </div>
       </div>
 
-      <div id="writeModal" class="modal-backdrop">
+      <div id="writeModal" class="modal-backdrop" role="dialog" aria-modal="true"
+           aria-labelledby="writeModalTitle">
         <div class="modal-card" style="max-width:560px;">
           <div class="modal-head">
-            <strong>Write to AniList</strong>
+            <strong id="writeModalTitle">Write to AniList</strong>
             <span style="flex:1;"></span>
             <button id="btnWriteCancel" class="btn btn-secondary">Cancel</button>
             <button id="btnWriteConfirm" class="btn btn-primary">Write now</button>
@@ -2258,7 +2227,8 @@ HTML_TEMPLATE = """<!DOCTYPE html>
         </div>
       </div>
 
-      <div id="previewModal" class="modal-backdrop">
+      <div id="previewModal" class="modal-backdrop" role="dialog" aria-modal="true"
+           aria-labelledby="previewTitle">
         <div class="modal-card">
           <div class="modal-head">
             <strong id="previewTitle">Export preview</strong>
@@ -2278,7 +2248,8 @@ HTML_TEMPLATE = """<!DOCTYPE html>
               <circle cx="11" cy="11" r="8"></circle>
               <line x1="21" y1="21" x2="16.65" y2="16.65"></line>
             </svg>
-            <input type="text" id="searchInput" placeholder="Filter by title, MAL ID, or AniList ID...">
+            <input type="text" id="searchInput" aria-label="Filter rows"
+                  placeholder="Filter by title, MAL ID, or AniList ID...">
           </div>
           <div id="chipRow" class="chip-row"></div>
           <span id="filterCountLabel" class="filter-count">Showing 0</span>
@@ -2294,14 +2265,18 @@ HTML_TEMPLATE = """<!DOCTYPE html>
           <table id="animeTable">
             <thead>
               <tr>
-                <th style="width: 42px; text-align: center;">
-                  <input type="checkbox" id="selectAllCheckbox" class="table-checkbox" checked title="Select/Deselect all">
+                <th scope="col" style="width: 42px; text-align: center;">
+                  <input type="checkbox" id="selectAllCheckbox" class="table-checkbox" checked
+                         aria-label="Select or deselect every shown row" title="Select/Deselect all">
                 </th>
-                <th class="sortable" data-sort="title">Title<span class="sort-mark"></span></th>
-                <th style="width: 104px;" class="sortable" data-sort="type">Type<span class="sort-mark"></span></th>
-                <th style="width: 158px;" id="countColumnHeading" class="sortable" data-sort="count">Episodes<span class="sort-mark"></span></th>
-                <th style="width: 132px;" class="sortable" data-sort="status">Status<span class="sort-mark"></span></th>
-                <th style="width: 40px;" aria-label="More fields"></th>
+                <th scope="col" class="sortable" data-sort="title" tabindex="0" aria-sort="none">Title<span class="sort-mark"></span></th>
+                <th scope="col" style="width: 104px;" class="sortable" data-sort="type"
+                    tabindex="0" aria-sort="none">Type<span class="sort-mark"></span></th>
+                <th scope="col" style="width: 158px;" id="countColumnHeading" class="sortable" data-sort="count"
+                    tabindex="0" aria-sort="none">Episodes<span class="sort-mark"></span></th>
+                <th scope="col" style="width: 132px;" class="sortable" data-sort="status"
+                    tabindex="0" aria-sort="none">Status<span class="sort-mark"></span></th>
+                <th scope="col" style="width: 40px;" aria-label="More fields"></th>
               </tr>
             </thead>
             <tbody id="tableBody">
@@ -3069,7 +3044,11 @@ HTML_TEMPLATE = """<!DOCTYPE html>
       toggleFresh.checked = false;
       setDestination('', false);
       mediaTypeSelect.value = 'anime';
-      document.querySelectorAll('th.sortable .sort-mark').forEach(mark => { mark.textContent = ''; });
+      document.querySelectorAll('th.sortable').forEach(th => {
+        const mark = th.querySelector('.sort-mark');
+        if (mark) mark.textContent = '';
+        th.setAttribute('aria-sort', 'none');
+      });
       updateMediaTypeUI(false);
       renderTable(currentAnimes);
       updateStats();
@@ -3571,24 +3550,38 @@ HTML_TEMPLATE = """<!DOCTYPE html>
       renderTable(currentAnimes);
     });
 
+    function toggleSort(th) {
+      const key = th.dataset.sort;
+      if (sortKey !== key) {
+        sortKey = key;
+        sortDir = 1;
+      } else if (sortDir === 1) {
+        sortDir = -1;
+      } else {
+        sortKey = '';
+        sortDir = 0;
+      }
+      document.querySelectorAll('th.sortable').forEach(other => {
+        const mark = other.querySelector('.sort-mark');
+        if (mark) mark.textContent = '';
+        other.setAttribute('aria-sort', 'none');
+      });
+      if (sortKey) {
+        const mark = th.querySelector('.sort-mark');
+        if (mark) mark.textContent = sortDir === 1 ? '^' : 'v';
+        th.setAttribute('aria-sort', sortDir === 1 ? 'ascending' : 'descending');
+      }
+      renderTable(currentAnimes);
+    }
+
     document.querySelectorAll('th.sortable').forEach(th => {
-      th.addEventListener('click', () => {
-        const key = th.dataset.sort;
-        if (sortKey !== key) {
-          sortKey = key;
-          sortDir = 1;
-        } else if (sortDir === 1) {
-          sortDir = -1;
-        } else {
-          sortKey = '';
-          sortDir = 0;
+      th.addEventListener('click', () => toggleSort(th));
+      th.addEventListener('keydown', event => {
+        // A header you can only reach with a mouse is not a control.
+        if (event.key === 'Enter' || event.key === ' ') {
+          event.preventDefault();
+          toggleSort(th);
         }
-        document.querySelectorAll('th.sortable .sort-mark').forEach(mark => { mark.textContent = ''; });
-        if (sortKey) {
-          const mark = th.querySelector('.sort-mark');
-          if (mark) mark.textContent = sortDir === 1 ? '^' : 'v';
-        }
-        renderTable(currentAnimes);
       });
     });
 
@@ -3641,21 +3634,42 @@ HTML_TEMPLATE = """<!DOCTYPE html>
         previewTitle.textContent = payload.name + ' (' + payload.bytes.toLocaleString() + ' bytes'
           + (payload.truncated ? ', truncated' : '') + ')';
         previewBody.textContent = payload.xml;
-        previewModal.classList.add('show');
+        showModal(previewModal);
       } catch (e) {
         showToast('Could not reach the local server', 'error');
       }
     });
 
-    btnPreviewClose.addEventListener('click', () => previewModal.classList.remove('show'));
+    btnPreviewClose.addEventListener('click', () => hideModal(previewModal));
     previewModal.addEventListener('click', (e) => {
-      if (e.target === previewModal) previewModal.classList.remove('show');
+      if (e.target === previewModal) hideModal(previewModal);
     });
+    // Opening a dialog without moving focus leaves a keyboard user outside it,
+    // still tabbing the page behind the backdrop.
+    let modalReturnFocus = null;
+    function showModal(modal) {
+      if (!modal.classList.contains('show')) {
+        modalReturnFocus = document.activeElement;
+      }
+      modal.classList.add('show');
+      const first = modal.querySelector('input:not([type=hidden]):not([disabled]), textarea, select, button');
+      if (first) first.focus();
+    }
+
+    function hideModal(modal) {
+      const wasOpen = modal.classList.contains('show');
+      modal.classList.remove('show');
+      if (wasOpen && modalReturnFocus && document.contains(modalReturnFocus)) {
+        modalReturnFocus.focus();
+        modalReturnFocus = null;
+      }
+    }
+
     document.addEventListener('keydown', (e) => {
       if (e.key === 'Escape') {
-        previewModal.classList.remove('show');
-        writeModal.classList.remove('show');
-        fixModal.classList.remove('show');
+        hideModal(previewModal);
+        hideModal(writeModal);
+        hideModal(fixModal);
       }
       if (e.key === 'Enter' && (e.ctrlKey || e.metaKey) && !isProcessing) {
         e.preventDefault();
@@ -3700,13 +3714,13 @@ HTML_TEMPLATE = """<!DOCTYPE html>
         wanted = 0;
       }
       fixPos = wanted >= 0 ? wanted : 0;
-      fixModal.classList.add('show');
+      showModal(fixModal);
       showFixCurrent();
     }
 
     function showFixCurrent() {
       if (fixPos >= fixQueue.length) {
-        fixModal.classList.remove('show');
+        hideModal(fixModal);
         showToast(fixFixed ? `Fixed ${fixFixed} of ${fixQueue.length}` : 'Nothing changed');
         return;
       }
@@ -3792,11 +3806,11 @@ HTML_TEMPLATE = """<!DOCTYPE html>
     });
     btnFixSkip.addEventListener('click', () => { fixPos += 1; showFixCurrent(); });
     btnFixClose.addEventListener('click', () => {
-      fixModal.classList.remove('show');
+      hideModal(fixModal);
       if (fixFixed) showToast(`Fixed ${fixFixed} title${fixFixed === 1 ? '' : 's'}`);
     });
     fixModal.addEventListener('click', (e) => {
-      if (e.target === fixModal) fixModal.classList.remove('show');
+      if (e.target === fixModal) hideModal(fixModal);
     });
 
     function writableRows() {
@@ -3851,7 +3865,7 @@ HTML_TEMPLATE = """<!DOCTYPE html>
         return;
       }
       writePlan.innerHTML = 'Checking your AniList list...';
-      writeModal.classList.add('show');
+      showModal(writeModal);
       try {
         const res = await fetch('/api/anilist-preview', {
           method: 'POST',
@@ -3884,16 +3898,16 @@ HTML_TEMPLATE = """<!DOCTYPE html>
       }
     });
 
-    btnWriteCancel.addEventListener('click', () => writeModal.classList.remove('show'));
+    btnWriteCancel.addEventListener('click', () => hideModal(writeModal));
     writeModal.addEventListener('click', (e) => {
-      if (e.target === writeModal) writeModal.classList.remove('show');
+      if (e.target === writeModal) hideModal(writeModal);
     });
 
     btnWriteConfirm.addEventListener('click', async () => {
       const token = anilistToken.value.trim();
       const rows = writableRows();
       if (!token || !rows.length) return;
-      writeModal.classList.remove('show');
+      hideModal(writeModal);
       isProcessing = true;
       btnWrite.disabled = true;
       progressCard.style.display = 'flex';
@@ -4151,6 +4165,7 @@ class MalGuiHandler(BaseHTTPRequestHandler):
             self.send_response(HTTPStatus.OK)
             self.send_header("Content-Type", "text/html; charset=utf-8")
             self.send_header("Content-Length", str(len(body)))
+            self.send_header("Cache-Control", "no-store")
             self.end_headers()
             self.wfile.write(body)
             return
@@ -4188,6 +4203,7 @@ class MalGuiHandler(BaseHTTPRequestHandler):
             self.send_header("Content-Type", "application/gzip" if wants_gz else "application/xml; charset=utf-8")
             self.send_header("Content-Disposition", f'attachment; filename="{filename}"')
             self.send_header("Content-Length", str(len(content)))
+            self.send_header("Cache-Control", "no-store")
             self.end_headers()
             self.wfile.write(content)
             return
@@ -4735,7 +4751,6 @@ def main() -> None:
 
     args = parser.parse_args()
     start_server(port=args.port, open_browser=not args.no_browser)
-
 
 if __name__ == "__main__":
     main()
