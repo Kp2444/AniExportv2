@@ -1,8 +1,10 @@
 # Change record and verification status
 
 Running record of what landed and what was actually verified. The user-facing description
-lives in [README.md](README.md); the reasoning lives in [PLAN.md](PLAN.md) and
-[ANILIST_FIRST_PLAN.md](ANILIST_FIRST_PLAN.md).
+lives in [README.md](README.md); what is queued next lives in [ROADMAP.md](ROADMAP.md).
+The two planning records this work was built from, `PLAN.md` and `ANILIST_FIRST_PLAN.md`,
+were removed once everything in them had shipped; they remain in git history
+(`git show 8a35779:PLAN.md`).
 
 ## Manga support (first change)
 
