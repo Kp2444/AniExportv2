@@ -261,7 +261,7 @@ every one of them would have produced broken code.
 
 > [!NOTE]
 > **Shipped and verified live 2026-10-19.** All six steps, together, because they are one feature.
-> 209 tests pass (140 before), plus a node suite of 57 assertions on the diff renderer, and
+> 216 tests pass (140 before), plus a node suite of 65 assertions on the diff renderer, and
 > **§12's live steps 2–6 all passed against the throwaway account** — see §2.3, P1–P12. What
 > landed is recorded in `MANGA_SUPPORT_NOTES.md` under "Write safety"; defects 1, 3, 4, 7 and 8
 > are closed.
@@ -770,11 +770,15 @@ loss, so it goes first on merit, not dependency.
   conflict policy is table-driven, one case per rule per §3 "Phase 1 tests".
 - jsdom suites in the scratchpad for the diff modal (**done** — 57 assertions, 16 suites and 352
   assertions in total), the Needs-review chip and the bulk-edit scoping.
-- Chrome screenshots at 1440 and 430 plus the width probe. **Not done for the diff modal** — the
-  Chrome extension would not connect (2026-10-19). The modal follows `fixModal`'s proven shape (a
-  `max-height` scroll box inside `.modal-card`, which caps at `min(900px, 100%)`), every diff line
-  wraps, and `overflow-wrap: anywhere` guards the one unbreakable value a diff can hold, a 60-char
-  note. That is reasoning, not a measurement, and the screenshots are still owed.
+- ~~Chrome screenshots at 1440 and 430 plus the width probe.~~ **Done** once the extension
+  connected. It found two defects nothing else had: the diff line rendered `from -> applied`, so a
+  blocked field read `147 -> 147` and looked like a no-op; and the entire `@media (max-width: 760px)`
+  block was dead, sitting above the components it overrides, killing 13 declarations including the
+  match picker's phone sizing. Both fixed; measured after: `.diff-field` `min-width: 0`, list at
+  50vh, no line or list overflowing at a 430px card, every control inside it.
+  (The window was maximized so Chrome refused the viewport resize; the narrow pass was measured by
+  flipping the breakpoint's own rules on against a 430px-clamped card, which exercises the real
+  declarations rather than a copy of them.)
 - **Live, on the throwaway account, in this order.** Steps 1 and 2's baseline are **done** — see
   §2.3. The remaining steps all test behaviour Phase 1 has yet to build:
   1. ~~**Spike (O1).** Two aliased mutations; read `X-RateLimit-Remaining` either side; read both

@@ -908,55 +908,6 @@ HTML_TEMPLATE = """<!DOCTYPE html>
       }
     }
 
-    /* Below this the right column has no room to lay things out side by side.
-       Measured: at 600px the title column was squeezed to 10px, and at 430px it
-       disappeared entirely while the export buttons ran off the page. */
-    @media (max-width: 760px) {
-      .export-card {
-        align-items: stretch;
-        gap: 1rem;
-      }
-      .export-buttons {
-        justify-content: flex-start;
-        width: 100%;
-      }
-      .export-buttons .btn {
-        flex: 1 1 auto;
-        justify-content: center;
-      }
-      /* decorative, and it wraps to three lines down here */
-      .badge { display: none; }
-      /* 2rem of backdrop padding each side is a quarter of a phone screen */
-      .modal-backdrop { padding: 0.75rem; }
-      .fix-card { padding: 0.875rem; }
-      .fix-result { gap: 0.625rem; padding: 0.625rem; }
-      .fix-result .cover-thumb { width: 52px; height: 73px; }
-      .fix-search { flex-wrap: wrap; }
-      .write-card { padding: 0.875rem; }
-      .diff-list { max-height: 50vh; padding: 0.375rem; }
-      .diff-field { min-width: 0; font-weight: 600; }
-      .fix-search input { flex: 1 1 100%; }
-      .modal-head { flex-wrap: wrap; }
-      .toolbar-end {
-        margin-left: 0;
-        width: 100%;
-        justify-content: space-between;
-      }
-      .unresolved-bar {
-        flex-direction: column;
-        align-items: stretch;
-      }
-      .unresolved-bar .btn {
-        flex: 1 1 auto;
-        justify-content: center;
-      }
-      /* Scroll the table instead of crushing the title out of existence. */
-      #animeTable {
-        table-layout: auto;
-        min-width: 780px;
-      }
-    }
-
     .stat-box {
       background: var(--surface-1);
       border: 1px solid var(--border);
@@ -1356,6 +1307,7 @@ HTML_TEMPLATE = """<!DOCTYPE html>
     }
     .diff-from { color: var(--text-muted); }
     .diff-to { color: var(--text); font-variant-numeric: tabular-nums; }
+    .diff-to.overridden { color: var(--text-subtle); text-decoration: line-through; }
     .diff-arrow { color: var(--text-muted); }
     .diff-note { color: var(--text-muted); }
     .diff-note.warn { color: var(--warning); }
@@ -2155,6 +2107,61 @@ HTML_TEMPLATE = """<!DOCTYPE html>
     /* The danger red sat at 4.46:1 on its own tint: a hair under the floor. */
     .status-dropped, .status-unresolved, .id-missing,
     .unresolved-bar strong { color: var(--danger-text); }
+
+    /* Narrow overrides sit at the end on purpose. Every rule in here is a
+       plain class, the same specificity as the component rule it overrides,
+       so the cascade decides on source order alone. Sitting above the
+       components - where this block used to be - silently killed 13 of its
+       declarations, including the phone sizing for the match picker and for
+       the write diff. Found in Chrome, not by reading. Keep it last. */
+    /* Below this the right column has no room to lay things out side by side.
+       Measured: at 600px the title column was squeezed to 10px, and at 430px it
+       disappeared entirely while the export buttons ran off the page. */
+    @media (max-width: 760px) {
+      .export-card {
+        align-items: stretch;
+        gap: 1rem;
+      }
+      .export-buttons {
+        justify-content: flex-start;
+        width: 100%;
+      }
+      .export-buttons .btn {
+        flex: 1 1 auto;
+        justify-content: center;
+      }
+      /* decorative, and it wraps to three lines down here */
+      .badge { display: none; }
+      /* 2rem of backdrop padding each side is a quarter of a phone screen */
+      .modal-backdrop { padding: 0.75rem; }
+      .fix-card { padding: 0.875rem; }
+      .fix-result { gap: 0.625rem; padding: 0.625rem; }
+      .fix-result .cover-thumb { width: 52px; height: 73px; }
+      .fix-search { flex-wrap: wrap; }
+      .write-card { padding: 0.875rem; }
+      .diff-list { max-height: 50vh; padding: 0.375rem; }
+      .diff-field { min-width: 0; font-weight: 600; }
+      .fix-search input { flex: 1 1 100%; }
+      .modal-head { flex-wrap: wrap; }
+      .toolbar-end {
+        margin-left: 0;
+        width: 100%;
+        justify-content: space-between;
+      }
+      .unresolved-bar {
+        flex-direction: column;
+        align-items: stretch;
+      }
+      .unresolved-bar .btn {
+        flex: 1 1 auto;
+        justify-content: center;
+      }
+      /* Scroll the table instead of crushing the title out of existence. */
+      #animeTable {
+        table-layout: auto;
+        min-width: 780px;
+      }
+    }
 
   </style>
 </head>
@@ -4276,26 +4283,37 @@ HTML_TEMPLATE = """<!DOCTYPE html>
 
     function diffLineHtml(row, d) {
       const forced = writeOverrideFor(row.anilist_id, d.field) === 'mine';
-      // `applied` is what the account will hold, which is not always what gets
-      // sent: AniList overrides some fields on a status change by itself.
-      const sent = (d.by_anilist || (d.blocked && !forced)) ? d.applied : d.to;
+      // The arrow always shows what the row ASKED for, so a blocked field does
+      // not render as "147 -> 147" and read like a no-op. `applied` is what the
+      // account will actually hold, which differs when the policy keeps the
+      // account's value or when AniList overrides us on a status change.
+      // Ticking "keep mine" beats the policy, so the outcome becomes the row's
+      // own value - but it does not beat AniList, which overrides us whatever
+      // anyone ticks (measured: a forced chapter count on a row that stays
+      // completed is still clamped to the total).
+      const outcome = (forced && !d.by_anilist) ? d.to : d.applied;
+      const outcomeText = diffValueText(d.field, outcome);
+      // A field we never send has no asked-for value; show what AniList does.
+      const asked = (d.to === null || d.to === undefined) ? outcome : d.to;
+      const askedText = diffValueText(d.field, asked);
+      const kept = askedText !== outcomeText;
       const bits = [
         '<span class="diff-field">' + escapeHtml(diffFieldLabel(d.field)) + '</span>',
         '<span class="diff-from">' + escapeHtml(diffValueText(d.field, d.from)) + '</span>',
         '<span class="diff-arrow">-&gt;</span>',
-        '<span class="diff-to">' + escapeHtml(diffValueText(d.field, sent)) + '</span>',
+        '<span class="diff-to' + (kept ? ' overridden' : '') + '">' + escapeHtml(askedText) + '</span>',
       ];
-      if (d.blocked) {
-        bits.push(forced
-          ? '<span class="diff-note warn">forced: your ' + escapeHtml(diffValueText(d.field, d.to))
-            + ' will overwrite it</span>'
-          : '<span class="diff-note">your ' + escapeHtml(diffValueText(d.field, d.to))
-            + ' would go backwards, so AniList keeps what it has</span>');
-        bits.push(pickBoxHtml(row.anilist_id, d.field, 'mine', 'keep mine', forced));
+      if (kept) {
+        bits.push('<span class="diff-note warn">' + (d.by_anilist
+          ? 'AniList sets ' + escapeHtml(outcomeText) + ' itself'
+          : 'stays ' + escapeHtml(outcomeText)) + '</span>');
+      } else if (d.by_anilist) {
+        bits.push('<span class="diff-note warn">AniList sets this itself</span>');
+      } else if (forced) {
+        bits.push('<span class="diff-note warn">forced</span>');
       }
-      if (d.by_anilist) {
-        bits.push('<span class="diff-note warn">AniList sets this itself on this status change,'
-          + ' whatever is sent</span>');
+      if (d.blocked) {
+        bits.push(pickBoxHtml(row.anilist_id, d.field, 'mine', 'keep mine', forced));
       }
       return '<div class="diff-line' + (d.blocked ? ' blocked' : '') + '">' + bits.join('') + '</div>';
     }

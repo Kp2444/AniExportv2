@@ -4,8 +4,8 @@
 
 **What shipped, what was actually verified, and what is known to be broken.**
 
-[![Tests](https://img.shields.io/badge/tests-214%20passing-success)](#-verified)
-[![Browser](https://img.shields.io/badge/jsdom-16%20suites%20%C2%B7%20352%20assertions-success)](#-verified)
+[![Tests](https://img.shields.io/badge/tests-216%20passing-success)](#-verified)
+[![Browser](https://img.shields.io/badge/jsdom-16%20suites%20%C2%B7%20360%20assertions-success)](#-verified)
 [![Live write](https://img.shields.io/badge/AniList%20write-guarded%20%2B%20undoable%20%28verified%20live%29-success)](#-not-verified)
 [![Defects](https://img.shields.io/badge/known%20defects-4-orange)](#-known-defects)
 
@@ -143,7 +143,7 @@ about the CSS. **Three of the five findings were invisible from the source.**
 ## ✅ Verified
 
 ```bash
-python -m unittest discover -s tests -t .    # 214 tests
+python -m unittest discover -s tests -t .    # 216 tests
 python -m py_compile generate_mal_xml.py gui.py
 python generate_mal_xml.py --help
 ```
@@ -349,6 +349,23 @@ P13-P14). Both are recorded because neither was reachable by reading the code:
   this (`/api/update-export`) and the write path did not. `iter_write_payloads` now keeps the
   first and skips the rest with a reason. `deduplicate_entries` could not have done it: it keys on
   MAL id or title, and these rows differ in both.
+
+**Two more found in Chrome once the extension connected, both fixed:**
+
+- **The diff line read as a no-op.** A blocked field rendered `from -> applied`, so it showed
+  `Completed -> Completed`, `147 -> 147`, `80/100 -> 80/100`, and what the row actually asked for
+  was buried in prose. The arrow now always shows what was asked, struck through when it will not
+  land, with the outcome stated beside it: `147 -> 40  stays 147`. Ticking "keep mine" beats the
+  policy but not AniList, which a node test now pins.
+- **Every phone override in the stylesheet was dead.** `@media (max-width: 760px)` sat at line 911,
+  *above* the components it targets. Every rule in it is a plain class, the same specificity as the
+  component rule, so source order decided and the component won - **13 declarations across 9
+  selectors never applied**, including `.fix-card` padding and `.fix-result .cover-thumb` sizing
+  from the match-picker pass, which is exactly the phone readability that pass was for. Measured in
+  Chrome: `.diff-field` computed `min-width: 88px` where the narrow rule says `0`. The block now
+  sits last. Two guards were added, and both were confirmed to **fail** with the block back in its
+  old position before being kept - a test that cannot fail is not a test, and the earlier
+  "the rules are present in the narrow block" check passed happily the whole time they were dead.
 
 **Still not verified:** cancellation mid-write, and a write large enough to need more than one
 50-id existing-entries chunk.

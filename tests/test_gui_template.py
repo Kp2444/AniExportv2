@@ -268,6 +268,60 @@ class WriteDiffTests(unittest.TestCase):
             self.assertIn(rule, narrow, rule)
 
 
+class CascadeOrderTests(unittest.TestCase):
+    """Every rule in the narrow block is a plain class, the same specificity as
+    the component rule it overrides, so only source order decides. The block
+    used to sit above the components and 13 of its declarations were silently
+    dead - including the phone sizing for the match picker and the write diff.
+    Chrome found that; a test that only checked the rules were present did not,
+    so this one checks they can actually win."""
+
+    BREAKPOINT = "@media (max-width: 760px)"
+
+    def _sheet(self) -> str:
+        head = gui.HTML_TEMPLATE.index("<style>")
+        return gui.HTML_TEMPLATE[head:gui.HTML_TEMPLATE.index("</style>", head)]
+
+    def _block(self, sheet: str):
+        start = sheet.index(self.BREAKPOINT)
+        depth, opened = 0, sheet.index("{", start)
+        for i in range(opened, len(sheet)):
+            if sheet[i] == "{":
+                depth += 1
+            elif sheet[i] == "}":
+                depth -= 1
+                if depth == 0:
+                    return start, i, sheet[opened + 1:i]
+        raise AssertionError("unterminated media block")
+
+    def test_the_narrow_block_comes_after_what_it_overrides(self):
+        sheet = self._sheet()
+        begin, finish, body = self._block(sheet)
+        outside = sheet[:begin] + sheet[finish:]
+        late = []
+        for selector in re.findall(r"([^{}]+)\{", body):
+            selector = " ".join(selector.split())
+            if "*/" in selector:
+                selector = selector.split("*/", 1)[-1].strip()
+            if not selector.startswith("."):
+                continue
+            # The component rule must be declared before the override, or the
+            # two tie on specificity and source order hands it to the component.
+            where = outside.rfind(selector + " {")
+            if where != -1 and where >= begin:
+                late.append(selector)
+        self.assertEqual(late, [], "these components are declared after the narrow "
+                                   "block, so their phone overrides never apply")
+
+    def test_the_narrow_block_is_the_last_breakpoint(self):
+        sheet = self._sheet()
+        start, _, _ = self._block(sheet)
+        for other in re.finditer(r"@media \(max-width: (\d+)px\)", sheet):
+            if int(other.group(1)) > 760:
+                self.assertLess(other.start(), start,
+                                "a wider breakpoint must come first, or it wins at phone width")
+
+
 class MatchPickerTests(unittest.TestCase):
     """The fixer is the one dialog where a person has to read carefully and
     decide. It was the narrowest card on the page, at the smallest type, showing
