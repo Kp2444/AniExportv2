@@ -16,7 +16,7 @@ Every claim below is in one of three states, and they are never mixed:
 |---|---|
 | **verified** | Observed directly — a line read in this repo, or a live response from `graphql.anilist.co` quoted in the Evidence section |
 | **inferred** | Follows from something verified, by stated reasoning. Could still be wrong if the reasoning is wrong |
-| **open** | Not established. Listed in [Open questions](#open-questions) with the experiment that would settle it |
+| **open** | Not established. Listed in [Open questions](#9-open-questions) with the experiment that would settle it |
 
 Line references are `file:line` against this repo at the commit that introduced this file. They
 were re-checked in this working tree, not carried over from notes.
@@ -70,8 +70,9 @@ Not affected, **verified** at `generate_mal_xml.py:1428-1440`: `progressVolumes`
 them on the account. They can still be *replaced* when the row does carry a value, which is why
 they belong in the diff even though they need no guard.
 
-This is the only irreversible feature in the tool, and it has never been run against a live
-account — all coverage in `tests/test_anilist_write.py` is against a mocked API.
+This is the only irreversible feature in the tool. It has now been **run against a live
+throwaway account** and the overwrite was reproduced exactly as described above — see §2.3, L3.
+Unit coverage in `tests/test_anilist_write.py` remains mock-only.
 
 ### 1.2 The write takes ~12 minutes for 339 rows — verified
 
@@ -136,7 +137,31 @@ and nothing was written.
 | R18 | `_is_repeat_status` drives `REPEATING` and `repeat: 1` | `:1521-1523`, used at `:1430-1431` |
 | R19 | `/api/anilist-preview` calls `backfill_anilist_ids(entries, …)` which **mutates the caller's rows** before payloads are built | `gui.py:4543` |
 
-### 2.3 Defects found while auditing this plan
+### 2.3 The live write — verified on a throwaway account, 2026-10-19
+
+Run against an AniList account that was **empty before the test** (confirmed: `MediaListCollection`
+returned 0 anime and 0 manga entries). The three media ids were resolved through the repo's own
+`fetch_anime_info_online`, so nothing depended on search ranking: Serial Experiments Lain `339`,
+Texhnolyze `26`, Kaiba `3701`. L1–L4 went through the running server's `/api/anilist-write`, so
+the whole handler path was exercised, not just the library. Account state was read back after each
+step through `anilist_existing_entries`.
+
+| # | Step | Result |
+|---|---|---|
+| L1 | Write Lain at episode 3, `Watching`, onto an empty account | `creates: 1`; entry `604576747` created, `status=CURRENT progress=3`. **The create path works live — this had never been run before** |
+| L2 | Write the identical row again | Classified `updates: 1, creates: 0`; entry id **unchanged** at `604576747`. The one guarantee the README makes — a repeated write cannot duplicate — holds live |
+| L3 | Write Lain at episode 10, then at episode 3 | Account went `3 → 10 → 3`. **§1.1 reproduced: the downgrade was written and reported as `"ok": true`.** No warning, no failure, no trace |
+| L4 | `/api/anilist-preview` for the episode-3 row while the account was at 10 | Returned exactly `{"ok":true,"viewer":"…","backfilled":0,"updates":1,"creates":0,"skipped":[],"total":1}`. **The user is told "1 update" and nothing else** — confirming §1.1's claim that no field-level data exists to show |
+| L5 | Rate-limit cost of a 2-alias `SaveMediaListEntry` document | Control: three single-operation requests decremented `X-RateLimit-Remaining` `15 → 14 → 13`, one each. The aliased document then took it `13 → 12`: **cost 1 request for 2 mutations.** `X-RateLimit-Limit` read `30`, so this was measured in the degraded state |
+| L6 | Did both aliases apply? | Yes — `data.m0` and `data.m1` each returned a distinct new entry (`604576843` mediaId 26 progress 4; `604576844` mediaId 3701 progress 5), both confirmed present on a fresh read |
+
+What this changes: **§1.1's data loss is no longer a code reading, it is a measurement**, and
+**O1/O4 are answered** (§9). What it does not change: the mocked unit tests are still the only automated
+coverage of the write, and nothing here tested `notes`, dates, `repeat`, or the manga path.
+
+---
+
+### 2.4 Defects found while auditing this plan
 
 Each was wrong in an earlier draft of this document and is corrected below. Kept visible because
 every one of them would have produced broken code.
@@ -369,14 +394,25 @@ Two rows, throwaway account, standalone script — **not** through
 `_execute_anilist_authenticated`, because that helper does not expose response headers to its
 caller and the spike needs to read `X-RateLimit-Remaining` before and after. Use `urllib` directly.
 
-Question: does one document containing 8 aliased mutations cost **1** request or **8** against the
+Question: does one document containing aliased mutations cost **1** request or **N** against the
 rate limit?
 
 - **costs 1** → build it. 339 rows: ~12 min → ~90s.
-- **costs 8** → **abandon Phase 2.** Batching would buy nothing and the undocumented burst limiter
+- **costs N** → **abandon Phase 2.** Batching would buy nothing and the undocumented burst limiter
   (noted in `generate_mal_xml.py:69-71`) makes it actively riskier. Nothing else depends on this.
 
-Also confirm both aliases actually applied, by reading the two entries back.
+> [!NOTE]
+> **The spike has been run. It costs 1 request.** A two-alias `SaveMediaListEntry` document
+> decremented `X-RateLimit-Remaining` by exactly 1, against a control of three single-operation
+> requests that each decremented by 1, and both aliases applied — see §2.3, L5 and L6.
+>
+> **Phase 2 is cleared to build.** Two caveats the spike also surfaced:
+> - It was measured at 2 aliases, not 8. The decrement is per document rather than per field
+>   resolver, so 8 should behave identically, but the first 8-alias document should re-read the
+>   header and confirm before the batch size is raised.
+> - `X-RateLimit-Limit` read **30, not 90**, so the spike ran while the API was in its degraded
+>   mode (`generate_mal_xml.py:66-88` already adapts the interval to the observed limit). Batching
+>   matters *more* in that state, not less: at 30/min the per-row write would take ~34 minutes.
 
 ### If the spike passes
 
@@ -600,10 +636,10 @@ loss, so it goes first on merit, not dependency.
 
 | # | Question | How it gets settled |
 |---|---|---|
-| O1 | Does a document of 8 aliased mutations cost 1 request or 8 against the rate limit? | The Phase 2 spike. Gates the whole phase |
+| ~~O1~~ | ~~Does a document of aliased mutations cost 1 request or N against the rate limit?~~ | **Settled: 1 request.** Measured at 2 aliases — §2.3, L5. Re-confirm at 8 before raising the batch size |
 | O2 | What is `perChunk`'s maximum on `MediaListCollection`? | Start at 500, halve on error — self-correcting, so it needs no answer up front |
 | O3 | Where should `REVIEW_RATIO_FLOOR` sit? | Calibration run described in §6.1, against the real 339-title list |
-| O4 | Does AniList rate-limit authenticated mutations differently from anonymous queries? | Observed during the spike from `X-RateLimit-Limit` on the authenticated response |
+| ~~O4~~ | ~~Does AniList rate-limit authenticated mutations differently from anonymous queries?~~ | **Settled: no separate mutation budget.** Queries and mutations drew from one counter on the same token — §2.3, L5 |
 
 ## 10. Risks
 
@@ -634,10 +670,11 @@ loss, so it goes first on merit, not dependency.
 - Chrome screenshots at 1440 and 430 plus the width probe. The diff modal is the largest piece of
   UI added since the narrow breakpoint landed, and it is a scrolling list inside a dialog — exactly
   the shape that broke at 430px last time.
-- **Live, on the throwaway account, in this order.** This is also the long-outstanding live test of
-  the write path, which has only ever run against mocks:
-  1. **Spike (O1).** Two aliased mutations; read `X-RateLimit-Remaining` either side; read both
-     entries back to confirm both applied.
+- **Live, on the throwaway account, in this order.** Steps 1 and 2's baseline are **done** — see
+  §2.3. The remaining steps all test behaviour Phase 1 has yet to build:
+  1. ~~**Spike (O1).** Two aliased mutations; read `X-RateLimit-Remaining` either side; read both
+     entries back to confirm both applied.~~ **Done — §2.3, L5/L6. Costs 1 request; both applied.**
+     Still to do once `_write_batch_query` exists: re-read the header on a full 8-alias document.
   2. **Guard.** A 3-row write with deliberate conflicts — one row's progress below the account's,
      one row's score `0` against a real score, one `COMPLETED` row set to `Plan to read`. Confirm
      the preview predicted exactly what happened and the account did not go backwards.

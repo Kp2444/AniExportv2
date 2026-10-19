@@ -6,7 +6,7 @@
 
 [![Tests](https://img.shields.io/badge/tests-127%20passing-success)](#-verified)
 [![Browser](https://img.shields.io/badge/jsdom-15%20suites%20%C2%B7%20295%20assertions-success)](#-verified)
-[![Live write](https://img.shields.io/badge/AniList%20write-never%20run%20live-critical)](#-not-verified)
+[![Live write](https://img.shields.io/badge/AniList%20write-overwrites%20%28measured%20live%29-critical)](#-not-verified)
 [![Defects](https://img.shields.io/badge/known%20defects-7-orange)](#-known-defects)
 
 </div>
@@ -218,11 +218,15 @@ twelve minutes**. Resolution solved the identical problem by aliasing 8 queries 
 ## ⚠️ Not verified
 
 > [!IMPORTANT]
-> **The direct AniList write has never been run against a live account.** All its coverage is
-> mocked. Duplicate *creation* is designed out — existing entries are read first and updated by
-> their list-entry `id` — but that is a narrower guarantee than it sounds: an update still
-> overwrites the account's values, per defect 1 above. Try a throwaway account, or a handful of
-> rows, first, and record the result here.
+> **The direct AniList write has now been run against a live throwaway account** (2026-10-19,
+> recorded as `ROADMAP.md` §2.3). What that run established: a create works; a repeated write of
+> the same row is classified as an update and keeps the same list-entry `id`, so duplicate
+> creation really is designed out; and **defect 1 is real** — an account at episode 10 was written
+> back to 3 and the write reported success, with the preview beforehand saying only *"1 update"*.
+>
+> What it did **not** establish: `notes`, dates, `repeat` and the whole manga write path are still
+> untested live, and every automated test remains mocked. Use a throwaway account, or a handful of
+> rows, and add what you find here.
 
 - The XML is structurally tested against a public description of the MAL format, not against a
   real MyAnimeList import. Import a small sample before a list you care about.

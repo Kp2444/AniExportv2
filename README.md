@@ -180,13 +180,20 @@ title using AniList's own validation messages.
 > [!WARNING]
 > **Two things to know before pointing this at a list you care about.**
 >
-> 1. **It has never been run against a live account.** The write path is covered by unit tests
->    against a mocked API only. Try a throwaway account, or a handful of rows, first.
-> 2. **An update overwrites, it does not merge.** Status, score and progress are sent for every
+> 1. **An update overwrites, it does not merge.** Status, score and progress are sent for every
 >    selected row and replace whatever is on the account — so a row showing chapter 142 will
 >    overwrite an account already at 224, and a row left blank writes `0`. Duplicate *creation* is
->    prevented; overwriting is not. A conflict guard and a pre-write diff are the first item in
->    [ROADMAP.md](ROADMAP.md).
+>    prevented; overwriting is not. This has been **measured live**, not merely read off the code:
+>    an account at episode 10 was taken back to 3, and the write reported success
+>    ([ROADMAP.md](ROADMAP.md) §2.3). A conflict guard and a pre-write diff are the first item on
+>    the roadmap.
+> 2. **The confirm step tells you a count, not a change.** It says *"1 update"* — never *"this
+>    takes episode 10 down to 3"*. Read your rows before you send them; the preview cannot warn
+>    you yet.
+>
+> The write itself has now been exercised against a live throwaway account: creating an entry
+> works, and a second run of the same list does not duplicate it. Automated coverage is still
+> mock-only.
 
 ### Importing an existing MAL export
 
