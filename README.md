@@ -141,6 +141,30 @@ elsewhere.
 Nothing disappears silently: the notice bar accounts for titles with no MAL id, titles found
 nowhere, lines merged into an existing row, and any title AniList could not be reached for.
 
+### Getting an AniList token
+
+AniList has no "copy my API key" button — a token is minted by its OAuth implicit grant, which
+takes about a minute and no server of your own. Tokens are valid for **one year**; AniList does
+not issue refresh tokens, so when one expires you repeat step 4.
+
+| # | Where | What to do |
+|---|---|---|
+| 1 | [anilist.co/settings/developer](https://anilist.co/settings/developer) | **Create New Client** |
+| 2 | the client form | Name it anything. Set **Redirect URL** to `https://anilist.co/api/v2/oauth/pin` |
+| 3 | after saving | Copy the **Client ID** — a short number, not a secret |
+| 4 | your browser | Open `https://anilist.co/api/v2/oauth/authorize?client_id=YOUR_ID&response_type=token` and approve |
+| 5 | the pin page | AniList prints the token on screen. Copy all of it — it is several hundred characters |
+
+Paste it into the token box and press **Check**. A working token answers with
+*"Connected as YourName."* — that round trip is the only confirmation that the token is live and
+bound to the account you expect, so do it before every write.
+
+> [!TIP]
+> The redirect URL is why step 2 matters. The implicit grant returns the token in the *fragment*
+> of whatever URL you registered, so a normal site would need a page there to read it. AniList's
+> own `/oauth/pin` endpoint simply displays it instead, which is what makes a local-only tool
+> like this one workable.
+
 ### Writing to AniList
 
 With the destination set to AniList, paste an access token and press **Check**. The token is held
