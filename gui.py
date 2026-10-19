@@ -851,6 +851,14 @@ HTML_TEMPLATE = """<!DOCTYPE html>
       }
       /* decorative, and it wraps to three lines down here */
       .badge { display: none; }
+      /* 2rem of backdrop padding each side is a quarter of a phone screen */
+      .modal-backdrop { padding: 0.75rem; }
+      .fix-card { padding: 0.875rem; }
+      .fix-result { gap: 0.625rem; padding: 0.625rem; }
+      .fix-result .cover-thumb { width: 52px; height: 73px; }
+      .fix-search { flex-wrap: wrap; }
+      .fix-search input { flex: 1 1 100%; }
+      .modal-head { flex-wrap: wrap; }
       .toolbar-end {
         margin-left: 0;
         width: 100%;
@@ -1218,30 +1226,34 @@ HTML_TEMPLATE = """<!DOCTYPE html>
     .write-plan .warn { color: var(--warning); }
 
     .fix-counter {
-      font-size: var(--font-xs);
+      font-size: var(--font-sm);
       color: var(--text-muted);
       font-variant-numeric: tabular-nums;
     }
-    .fix-body { display: flex; flex-direction: column; gap: 0.625rem; }
-    .fix-original { font-size: var(--font-sm); color: var(--text-muted); }
+    /* This dialog is the one place a person has to read carefully and decide,
+       so it is the widest card and the only one that steps the type up. */
+    .fix-card { width: min(1100px, 100%); padding: 1.125rem 1.25rem; }
+    .fix-body { display: flex; flex-direction: column; gap: 0.875rem; min-height: 0; }
+    .fix-original { font-size: var(--font-md); color: var(--text-muted); }
     .fix-original strong { color: var(--text); }
-    .fix-search { display: flex; gap: 0.375rem; }
-    .fix-search input { flex: 1; }
-    .fix-search select { width: auto; min-height: var(--control-md); padding-top: 0; padding-bottom: 0; font-size: var(--font-xs); }
+    .fix-search { display: flex; gap: 0.5rem; }
+    .fix-search input { flex: 1; font-size: var(--font-md); }
+    .fix-search select { width: auto; min-height: var(--control-md); padding-top: 0; padding-bottom: 0; font-size: var(--font-sm); }
     .fix-results {
       display: flex;
       flex-direction: column;
-      gap: 0.25rem;
-      max-height: 46vh;
+      gap: 0.5rem;
+      max-height: 60vh;
       overflow-y: auto;
+      padding-right: 0.25rem;
     }
-    .fix-hint { font-size: var(--font-xs); color: var(--text-muted); padding: 0.5rem 0; }
+    .fix-hint { font-size: var(--font-sm); color: var(--text-muted); padding: 0.75rem 0; }
     .fix-result {
       display: flex;
-      gap: 0.625rem;
-      align-items: center;
+      gap: 0.875rem;
+      align-items: flex-start;
       width: 100%;
-      padding: 0.5rem;
+      padding: 0.75rem;
       text-align: left;
       background: var(--surface-2);
       border: 1px solid var(--border);
@@ -1249,7 +1261,7 @@ HTML_TEMPLATE = """<!DOCTYPE html>
       color: var(--text);
       cursor: pointer;
       font-family: inherit;
-      font-size: var(--font-sm);
+      font-size: var(--font-md);
     }
     .fix-result:hover { border-color: var(--accent); }
     .fix-result:focus-visible { outline: none; border-color: var(--accent); box-shadow: var(--ring); }
@@ -1257,11 +1269,51 @@ HTML_TEMPLATE = """<!DOCTYPE html>
       display: flex;
       gap: 0.625rem;
       flex-wrap: wrap;
-      font-size: var(--font-xs);
+      font-size: var(--font-sm);
       color: var(--text-muted);
     }
-    .fix-result .grow { flex: 1; min-width: 0; }
-    .fix-result .name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .fix-result .grow { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 0.3125rem; }
+    .fix-result .name {
+      font-size: 1rem;
+      font-weight: 600;
+      line-height: 1.35;
+      overflow-wrap: anywhere;
+    }
+    .fix-result .alt {
+      font-size: var(--font-sm);
+      color: var(--text-muted);
+      overflow-wrap: anywhere;
+    }
+    .fix-result .cover-thumb { width: 72px; height: 101px; border-radius: 5px; }
+    .fix-result .synonyms {
+      font-size: var(--font-sm);
+      color: var(--text-muted);
+      overflow-wrap: anywhere;
+    }
+    .fix-result .synonyms b { color: var(--text-muted); font-weight: 600; }
+    .fix-result .desc {
+      font-size: var(--font-sm);
+      line-height: 1.5;
+      color: var(--text-muted);
+    }
+    .fix-genres { display: flex; flex-wrap: wrap; gap: 0.25rem; }
+    .fix-genre {
+      padding: 0.0625rem 0.4375rem;
+      font-size: var(--font-xs);
+      color: var(--text-muted);
+      background: var(--surface-1);
+      border: 1px solid var(--border);
+      border-radius: 999px;
+    }
+    .fix-flag {
+      padding: 0.0625rem 0.4375rem;
+      font-size: var(--font-xs);
+      font-weight: 600;
+      border-radius: 999px;
+      background: var(--accent-bg);
+      color: var(--accent-text);
+    }
+    .fix-flag.warn { background: var(--warning-bg); color: var(--warning); }
 
     .destination-prompt {
       display: none;
@@ -2232,7 +2284,7 @@ HTML_TEMPLATE = """<!DOCTYPE html>
 
       <div id="fixModal" class="modal-backdrop" role="dialog" aria-modal="true"
            aria-labelledby="fixModalTitle">
-        <div class="modal-card" style="max-width:720px;">
+        <div class="modal-card fix-card">
           <div class="modal-head">
             <strong id="fixModalTitle">Fix unmatched titles</strong>
             <span id="fixCounter" class="fix-counter"></span>
@@ -3841,21 +3893,61 @@ HTML_TEMPLATE = """<!DOCTYPE html>
       fixQuery.select();
     }
 
+    // The years an entry ran, as one field: a single year when it started and
+    // finished in the same one, an open range while it is still running.
+    function runYears(d) {
+      if (!d || !d.start_year) return '';
+      if (!d.end_year) return d.start_year + '-';
+      return d.end_year === d.start_year ? String(d.start_year) : d.start_year + '-' + d.end_year;
+    }
+
+    // Every title AniList knows this entry by, minus the one already shown as
+    // the heading. This is usually what tells two near-identical entries apart.
+    function otherTitles(entry, d) {
+      const shown = String(entry.title || '').toLowerCase();
+      const seen = new Set([shown]);
+      const out = [];
+      [d.romaji, d.english, d.native].concat(d.synonyms || []).forEach(t => {
+        const key = String(t || '').toLowerCase();
+        if (!key || seen.has(key)) return;
+        seen.add(key);
+        out.push(t);
+      });
+      return out;
+    }
+
     function resultRowHtml(entry, i) {
-      const ident = Number(entry.id) > 0
-        ? `MAL ${entry.id}`
-        : `AniList ${entry.anilist_id} - no MAL ID`;
+      const d = entry.details || {};
       const counts = mediaType() === 'manga'
         ? `${entry.chapters || '?'} ch / ${entry.volumes || '?'} vol`
         : `${entry.episodes || '?'} eps`;
-      const bits = [escapeHtml(entry.type || ''), entry.year ? String(entry.year) : '',
-                    escapeHtml(ident), counts].filter(Boolean);
+      const years = runYears(d) || (entry.year ? String(entry.year) : '');
+      const bits = [escapeHtml(entry.type || ''), escapeHtml(years), escapeHtml(d.status || ''), counts,
+                    d.mean_score ? d.mean_score + '% rated' : '',
+                    d.popularity ? Number(d.popularity).toLocaleString() + ' users' : '']
+                   .filter(Boolean);
+      // The one thing that decides whether a row can travel as MAL XML, so it
+      // is a flag rather than another grey item in the list.
+      const ident = Number(entry.id) > 0
+        ? `<span class="fix-flag">MAL ${entry.id}</span>`
+        : '<span class="fix-flag warn">No MAL ID - AniList only</span>';
+      const alts = otherTitles(entry, d);
       return `<button class="fix-result" data-pick="${i}">
         ${entry.cover ? `<img class="cover-thumb" src="${escapeHtml(entry.cover)}" alt="" loading="lazy">`
                       : '<span class="cover-thumb cover-empty" aria-hidden="true"></span>'}
         <span class="grow">
           <span class="name">${escapeHtml(entry.title || '')}</span>
-          <span class="meta">${bits.map(b => `<span>${b}</span>`).join('')}</span>
+          ${alts.length ? `<span class="alt">${escapeHtml(alts[0])}</span>` : ''}
+          <span class="meta">
+            ${ident}<span>AniList ${entry.anilist_id || '?'}</span>${bits.map(b => `<span>${b}</span>`).join('')}
+          </span>
+          ${(d.genres || []).length
+            ? `<span class="fix-genres">${d.genres.map(g => `<span class="fix-genre">${escapeHtml(g)}</span>`).join('')}</span>`
+            : ''}
+          ${alts.length > 1
+            ? `<span class="synonyms"><b>Also known as:</b> ${escapeHtml(alts.slice(1).join(' | '))}</span>`
+            : ''}
+          ${d.description ? `<span class="desc">${escapeHtml(d.description)}</span>` : ''}
         </span>
       </button>`;
     }

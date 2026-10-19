@@ -92,18 +92,28 @@ def set_rate_limit_notifier(callback: Optional[Any]) -> None:
     _rate_limit_hook.callback = callback
 
 
+# The five queries below each select the fields the match picker shows, so a
+# human can tell two similar entries apart. Deliberately NOT in
+# _search_batch_query: a 339-title run would carry all of this for ten
+# candidates per title and never display any of it.
 ANILIST_BY_ID_QUERY = """
 query ($id: Int) {
   Media (id: $id, type: ANIME) {
     id
     idMal
-    title {
-      english
-      romaji
-    }
     format
     episodes
+    title { english romaji native }
+    synonyms
+    genres
+    averageScore
+    popularity
     status
+    startDate { year month day }
+    endDate { year }
+    coverImage { medium }
+    siteUrl
+    description(asHtml: false)
     relations {
       edges {
         relationType
@@ -132,13 +142,19 @@ query ($search: String) {
     media (search: $search, type: ANIME) {
       id
       idMal
-      title { english romaji }
-      startDate { year }
-      popularity
-      coverImage { medium }
       format
       episodes
+      title { english romaji native }
+      synonyms
+      genres
+      averageScore
+      popularity
       status
+      startDate { year month day }
+      endDate { year }
+      coverImage { medium }
+      siteUrl
+      description(asHtml: false)
     }
   }
 }
@@ -151,14 +167,20 @@ query ($search: String) {
     media (search: $search, type: MANGA) {
       id
       idMal
-      title { english romaji }
-      startDate { year }
-      popularity
-      coverImage { medium }
       format
       chapters
       volumes
+      title { english romaji native }
+      synonyms
+      genres
+      averageScore
+      popularity
       status
+      startDate { year month day }
+      endDate { year }
+      coverImage { medium }
+      siteUrl
+      description(asHtml: false)
     }
   }
 }
@@ -169,11 +191,20 @@ query ($id: Int) {
   Media (id: $id, type: MANGA) {
     id
     idMal
-    title { english romaji }
     format
     chapters
     volumes
+    title { english romaji native }
+    synonyms
+    genres
+    averageScore
+    popularity
     status
+    startDate { year month day }
+    endDate { year }
+    coverImage { medium }
+    siteUrl
+    description(asHtml: false)
     relations {
       edges {
         relationType
@@ -198,15 +229,21 @@ query ($idMal: Int, $type: MediaType) {
   Media (idMal: $idMal, type: $type) {
     id
     idMal
-    title { english romaji }
     format
     episodes
     chapters
     volumes
-    status
-    startDate { year }
+    title { english romaji native }
+    synonyms
+    genres
+    averageScore
     popularity
+    status
+    startDate { year month day }
+    endDate { year }
     coverImage { medium }
+    siteUrl
+    description(asHtml: false)
   }
 }
 """
@@ -269,15 +306,61 @@ def load_titles_from_txt(file_path: Path) -> List[str]:
     return titles
 
 
+MEDIA_STATUS_LABELS = {
+    "FINISHED": "Finished",
+    "RELEASING": "Releasing",
+    "NOT_YET_RELEASED": "Not yet released",
+    "CANCELLED": "Cancelled",
+    "HIATUS": "On hiatus",
+}
+
+DESCRIPTION_LIMIT = 260
+
+
+def _media_details(media: Dict[str, Any]) -> Dict[str, Any]:
+    """The extra context the match picker shows, under one key.
+
+    Nested rather than flattened on purpose: the picker's result is merged into
+    the user's row, and a top-level `status` or `score` here would overwrite the
+    row's own list status and score.
+    """
+    titles = media.get("title") or {}
+    start = media.get("startDate") or {}
+    end = media.get("endDate") or {}
+    text = re.sub(r"<[^>]+>", "", str(media.get("description") or "")).strip()
+    text = re.sub(r"\s+", " ", text)
+    if len(text) > DESCRIPTION_LIMIT:
+        text = text[:DESCRIPTION_LIMIT].rsplit(" ", 1)[0] + "..."
+    raw_status = str(media.get("status") or "")
+    mean = media.get("averageScore")
+    return {
+        "english": titles.get("english") or "",
+        "romaji": titles.get("romaji") or "",
+        "native": titles.get("native") or "",
+        # Synonyms are how a pasted title often differs from the official one,
+        # so they are the most useful field for judging a doubtful match.
+        "synonyms": [str(x) for x in (media.get("synonyms") or [])][:6],
+        "genres": [str(x) for x in (media.get("genres") or [])][:4],
+        "mean_score": int(mean) if isinstance(mean, (int, float)) else None,
+        "popularity": int(media.get("popularity") or 0),
+        "status": MEDIA_STATUS_LABELS.get(raw_status, raw_status.replace("_", " ").title()),
+        "start_year": start.get("year"),
+        "end_year": end.get("year"),
+        "url": media.get("siteUrl") or "",
+        "description": text,
+    }
+
+
 def _parse_media_node(media: Dict[str, Any], fallback_title: str = "") -> Dict[str, Any]:
     titles = media.get("title") or {}
+    detail = _media_details(media) if "siteUrl" in media else None
     official_title = titles.get("english") or titles.get("romaji") or fallback_title
     raw_format = (media.get("format") or "TV").upper()
     series_type = FORMAT_MAP.get(raw_format, "TV")
     mal_id = int(media.get("idMal") or 0)
     anilist_id = int(media.get("id") or 0)
     eps = int(media.get("episodes") or 0)
-    return {
+    entry = {
         "id": mal_id,
         "anilist_id": anilist_id,
         "title": official_title,
@@ -291,6 +374,9 @@ def _parse_media_node(media: Dict[str, Any], fallback_title: str = "") -> Dict[s
         "can_export_xml": mal_id > 0,
         "can_write_anilist": anilist_id > 0,
     }
+    if detail:
+        entry["details"] = detail
+    return entry
 
 
 def _candidates(nodes: Sequence[Dict[str, Any]], media_type: str, fallback_title: str,
@@ -421,10 +507,11 @@ def _search_variants(title: str, media_type: str = "manga") -> List[str]:
 def _parse_manga_node(media: Dict[str, Any], fallback_title: str = "") -> Dict[str, Any]:
     """Convert an AniList manga node into a MAL-compatible export entry."""
     titles = media.get("title") or {}
+    detail = _media_details(media) if "siteUrl" in media else None
     official_title = titles.get("english") or titles.get("romaji") or fallback_title
     raw_format = (media.get("format") or "MANGA").upper()
     series_type = MANGA_FORMAT_MAP.get(raw_format, "Manga")
-    return {
+    entry = {
         "id": int(media.get("idMal") or 0),
         "anilist_id": int(media.get("id") or 0),
         "title": official_title,
@@ -437,6 +524,9 @@ def _parse_manga_node(media: Dict[str, Any], fallback_title: str = "") -> Dict[s
         "can_export_xml": int(media.get("idMal") or 0) > 0,
         "can_write_anilist": int(media.get("id") or 0) > 0,
     }
+    if detail:
+        entry["details"] = detail
+    return entry
 
 
 def _post_graphql(query: str, variables: Dict[str, Any], max_retries: int = 3) -> Optional[Dict[str, Any]]:

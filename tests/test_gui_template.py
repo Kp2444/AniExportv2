@@ -5,6 +5,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
+import generate_mal_xml
 import gui
 
 SCRIPT_RE = re.compile(r"<script>(.*?)</script>", re.S)
@@ -198,6 +199,79 @@ class SkipListTests(unittest.TestCase):
         body = script.split("function saveIgnored()", 1)[1].split("function enabledFor", 1)[0]
         self.assertIn("catch (e)", body,
                       "localStorage throws in private windows; the page must survive it")
+
+
+class MatchPickerTests(unittest.TestCase):
+    """The fixer is the one dialog where a person has to read carefully and
+    decide. It was the narrowest card on the page, at the smallest type, showing
+    four grey items. The rendering itself is covered by node checks; these pin
+    the parts a refactor would quietly undo."""
+
+    def _script(self) -> str:
+        return SCRIPT_RE.findall(gui.HTML_TEMPLATE)[-1]
+
+    def test_the_card_is_not_capped_at_the_old_width(self):
+        self.assertNotIn('style="max-width:720px;"', gui.HTML_TEMPLATE,
+                         "the match picker was the narrowest card on the page")
+        self.assertIn("class=\"modal-card fix-card\"", gui.HTML_TEMPLATE)
+
+    def test_the_result_shows_more_than_an_id_and_a_count(self):
+        script = self._script()
+        for bit in ("details || {}", "fix-genre", "Also known as", "otherTitles(", "runYears("):
+            self.assertIn(bit, script, f"the match picker lost {bit}")
+
+    def test_a_missing_mal_id_is_a_flag_not_a_grey_note(self):
+        script = self._script()
+        self.assertIn("No MAL ID - AniList only", script,
+                      "whether a row can travel as MAL XML is the one thing that decides a pick")
+
+    def test_the_dialog_survives_a_phone_width(self):
+        css = gui.HTML_TEMPLATE.split("<style>", 1)[1].split("</style>", 1)[0]
+        narrow = css.split("@media (max-width: 760px)", 1)[1]
+        self.assertIn(".modal-backdrop { padding: 0.75rem; }", narrow,
+                      "2rem of backdrop padding each side is a quarter of a phone screen")
+        self.assertIn(".fix-result .cover-thumb", narrow)
+
+
+class MatchPickerQueryTests(unittest.TestCase):
+    """The picker's extra fields must reach it, and must not reach the batch."""
+
+    def test_the_detail_fields_are_on_every_single_lookup_query(self):
+        for name in ("ANILIST_BY_ID_QUERY", "ANILIST_SEARCH_PAGE_QUERY",
+                     "ANILIST_MANGA_SEARCH_PAGE_QUERY", "ANILIST_MANGA_BY_ID_QUERY",
+                     "ANILIST_BY_MAL_ID_QUERY"):
+            query = getattr(generate_mal_xml, name)
+            for field in ("synonyms", "genres", "averageScore", "siteUrl",
+                          "description(asHtml: false)", "coverImage { medium }"):
+                self.assertIn(field, query, f"{name} is missing {field}")
+
+    def test_the_batch_query_stays_lean(self):
+        query = generate_mal_xml._search_batch_query(8, "manga")
+        for field in ("synonyms", "genres", "description", "siteUrl"):
+            self.assertNotIn(field, query,
+                             "a 339-title run would carry this for 10 candidates each and show none of it")
+
+    def test_a_batch_node_carries_no_details_key(self):
+        node = {"id": 1, "idMal": 2, "title": {"english": "X"}, "format": "MANGA",
+                "chapters": 3, "volumes": 1, "status": "FINISHED",
+                "startDate": {"year": 2020}, "popularity": 5, "coverImage": {"medium": "u"}}
+        self.assertNotIn("details", generate_mal_xml._parse_manga_node(node))
+        self.assertNotIn("details", generate_mal_xml._parse_media_node(node))
+
+    def test_details_are_nested_so_they_cannot_overwrite_a_row(self):
+        node = {"id": 1, "idMal": 2, "title": {"english": "X", "native": "Y"},
+                "format": "MANGA", "chapters": 3, "volumes": 1, "status": "RELEASING",
+                "startDate": {"year": 2020}, "endDate": {"year": None}, "popularity": 5,
+                "coverImage": {"medium": "u"}, "siteUrl": "https://anilist.co/manga/1",
+                "synonyms": ["Z"], "genres": ["Action"], "averageScore": 80,
+                "description": "<i>Hi</i>  there"}
+        entry = generate_mal_xml._parse_manga_node(node)
+        self.assertIn("details", entry)
+        # A flat "status" would land on the row and replace the user's list status.
+        self.assertNotIn("status", {k: v for k, v in entry.items() if k != "details"})
+        self.assertEqual(entry["details"]["status"], "Releasing")
+        self.assertEqual(entry["details"]["description"], "Hi there",
+                         "AniList ships HTML in the description")
 
 
 if __name__ == "__main__":
