@@ -4,10 +4,10 @@
 
 **What shipped, what was actually verified, and what is known to be broken.**
 
-[![Tests](https://img.shields.io/badge/tests-132%20passing-success)](#-verified)
-[![Browser](https://img.shields.io/badge/jsdom-15%20suites%20%C2%B7%20295%20assertions-success)](#-verified)
-[![Live write](https://img.shields.io/badge/AniList%20write-overwrites%20%28measured%20live%29-critical)](#-not-verified)
-[![Defects](https://img.shields.io/badge/known%20defects-8-orange)](#-known-defects)
+[![Tests](https://img.shields.io/badge/tests-214%20passing-success)](#-verified)
+[![Browser](https://img.shields.io/badge/jsdom-16%20suites%20%C2%B7%20352%20assertions-success)](#-verified)
+[![Live write](https://img.shields.io/badge/AniList%20write-guarded%20%2B%20undoable%20%28verified%20live%29-success)](#-not-verified)
+[![Defects](https://img.shields.io/badge/known%20defects-4-orange)](#-known-defects)
 
 </div>
 
@@ -32,6 +32,7 @@ git show 8a35779:ANILIST_FIRST_PLAN.md
 [Polish](#-polish-pass-2026-10-18) ·
 [Verified](#-verified) ·
 [Known defects](#-known-defects) ·
+[Write safety](#-write-safety-2026-10-19) ·
 [Skip list](#-persistent-skip-list-2026-10-19) ·
 [Not verified](#-not-verified)
 
@@ -142,12 +143,12 @@ about the CSS. **Three of the five findings were invisible from the source.**
 ## ✅ Verified
 
 ```bash
-python -m unittest discover -s tests -t .    # 132 tests
+python -m unittest discover -s tests -t .    # 214 tests
 python -m py_compile generate_mal_xml.py gui.py
 python generate_mal_xml.py --help
 ```
 
-Plus **15 jsdom suites, 295 assertions**, driving the real handlers — theme, sample, clipboard,
+Plus **16 jsdom suites, 352 assertions**, driving the real handlers — theme, sample, clipboard,
 clear, select-all under a filter, copy-unmatched, Ctrl+Enter, Escape, drag-drop, import merge, run
 lifecycle, persistence, fixer, sorting, dialog focus, destination copy — four gap audits at zero,
 14 state×theme contrast checks, and seven viewport widths measured in Chrome.
@@ -160,12 +161,13 @@ Found by reading the write path and the GUI while researching [ROADMAP.md](ROADM
 verified in the code. **None is a regression from the passes above — they all predate them.**
 Worst first, with the phase that closes it.
 
-Defects 1 and 4 have since been **reproduced against a live throwaway account** (2026-10-19, both
-the anime and the manga path; evidence in `ROADMAP.md` §2.3). They are measurements now, not
-readings.
+Defects 1 and 4 were **reproduced against a live throwaway account** (2026-10-19, both the anime
+and the manga path; evidence in `ROADMAP.md` §2.3) — measurements, not readings. **Defects 1, 3,
+4, 7 and 8 are now fixed** by the write-safety pass below; they are kept here with their fixes
+noted, because the measurement is the reason the fix is shaped the way it is.
 
-> [!CAUTION]
-> **1 — The direct write overwrites what is already on the account.** `iter_write_payloads`
+> [!NOTE]
+> **1 — FIXED. The direct write overwrote what was already on the account.** `iter_write_payloads`
 > (`generate_mal_xml.py:1379-1450`) sends `status`, `scoreRaw` and `progress` on *every* row
 > unconditionally, and takes only `id` from the existing entry. If the account is at chapter 224
 > and the pasted row says 142, **142 is written**. If the row is blank, `_clamp_progress` makes it
@@ -177,7 +179,12 @@ readings.
 > `COMPLETED, 147 chapters, 13 volumes, score 90` was handed one row with the chapters left blank
 > and a status of Reading. It came back `CURRENT, 0, 0, score 0` — four fields destroyed in one
 > write, reported as `"ok": true`. On the anime path an account at episode 10 went to 3 the same
-> way. → **ROADMAP Phase 1**
+> way.
+>
+> **Fixed** by `_reconcile_with_existing` (ROADMAP Phase 1, Step 2): progress, volumes, score and
+> repeat can no longer go backwards, and `COMPLETED` is only replaced by a reread. Every change is
+> shown field by field before it is sent, and each blocked field carries a per-row override. →
+> **shipped 2026-10-19**
 
 **2 — The list-wide score box re-stamps every row on every keystroke.** `inputScore`
 (`gui.py:3653-3657`) is bound to `input` and does `currentAnimes.forEach(...)`. With defect 1, one
@@ -185,15 +192,16 @@ stray keypress before a write can zero the score of every entry it touches on th
 status select behaves the same way. Both also overwrite rows the user hand-edited, rows left
 unchecked, and rows hidden by the filter. → **ROADMAP Phase 4**
 
-**3 — A failed existing-entries chunk is swallowed.** `anilist_existing_entries` does
-`if result.get("error"): continue` (`:1358-1359`), so 50 rows silently become creates with no
-`id` — exactly the `mediaId`-only behaviour the design comment at `:1209-1213` says it refuses to
-rely on. → **ROADMAP Phase 1**
+**3 — FIXED. A failed existing-entries chunk was swallowed.** `anilist_existing_entries` did
+`if result.get("error"): continue`, so 50 rows silently became creates with no `id` — exactly the
+`mediaId`-only behaviour the design comment it sits under says it refuses to rely on. It now
+raises `AniListReadError`, and both the preview and the write refuse rather than guess. →
+**shipped 2026-10-19**
 
-**4 — A reread lowers the account's repeat count.** `repeat` is written as the literal `1`
-(`:1430-1431`) whenever the row is marked Rereading/Rewatching. An account showing `repeat: 5` is
-set back to `1`. **Measured live:** an entry set to `repeat: 5` was written as Rereading and came
-back `repeat: 1`. → **ROADMAP Phase 1**
+**4 — FIXED. A reread lowered the account's repeat count.** `repeat` is written as the literal
+`1` whenever the row is marked Rereading/Rewatching. An account showing `repeat: 5` was set back
+to `1`. **Measured live:** an entry set to `repeat: 5` was written as Rereading and came back
+`repeat: 1`. `repeat` now gets the same never-lower rule as progress. → **shipped 2026-10-19**
 
 **5 — The inline Find button guesses.** `repairRow` (`gui.py:3500-3535`) applies `entries[0]`
 without rendering the candidate list, unlike the fixer modal. → **ROADMAP Phase 4**
@@ -202,39 +210,148 @@ without rendering the candidate list, unlike the fixer modal. → **ROADMAP Phas
 `difflib.SequenceMatcher` against both titles, but the ratio only ever serves as a sort key, so a
 confidently-wrong match renders identically to a perfect one. → **ROADMAP Phase 4**
 
-**7 — A stale completion date is left behind.** `completedAt` is sent only when the row carries
-one (`:1435-1440`), which is what stops a blank row from blanking it — but it also means a write
-that moves an entry from `COMPLETED` to `CURRENT` leaves the old completion date in place. Found
-live: an entry ended up in progress *and* finished on a date. Nothing in the tool can clear it,
-since clearing requires sending an empty value. → **ROADMAP Phase 1**
+**7 — FIXED. A stale completion date was left behind.** `completedAt` is sent only when the row
+carries one, which is what stops a blank row from blanking it — but it also meant a write that
+moved an entry from `COMPLETED` to `CURRENT` left the old completion date in place. Found live: an
+entry ended up in progress *and* finished on a date. A payload in that state now carries
+`stale_completed_at`, the confirm step flags the row, and **clear the finish date** sends an empty
+`FuzzyDateInput` — the only place in the tool that deliberately sends an empty value, and only
+when ticked. → **shipped 2026-10-19**
 
-**8 — A created entry's id is discarded.** `anilist_write_entry` returns `{"ok", "id", "status"}`
-(`:1453-1462`) and the caller keeps none of it (`gui.py:4620-4640`). That id is the only handle on
-a row the write created, so there is currently no way to undo a create. → **ROADMAP Phase 1**
+**8 — FIXED. A created entry's id was discarded.** `anilist_write_entry` returns
+`{"ok", "id", "status"}` and the caller kept none of it. That id is the only handle on a row the
+write created, so there was no way to undo a create. The writer now records it into the undo
+snapshot as each create succeeds and re-saves, so a crash mid-run still leaves the snapshot
+accurate up to the last completed row. → **shipped 2026-10-19**
 
 ### Latent, not yet biting
 
-Two facts that are harmless today only because the fetched data is unused. They become defects the
-moment anything compares against it, and ROADMAP Phase 1 does exactly that:
+Three facts that were harmless only because the fetched data was unused. Phase 1 compares against
+it, so all three are now handled rather than latent:
 
 - **`score` is fetched in the account's own scale.** `MediaList.score` takes a
   `format: ScoreFormat` argument; without it AniList answers in the user's setting — `POINT_3`,
   `POINT_5`, `POINT_10`, `POINT_10_DECIMAL` or `POINT_100` — while the write sends `scoreRaw` on a
-  fixed 0–100. Comparing the two compares different units.
+  fixed 0–100. Comparing the two compares different units. **Handled:** the query now asks for
+  `score (format: POINT_100)`, and the diff labels the value `/100` so it cannot be read as a 1–10
+  score.
 - **`progressVolumes` is `null` on anime entries.** Verified against a live account. `None < 5`
   raises `TypeError` in Python 3, so any naive "never lower" comparison crashes on every anime row.
   On manga it is written and read back correctly (`ROADMAP.md` §2.3, M1), so the guard has to be
-  media-type aware rather than simply skipped.
+  media-type aware rather than simply skipped. **Handled:** every comparison coerces with
+  `int(x or 0)`, and the volumes rule only applies to manga.
 - **AniList stamps its own `startedAt`.** On a live create with no `startedAt` sent, the entry came
   back with today's date; a create that did send one kept it (§2.3, M7). The date comes from an
   account setting, not from this tool — but it means an undo cannot reliably restore "no start
-  date", which Phase 1's snapshot design has to state rather than assume.
+  date". **Stated, not solved:** `iter_undo_payloads` says so in its docstring, the undo confirm
+  says so to the user, and the README repeats it. No amount of code on this side can override an
+  account setting on the other.
 
 ### Performance limitation
 
 The write is one `SaveMediaListEntry` per row through `_throttle()`, so **339 rows take roughly
 twelve minutes**. Resolution solved the identical problem by aliasing 8 queries per document.
 → **ROADMAP Phase 2**
+
+---
+
+## 🛡 Write safety (2026-10-19)
+
+The direct write was the only irreversible thing in the tool, it had no guard, and defect 1 above
+is what it did when pointed at a real account. ROADMAP Phase 1, all six steps, shipped together
+because they are one feature: a write you can see before it happens and reverse after it does.
+
+**What the account is read for.** `ANILIST_EXISTING_ENTRIES_QUERY` already fetched `status`,
+`progress`, `progressVolumes` and `score` and read none of them. It now also fetches `repeat`,
+`notes`, `startedAt`, `completedAt` and — load-bearing, not cosmetic — `score (format: POINT_100)`.
+Same request count, same 50-id chunking. A chunk that fails now raises instead of returning a
+partial answer, because the ids it is missing would be written as creates and duplicate entries
+the user already has.
+
+**The policy.** `_reconcile_with_existing` applies one rule per field in place and returns the
+diff rows, so what the confirm step shows is literally what will be sent. Rules and their
+evidence:
+
+| Field | Rule | Why |
+|---|---|---|
+| `progress` | never lower | defect 1, measured |
+| `progressVolumes` | never lower, manga only | defect 1 + `null` on anime |
+| `scoreRaw` | never `0` over a non-zero score | a `0` is indistinguishable from "unset" |
+| `repeat` | never lower | defect 4, measured |
+| `status` | `COMPLETED` only yields to `REPEATING` | a reread is the one real transition off it |
+| `notes`, `startedAt`, `completedAt` | no guard; reported in the diff | already only sent when the row carries one |
+
+A deliberate consequence, stated rather than hidden: finishing a series, starting it again, and
+marking the row *Reading* rather than *Rereading* is blocked. The diff says so and the per-row
+**keep mine** tick is the way through. Guessing that `COMPLETED` → `CURRENT` means a reread would
+discard a completion silently, which is the bug this replaces.
+
+**Undo.** Every write first saves what it is about to replace to
+`.aniexport_undo_<unix_ts>.json` beside the response cache (gitignored, five kept, never holding a
+token). A created row has no prior state, so its new entry id — which exists only in the mutation
+response — is recorded into the snapshot as each create succeeds, and the file is re-saved. A
+restore sends the prior values *including the empty ones*, which is the one place that has to
+differ from the write path. Deleting the entries a run created is destructive, so it is listed
+separately in the undo confirm and happens only when ticked; a create whose id was never recorded
+is reported as unrecoverable rather than guessed at. A snapshot name arriving over HTTP is matched
+against `^\.aniexport_undo_\d+\.json$` before it is opened.
+
+**Retry.** The failed *payloads* of the most recent run are kept in memory under its run id, so
+"Retry N failed" re-sends exactly those without rebuilding them or re-reading the account. The
+retry keeps writing into the original run's snapshot, so an entry created on the second attempt is
+still undoable.
+
+**AniList edits some fields itself**, which the diff has to predict or it lies. Measured by probes
+that bypass this tool entirely (`ROADMAP.md` §2.3, L7-L9):
+
+- While `status` is `COMPLETED`, `progress` and `progressVolumes` are **forced to the media
+  total** - when a lower value is sent explicitly, and when none is sent at all. So a forced
+  downgrade on a row whose status stays `COMPLETED` is a no-op on the account.
+- `REPEATING` -> `COMPLETED` **increments `repeat` by one**, whatever is sent.
+- A transition *to* `REPEATING` zeroes `progress` only when no progress is sent. Every payload
+  built here sends one, so this is recorded and deliberately not acted on.
+
+`_anilist_side_effects` folds the first two into the diff, so `applied` means **what the account
+will hold** rather than what the payload says, and `by_anilist` marks the fields that are not this
+tool's doing. None of this was in the plan - it was found by the override test failing against a
+real account, which is the whole argument for running step 3 live.
+
+**Verified, mocked:** 60 new test methods in `tests/test_anilist_write.py` - one per policy rule,
+including the blank-progress and score-zero cases that motivate the whole thing, the `COMPLETED`
+-> `REPEATING` carve-out, an anime row whose `progressVolumes` is `None`, the two AniList-side
+edits above, snapshot round-tripping, path traversal, pruning, both undo paths and the retry -
+plus 8 markup-contract checks in `tests/test_gui_template.py` and one node suite of 57 assertions
+driving the shipped diff renderer. 214 tests pass in total, 140 before this pass.
+`DeleteMediaListEntry(id: Int) -> Deleted { deleted }` and `FuzzyDateInput`'s nullable fields were
+confirmed by introspection against the live API before either was used.
+
+**Verified, live** on the throwaway account, through the running server's own endpoints
+(`ROADMAP.md` §2.3, P1-P12): 8 fields blocked across a 3-row conflict write, every one predicted
+beforehand; `CURRENT` -> `REPEATING` still allowed, so the carve-out does not over-block; the
+override honoured; the stale finish date stranded on purpose and then cleared, which **answers the
+last open question - an all-`null` `FuzzyDateInput` does clear a date**; that cleared date restored
+by undo; a 3-row undo matching the snapshot field for field, notes and both dates included;
+retention pruning caught dropping the sixth-oldest snapshot; `created_entry_id` recorded mid-write
+and the created entry deleted only once the box was ticked, the **first live exercise of
+`DeleteMediaListEntry`**; and a genuine per-row rejection reported by name, then retried as 1 row
+rather than 2.
+
+**Two defects in Phase 1 as first shipped, found by that live run and fixed** (`ROADMAP.md` §2.3,
+P13-P14). Both are recorded because neither was reachable by reading the code:
+
+- **Undo could not restore `repeat` after a reread write.** The carve-out lets a row take an entry
+  `COMPLETED` -> `REPEATING`; undoing that sends `REPEATING` -> `COMPLETED`, and L8's increment
+  beats the `repeat` sent alongside the status. Measured: prior 4, restored as 5. A second write
+  carrying only `repeat` does stick, so `iter_undo_payloads` now emits one - for a row with a
+  reread count to lose only, so an ordinary undo costs no extra request.
+- **Two rows resolving to one AniList entry were both written**, the later over the earlier, and
+  the snapshot held two rows for one entry with only one recorded id. The XML path already refused
+  this (`/api/update-export`) and the write path did not. `iter_write_payloads` now keeps the
+  first and skips the rest with a reason. `deduplicate_entries` could not have done it: it keys on
+  MAL id or title, and these rows differ in both.
+
+**Still not verified:** cancellation mid-write, and a write large enough to need more than one
+50-id existing-entries chunk.
 
 ---
 

@@ -6,7 +6,7 @@
 
 [![Python](https://img.shields.io/badge/python-3.9%2B-3776AB?logo=python&logoColor=white)](https://www.python.org/)
 [![Dependencies](https://img.shields.io/badge/dependencies-zero-success)](requirements.txt)
-[![Tests](https://img.shields.io/badge/tests-132%20passing-success)](#-tests)
+[![Tests](https://img.shields.io/badge/tests-214%20passing-success)](#-tests)
 [![License](https://img.shields.io/badge/license-MIT-lightgrey)](LICENSE)
 
 </div>
@@ -174,29 +174,56 @@ With the destination set to AniList, paste an access token and press **Check**. 
 in that browser tab only: it is never saved to disk, never written to the export files, and never
 appears in a server response.
 
-**Write to AniList…** first reads which of the selected titles are already on your list, then
-shows what will happen (*"N entries will be added, M already on your list will be updated"*)
-before anything is sent. Entries you already have are updated in place by their existing
-list-entry id, so running the write twice cannot create duplicates. Failures are reported per
-title using AniList's own validation messages.
+**Write to AniList…** first reads your existing list, then shows **exactly which fields change
+on which rows** before anything is sent — *"episodes 224 → 142"*, not *"1 update"*. Entries you
+already have are updated in place by their existing list-entry id, so running the write twice
+cannot create duplicates. Failures are reported per title using AniList's own validation messages.
+
+Nothing goes backwards unless you say so. The confirm step applies a conflict policy and shows it:
+
+| Field | What the write will not do |
+|---|---|
+| Episodes / chapters / volumes | Never write a number lower than the account's |
+| Score | Never write `0` over a score you already have. Any real score replaces another |
+| Rereads / rewatches | Never lower the account's count |
+| Status | Never replace **Completed** with anything except a reread |
+| Notes, start date, finish date | Only ever sent when your row carries one, so a blank row never blanks them |
+
+Each blocked field carries a **keep mine** tick, so a downgrade you actually want is one click
+away. Rows that already match collapse to a count. A row that stops being completed is flagged,
+because AniList keeps the old finish date otherwise — **clear the finish date** is offered there,
+and is the only thing in this tool that sends an empty value.
+
+The diff shows what your account will end up holding, not merely what gets sent, because those
+are not always the same thing. AniList changes two fields on its own, whatever it is asked for,
+and both are measured rather than assumed ([ROADMAP.md](ROADMAP.md) §2.3, L7–L8):
+
+- While an entry is **Completed**, progress and volumes are forced to the work's total. So
+  "keep mine" on a lower chapter count does nothing unless you also move the status off Completed.
+- Finishing a reread bumps the reread count by one.
+
+Fields in that situation are labelled **"AniList sets this itself on this status change"**, so the
+confirm step never promises a change the API will quietly discard.
+
+> [!TIP]
+> **Undo last write…** puts the account back the way it was. Every write first saves what it is
+> about to replace to `.aniexport_undo_<timestamp>.json` beside the cache — notes and dates
+> included, never the token — and the five most recent are kept. Entries the run *created* have no
+> previous state, so undoing those means deleting them: that is listed separately and happens only
+> if you tick it. **Retry failed** re-sends just the rows that failed, without rebuilding them.
 
 > [!WARNING]
-> **Two things to know before pointing this at a list you care about.**
+> **What the guard does not cover.**
 >
-> 1. **An update overwrites, it does not merge.** Status, score and progress are sent for every
->    selected row and replace whatever is on the account — so a row showing chapter 142 will
->    overwrite an account already at 224, and a row left blank writes `0`. Duplicate *creation* is
->    prevented; overwriting is not. This has been **measured live**, not merely read off the code:
->    an account at episode 10 was taken back to 3, and the write reported success
->    ([ROADMAP.md](ROADMAP.md) §2.3). A conflict guard and a pre-write diff are the first item on
->    the roadmap.
-> 2. **The confirm step tells you a count, not a change.** It says *"1 update"* — never *"this
->    takes episode 10 down to 3"*. Read your rows before you send them; the preview cannot warn
->    you yet.
->
-> The write itself has now been exercised against a live throwaway account: creating an entry
-> works, and a second run of the same list does not duplicate it. Automated coverage is still
-> mock-only.
+> - **Undo is itself a write and can fail halfway.** Each row is reported on its own; if you
+>   deleted an entry on AniList after the write, that row cannot be restored and says so.
+> - **A restored "no start date" may not stick.** AniList stamps a start date itself when an entry
+>   becomes in-progress without one — measured, not assumed ([ROADMAP.md](ROADMAP.md) §2.3, M7).
+> - **Two things have still never run against a real account:** cancelling a write part-way, and
+>   a write big enough to need more than one 50-id lookup batch. Everything else here — the guard,
+>   every override, the stale-date clear, undo in both directions, snapshot pruning, deleting a
+>   created entry, a per-row rejection and the retry — was measured on a throwaway account
+>   ([ROADMAP.md](ROADMAP.md) §2.3, P1–P12), on top of the mocked test suite.
 
 ### Importing an existing MAL export
 
@@ -256,10 +283,12 @@ them), and titles that were not found at all.
 - **A confident match can still be wrong.** Ranking prefers exact titles, full series over
   one-shots and released entries, but it cannot know your intent. Check the picker on rows that
   matter.
-- **The direct AniList write overwrites on update** — measured against a live account, not merely
-  read off the code; see the warning above.
-- **Nothing here can delete an entry from your AniList account.** The write only creates or
-  updates. Unchecking a row removes it from the export, never from your list.
+- **An overwrite you confirm is still an overwrite.** The policy blocks a value going backwards,
+  not a value going forwards: a row at chapter 300 replaces an account at 224 without comment,
+  because that is an ordinary edit. The diff shows it either way.
+- **Deleting an entry from your AniList account is only possible as part of an undo.** The write
+  creates and updates; undo can delete the entries that same run created, if you tick it. Nothing
+  else here removes anything from your list, and unchecking a row never does.
 - AniList's own rate limit is the floor on speed; nothing here can make a cold run faster than the
   API allows.
 
@@ -272,12 +301,14 @@ Known defects, each with the code that causes them, are listed in
 python -m unittest discover -s tests -t .
 ```
 
-**132 tests** covering the XML builders, status and date handling, batched resolution, the disk
-cache, candidate ranking, run control, the GUI event contract, the AniList write payloads, the MAL
-XML importer, the unmatched-title resolver (links, ids and free text), the command line (both
-media types, input discovery, cache flags, error paths), the no-store headers on the page and the
-downloads, the persistent skip list's wiring, and the markup's accessibility contract (header
-scope, focusable sortable headers,
+**214 tests** covering the XML builders, status and date handling, batched resolution, the disk
+cache, candidate ranking, run control, the GUI event contract, the AniList write payloads, the
+conflict policy (one case per rule, including the blank-progress and score-zero cases that
+motivate it), the per-row diff, the undo snapshot and its restore and delete paths, retrying
+failed rows, the MAL XML importer, the unmatched-title resolver (links, ids and free text), the
+command line (both media types, input discovery, cache flags, error paths), the no-store headers
+on the page and the downloads, the persistent skip list's wiring, and the markup's accessibility
+contract (header scope, focusable sortable headers,
 dialog roles, named fields) and its copy (the primary action naming the chosen destination, no
 stale claims about unbuilt features).
 

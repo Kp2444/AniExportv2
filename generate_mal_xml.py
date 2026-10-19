@@ -1315,9 +1315,20 @@ query ($userId: Int, $type: MediaType, $mediaIds: [Int]) {
       status
       progress
       progressVolumes
-      score
+      score (format: POINT_100)
+      repeat
+      notes
+      startedAt { year month day }
+      completedAt { year month day }
     }
   }
+}
+"""
+
+# Confirmed by introspection: DeleteMediaListEntry(id: Int) -> Deleted { deleted }.
+ANILIST_DELETE_ENTRY_MUTATION = """
+mutation ($id: Int) {
+  DeleteMediaListEntry (id: $id) { deleted }
 }
 """
 
@@ -1432,9 +1443,23 @@ def anilist_viewer(token: str) -> Dict[str, Any]:
     return {"ok": True, "id": int(viewer["id"]), "name": viewer.get("name") or ""}
 
 
+class AniListReadError(RuntimeError):
+    """A bulk read of the user's existing list entries failed.
+
+    Raised rather than skipped. With no existing entries for a chunk, every id
+    in it looks like a create and carries no entry id -- exactly the
+    mediaId-only behaviour the identity note above refuses to rely on. Guessing
+    would duplicate rows the user already has, so the caller refuses instead.
+    """
+
+
 def anilist_existing_entries(token: str, user_id: int, media_type: str,
                              anilist_ids: Sequence[int]) -> Dict[int, Dict[str, Any]]:
-    """Map AniList media id -> the user's existing list entry, 50 at a time."""
+    """Map AniList media id -> the user's existing list entry, 50 at a time.
+
+    Raises AniListReadError if any chunk fails: a partial answer is worse than
+    none, because the ids it is missing would be written as creates.
+    """
     found: Dict[int, Dict[str, Any]] = {}
     ids = [int(i) for i in anilist_ids if int(i or 0) > 0]
     media_enum = "MANGA" if media_type == "manga" else "ANIME"
@@ -1446,7 +1471,7 @@ def anilist_existing_entries(token: str, user_id: int, media_type: str,
             token,
         )
         if result.get("error"):
-            continue
+            raise AniListReadError(str(result["error"]))
         rows = (((result.get("data") or {}).get("Page") or {}).get("mediaList")) or []
         for row in rows:
             if row and row.get("mediaId"):
@@ -1466,24 +1491,200 @@ def _fuzzy_date(value: Any) -> Optional[Dict[str, int]]:
     return {"year": parsed.year, "month": parsed.month, "day": parsed.day}
 
 
+# Fields the write can send, paired with the existing-entry field holding the
+# account's current value. The order here is the order the diff is shown in.
+DIFF_FIELDS = (
+    ("status", "status"),
+    ("progress", "progress"),
+    ("progressVolumes", "progressVolumes"),
+    ("scoreRaw", "score"),
+    ("repeat", "repeat"),
+    ("notes", "notes"),
+    ("startedAt", "startedAt"),
+    ("completedAt", "completedAt"),
+)
+_NUMERIC_DIFF_FIELDS = {"progress", "progressVolumes", "scoreRaw", "repeat"}
+_DATE_DIFF_FIELDS = {"startedAt", "completedAt"}
+_EMPTY_FUZZY_DATE = {"year": None, "month": None, "day": None}
+
+
+def _fuzzy_tuple(value: Any) -> tuple:
+    """A FuzzyDate as a comparable tuple. A missing part stays missing."""
+    if not isinstance(value, dict):
+        return (None, None, None)
+    return tuple((value.get(key) or None) for key in ("year", "month", "day"))
+
+
+def _fuzzy_or_empty(value: Any) -> Dict[str, Any]:
+    """A stored FuzzyDate shaped for a write. All-None clears the date."""
+    year, month, day = _fuzzy_tuple(value)
+    return {"year": year, "month": month, "day": day}
+
+
+def _same_value(field: str, left: Any, right: Any) -> bool:
+    """Compare one field the way AniList means it.
+
+    Numerics coerce with int(x or 0): progressVolumes is absent on anime and
+    AniList returns null for a numeric field the user never set, so a bare
+    comparison would either raise or report a change that is not one.
+    """
+    if field in _NUMERIC_DIFF_FIELDS:
+        return int(left or 0) == int(right or 0)
+    if field in _DATE_DIFF_FIELDS:
+        return _fuzzy_tuple(left) == _fuzzy_tuple(right)
+    if field == "notes":
+        return str(left or "") == str(right or "")
+    return (left or None) == (right or None)
+
+
+def _guarded_value(field: str, before: Any, wanted: Any, media_type: str) -> Any:
+    """What the "safe" policy actually sends. One rule per field, no ordering invented."""
+    if field == "status":
+        # A reread is the one real transition off COMPLETED. Everything else
+        # passes: DROPPED -> CURRENT is an edit, not a regression.
+        return before if before == "COMPLETED" and wanted != "REPEATING" else wanted
+    if field == "scoreRaw":
+        # A 0 is indistinguishable from "no score"; a real score is not.
+        if int(wanted or 0) == 0 and int(before or 0) != 0:
+            return before
+        return wanted
+    if field in ("progress", "repeat") or (field == "progressVolumes" and media_type == "manga"):
+        return before if int(wanted or 0) < int(before or 0) else wanted
+    return wanted
+
+
+def _force_diff_row(diff: List[Dict[str, Any]], field: str, before: Any, outcome: Any) -> None:
+    """Record what AniList will do to a field regardless of what we send."""
+    for row in diff:
+        if row["field"] != field:
+            continue
+        if not _same_value(field, row["applied"], outcome):
+            row["applied"] = outcome
+            row["by_anilist"] = True
+        return
+    if not _same_value(field, before, outcome):
+        diff.append({"field": field, "from": before, "to": None, "applied": outcome,
+                     "blocked": False, "by_anilist": True})
+
+
+def _anilist_side_effects(variables: Dict[str, Any], known: Optional[Dict[str, Any]],
+                          diff: List[Dict[str, Any]], totals: Dict[str, int]) -> None:
+    """Fold AniList's own edits into the diff, so it predicts the account.
+
+    AniList changes some fields itself on a status transition, whatever the
+    write asks for. Both of these were **measured** against a live account
+    (ROADMAP 2.3, L7-L8), not inferred from docs:
+
+    - While `status` is `COMPLETED`, `progress` and `progressVolumes` are forced
+      to the media total, even when a lower value is sent explicitly, and even
+      when none is sent at all.
+    - `REPEATING` -> `COMPLETED` increments `repeat` by one, whatever is sent.
+
+    So `applied` in a diff row means *what the account will hold*, which is what
+    the user is being asked to approve. Where that is not what we sent,
+    `by_anilist` says so. Without this the confirm step would promise a change
+    the API quietly discards -- the exact dishonesty this phase exists to remove.
+
+    Not folded in, because it does not apply to this write path: a transition to
+    `REPEATING` zeroes `progress` only when no progress is sent, and every
+    payload here sends one (measured alongside the two above).
+    """
+    status = variables.get("status")
+    if status != "COMPLETED":
+        return
+    for field, ceiling in totals.items():
+        # A total of 0 means unknown - an ongoing series - so nothing to predict.
+        if ceiling and field in variables:
+            _force_diff_row(diff, field, (known or {}).get(field), ceiling)
+    if (known or {}).get("status") == "REPEATING":
+        was = int((known or {}).get("repeat") or 0)
+        _force_diff_row(diff, "repeat", was, was + 1)
+
+
+def _reconcile_with_existing(variables: Dict[str, Any], known: Optional[Dict[str, Any]],
+                             media_type: str, policy: str = "safe",
+                             overrides: Optional[Dict[str, str]] = None) -> List[Dict[str, Any]]:
+    """Apply the conflict policy in place and return the diff rows.
+
+    `known` is the user's existing AniList entry, or None for a create -- every
+    rule is then a no-op, because there is nothing to overwrite. `overrides` is
+    per field: "mine" forces the row's own value through, downgrades included,
+    and "clear" on completedAt sends an empty date, which is the only way to
+    shift a completion date off an entry that is no longer completed.
+
+    A diff row is omitted when the account already holds the value, so an empty
+    diff means the row changes nothing.
+    """
+    overrides = overrides or {}
+    guard = policy != "overwrite"
+    diff: List[Dict[str, Any]] = []
+    for field, source in DIFF_FIELDS:
+        forced = overrides.get(field)
+        before = (known or {}).get(source)
+        if field == "completedAt" and forced == "clear":
+            variables["completedAt"] = dict(_EMPTY_FUZZY_DATE)
+            if not _same_value(field, before, None):
+                diff.append({"field": field, "from": before, "to": None,
+                             "applied": None, "blocked": False})
+            continue
+        if field not in variables:
+            continue
+        wanted = variables[field]
+        if known is None:
+            if not _same_value(field, None, wanted):
+                diff.append({"field": field, "from": None, "to": wanted,
+                             "applied": wanted, "blocked": False})
+            continue
+        if _same_value(field, before, wanted):
+            continue
+        applied = wanted
+        if guard and forced != "mine":
+            applied = _guarded_value(field, before, wanted, media_type)
+        blocked = not _same_value(field, applied, wanted)
+        if blocked:
+            variables[field] = applied
+        diff.append({"field": field, "from": before, "to": wanted,
+                     "applied": applied, "blocked": blocked})
+    return diff
+
+
 def iter_write_payloads(entries: Sequence[Dict[str, Any]], media_type: str,
                         existing: Optional[Dict[int, Dict[str, Any]]] = None,
                         default_status: str = "Completed",
-                        default_score: int = 0) -> tuple:
+                        default_score: int = 0, policy: str = "safe",
+                        overrides: Optional[Dict[Any, Dict[str, str]]] = None) -> tuple:
     """Build (payloads, skipped) for a direct AniList write.
 
     Progress derivation matches the XML builders exactly, so the same list
     produces the same numbers whichever route it travels.
+
+    Each payload carries a `diff` of the fields that change against the user's
+    existing entry, and the conflict policy has already been applied to
+    `variables`, so what the diff says is what gets sent. `overrides` is keyed
+    by AniList media id: {30642: {"progress": "mine"}}.
     """
     existing = existing or {}
     payloads: List[Dict[str, Any]] = []
     skipped: List[Dict[str, str]] = []
+    seen: Dict[int, str] = {}
     for entry in entries:
         anilist_id = int(entry.get("anilist_id") or 0)
         title = str(entry.get("title") or "")
         if anilist_id <= 0:
             skipped.append({"title": title, "reason": "no AniList id"})
             continue
+        if anilist_id in seen:
+            # Two rows can land on one entry - fixing two unmatched titles to
+            # the same series does it. The XML path already refuses this
+            # (gui.py, /api/update-export); without the same refusal here the
+            # second row would write over the first, and the undo snapshot
+            # would hold two rows for one entry with only one recorded id.
+            # deduplicate_entries cannot do this job: it keys on MAL id or
+            # title, and these rows differ in both.
+            skipped.append({"title": title,
+                            "reason": f"same AniList entry as {seen[anilist_id]!r}"})
+            continue
+        seen[anilist_id] = title
         raw_status = entry.get("status", default_status)
         try:
             normalized = _normalize_status(raw_status, media_type)
@@ -1504,10 +1705,12 @@ def iter_write_payloads(entries: Sequence[Dict[str, Any]], media_type: str,
             total_vol = int(entry.get("volumes") or 0)
             progress = _clamp_progress(entry.get("my_read_chapters", total_ch if finished else 0), total_ch)
             progress_volumes = _clamp_progress(entry.get("my_read_volumes", total_vol if finished else 0), total_vol)
+            totals = {"progress": total_ch, "progressVolumes": total_vol}
         else:
             total_eps = int(entry.get("episodes") or 0)
             progress = _clamp_progress(entry.get("my_watched_episodes", total_eps if finished else 0), total_eps)
             progress_volumes = None
+            totals = {"progress": total_eps}
 
         variables: Dict[str, Any] = {
             "mediaId": anilist_id,
@@ -1530,13 +1733,27 @@ def iter_write_payloads(entries: Sequence[Dict[str, Any]], media_type: str,
             variables["completedAt"] = completed
 
         known = existing.get(anilist_id)
+        row_overrides = (overrides or {}).get(anilist_id) or (overrides or {}).get(str(anilist_id)) or {}
+        diff = _reconcile_with_existing(variables, known, media_type, policy, row_overrides)
+        _anilist_side_effects(variables, known, diff, totals)
         if known and known.get("id"):
             # Supplying the existing entry id makes this an update by contract,
             # so a repeated write cannot create a second row.
             variables["id"] = int(known["id"])
 
+        # completedAt is only ever sent when the row carries one, so taking an
+        # entry off COMPLETED otherwise leaves the old completion date behind
+        # and the account holds a row that is in progress and also finished.
+        # Flagged here; clearing it is an explicit override, never automatic.
+        stale_completed_at = bool(
+            known
+            and variables.get("status") != "COMPLETED"
+            and _fuzzy_tuple(known.get("completedAt"))[0] is not None
+            and "completedAt" not in variables)
+
         payloads.append({"title": title, "anilist_id": anilist_id,
-                         "update": bool(known), "variables": variables})
+                         "update": bool(known), "variables": variables,
+                         "diff": diff, "stale_completed_at": stale_completed_at})
     return payloads, skipped
 
 
@@ -1550,6 +1767,211 @@ def anilist_write_entry(token: str, payload: Dict[str, Any]) -> Dict[str, Any]:
     if not saved.get("id"):
         return {"ok": False, "error": "AniList did not confirm the save."}
     return {"ok": True, "id": int(saved["id"]), "status": saved.get("status")}
+
+
+def anilist_delete_entry(token: str, entry_id: int) -> Dict[str, Any]:
+    """Remove a list entry. Only ever used to undo an entry this tool created."""
+    result = _execute_anilist_authenticated(
+        ANILIST_DELETE_ENTRY_MUTATION, {"id": int(entry_id)}, token)
+    if result.get("error"):
+        return {"ok": False, "error": result["error"]}
+    deleted = ((result.get("data") or {}).get("DeleteMediaListEntry")) or {}
+    if not deleted.get("deleted"):
+        return {"ok": False, "error": "AniList did not confirm the delete."}
+    return {"ok": True}
+
+
+# ---------------------------------------------------------------------------
+# Undo snapshots
+#
+# The write is the only irreversible thing this tool does, so every run records
+# what it is about to replace. A snapshot never contains the token: undo needs
+# one re-supplied, exactly like the write. A created entry has no prior state -
+# its new entry id exists only in the mutation response - so the writer fills
+# that in as each create succeeds, which leaves a snapshot that is accurate up
+# to the last completed row even if the run crashes.
+# ---------------------------------------------------------------------------
+UNDO_SNAPSHOT_VERSION = 1
+UNDO_SNAPSHOT_KEEP = 5
+# Unix seconds are 10 digits until 2286, so a plain name sort is a time sort.
+_UNDO_NAME_RE = re.compile(r"^\.aniexport_undo_\d+\.json$")
+_UNDO_GLOB = ".aniexport_undo_*.json"
+# Everything the write can touch, so a restore can put all of it back.
+UNDO_PRIOR_FIELDS = ("id", "status", "progress", "progressVolumes", "score",
+                     "repeat", "notes", "startedAt", "completedAt")
+
+
+def undo_snapshot_dir() -> Path:
+    """Beside the response cache, so one env var moves both."""
+    return cache_path().parent
+
+
+def _undo_snapshot_path(name: Any) -> Optional[Path]:
+    """Resolve a snapshot name. Arrives over HTTP, so only a bare name passes."""
+    base = str(name or "").strip()
+    if not _UNDO_NAME_RE.match(base):
+        return None
+    return undo_snapshot_dir() / base
+
+
+def build_undo_snapshot(media_type: str, viewer_id: int,
+                        payloads: Sequence[Dict[str, Any]],
+                        existing: Optional[Dict[int, Dict[str, Any]]] = None) -> Dict[str, Any]:
+    """The state to restore, captured before the first mutation."""
+    rows: List[Dict[str, Any]] = []
+    for payload in payloads:
+        anilist_id = int(payload.get("anilist_id") or 0)
+        known = (existing or {}).get(anilist_id)
+        row = {"anilist_id": anilist_id, "title": str(payload.get("title") or "")}
+        if payload.get("update") and known:
+            row["was_create"] = False
+            row["prior"] = {field: known.get(field) for field in UNDO_PRIOR_FIELDS}
+        else:
+            row["was_create"] = True
+            row["created_entry_id"] = None
+        rows.append(row)
+    return {"version": UNDO_SNAPSHOT_VERSION, "written_at": int(time.time()),
+            "media_type": media_type, "viewer_id": int(viewer_id or 0), "rows": rows}
+
+
+def save_undo_snapshot(snapshot: Dict[str, Any], name: Optional[str] = None) -> Optional[str]:
+    """Atomic write, same pattern as save_cache. Returns the file name, or None."""
+    directory = undo_snapshot_dir()
+    name = name or ".aniexport_undo_%d.json" % int(snapshot.get("written_at") or time.time())
+    path = directory / name
+    tmp = path.with_name(path.name + ".tmp")
+    try:
+        directory.mkdir(parents=True, exist_ok=True)
+        tmp.write_text(json.dumps(snapshot, ensure_ascii=False), encoding="utf-8")
+        os.replace(tmp, path)
+    except OSError:
+        try:
+            tmp.unlink(missing_ok=True)
+        except OSError:
+            pass
+        return None
+    return name
+
+
+def load_undo_snapshot(name: Any) -> Optional[Dict[str, Any]]:
+    """Read one snapshot back. Any damage or version mismatch means "no snapshot"."""
+    path = _undo_snapshot_path(name)
+    if path is None:
+        return None
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
+    if not isinstance(data, dict) or data.get("version") != UNDO_SNAPSHOT_VERSION:
+        return None
+    if not isinstance(data.get("rows"), list):
+        return None
+    return data
+
+
+def list_undo_snapshots() -> List[Dict[str, Any]]:
+    """Newest first, for the undo picker."""
+    out: List[Dict[str, Any]] = []
+    try:
+        names = sorted((q.name for q in undo_snapshot_dir().glob(_UNDO_GLOB)), reverse=True)
+    except OSError:
+        return out
+    for name in names:
+        snapshot = load_undo_snapshot(name)
+        if not snapshot:
+            continue
+        rows = snapshot.get("rows") or []
+        out.append({"name": name, "written_at": snapshot.get("written_at"),
+                    "media_type": snapshot.get("media_type"), "rows": len(rows),
+                    "creates": sum(1 for r in rows if r.get("was_create")),
+                    "deletable": sum(1 for r in rows
+                                     if r.get("was_create") and r.get("created_entry_id"))})
+    return out
+
+
+def prune_undo_snapshots(keep: int = UNDO_SNAPSHOT_KEEP) -> None:
+    """Keep the newest few; a snapshot stops being useful once a later one exists."""
+    try:
+        found = sorted(undo_snapshot_dir().glob(_UNDO_GLOB))
+    except OSError:
+        return
+    for path in (found[:-keep] if keep > 0 else found):
+        try:
+            path.unlink()
+        except OSError:
+            pass
+
+
+def record_created_entry(snapshot: Dict[str, Any], anilist_id: int, entry_id: int) -> None:
+    """Remember the id of an entry the write just created, so undo can delete it."""
+    for row in snapshot.get("rows") or []:
+        if int(row.get("anilist_id") or 0) == int(anilist_id or 0) and row.get("was_create"):
+            row["created_entry_id"] = int(entry_id)
+            return
+
+
+def iter_undo_payloads(snapshot: Dict[str, Any], delete_created: bool = False) -> tuple:
+    """Build (restores, deletes, unrecoverable) from a snapshot.
+
+    A restore sends every prior field, the empty ones included - that is the
+    point. Putting back a note the write replaced, or a date it set, needs the
+    empty value the write path deliberately never sends.
+
+    One caveat that cannot be coded around: AniList stamps `startedAt` itself
+    when an entry becomes CURRENT without one, so restoring "no start date" may
+    not stick. Measured, not assumed - see ROADMAP 2.3, M7.
+    """
+    media_type = "manga" if snapshot.get("media_type") == "manga" else "anime"
+    restores: List[Dict[str, Any]] = []
+    deletes: List[Dict[str, Any]] = []
+    unrecoverable: List[Dict[str, str]] = []
+    for row in snapshot.get("rows") or []:
+        title = str(row.get("title") or "")
+        anilist_id = int(row.get("anilist_id") or 0)
+        if row.get("was_create"):
+            entry_id = int(row.get("created_entry_id") or 0)
+            if not entry_id:
+                unrecoverable.append(
+                    {"title": title,
+                     "reason": "the create never reported an entry id, so there is "
+                               "nothing safe to delete"})
+            elif delete_created:
+                deletes.append({"title": title, "anilist_id": anilist_id,
+                                "entry_id": entry_id})
+            continue
+        prior = row.get("prior") or {}
+        entry_id = int(prior.get("id") or 0)
+        if not entry_id:
+            unrecoverable.append({"title": title, "reason": "no prior entry id was recorded"})
+            continue
+        variables: Dict[str, Any] = {
+            "id": entry_id,
+            "mediaId": anilist_id,
+            "scoreRaw": int(prior.get("score") or 0),
+            "progress": int(prior.get("progress") or 0),
+            "repeat": int(prior.get("repeat") or 0),
+            "notes": str(prior.get("notes") or ""),
+            "startedAt": _fuzzy_or_empty(prior.get("startedAt")),
+            "completedAt": _fuzzy_or_empty(prior.get("completedAt")),
+        }
+        if prior.get("status"):
+            # Absent rather than guessed: an invented status is a second write.
+            variables["status"] = prior["status"]
+        if media_type == "manga":
+            variables["progressVolumes"] = int(prior.get("progressVolumes") or 0)
+        restores.append({"title": title, "anilist_id": anilist_id,
+                         "update": True, "variables": variables})
+        # L8: restoring COMPLETED over an entry the write left REPEATING makes
+        # AniList increment `repeat`, and it beats the value sent alongside the
+        # status - measured. A second write carrying only `repeat` does stick,
+        # so the restore is followed by one. Emitted only for a row that has a
+        # reread count to lose, so an ordinary undo costs no extra requests.
+        if prior.get("status") == "COMPLETED" and int(prior.get("repeat") or 0) > 0:
+            restores.append({"title": title, "anilist_id": anilist_id, "update": True,
+                             "repair": "repeat",
+                             "variables": {"id": entry_id, "mediaId": anilist_id,
+                                           "repeat": int(prior.get("repeat") or 0)}})
+    return restores, deletes, unrecoverable
 
 
 def deduplicate_entries(entries: Sequence[Dict[str, Any]]) -> List[Dict[str, Any]]:

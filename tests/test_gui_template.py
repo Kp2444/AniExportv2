@@ -97,7 +97,8 @@ class AccessibilityTests(unittest.TestCase):
     def test_dialogs_are_announced_as_dialogs(self):
         markup = self._markup()
         backdrops = re.findall(r'<div\s+id="(\w+Modal)"[^>]*>', markup)
-        self.assertEqual(sorted(backdrops), ["fixModal", "previewModal", "writeModal"])
+        self.assertEqual(sorted(backdrops),
+                         ["fixModal", "previewModal", "undoModal", "writeModal"])
         for ident in backdrops:
             tag = re.search(r'<div\s+id="' + ident + r'"[^>]*>', markup, re.S).group(0)
             self.assertIn('role="dialog"', tag, ident + " is not announced as a dialog")
@@ -199,6 +200,72 @@ class SkipListTests(unittest.TestCase):
         body = script.split("function saveIgnored()", 1)[1].split("function enabledFor", 1)[0]
         self.assertIn("catch (e)", body,
                       "localStorage throws in private windows; the page must survive it")
+
+
+class WriteDiffTests(unittest.TestCase):
+    """The confirm step is the only thing standing between a pasted list and a
+    live account, so the wiring is asserted here. The rendering behaviour is
+    covered by the node checks described in MANGA_SUPPORT_NOTES."""
+
+    def _script(self) -> str:
+        return SCRIPT_RE.findall(gui.HTML_TEMPLATE)[-1]
+
+    def test_the_confirm_step_renders_the_diff_rather_than_counts(self):
+        script = self._script()
+        self.assertIn("renderWritePlan(plan)", script,
+                      "the confirm modal must show what changes, not just how many rows")
+        self.assertIn("function diffLineHtml(row, d)", script)
+        self.assertIn('class="diff-list"', script)
+
+    def test_every_value_shown_in_the_diff_is_escaped(self):
+        # Notes and titles come back from AniList, so they are untrusted text.
+        script = self._script()
+        body = script.split("function diffLineHtml", 1)[1].split("function renderWritePlan", 1)[0]
+        self.assertNotIn("+ d.from", body)
+        self.assertNotIn("+ row.title", body)
+        self.assertEqual(body.count("escapeHtml("), 7,
+                         "every interpolated value in a diff line must be escaped")
+
+    def test_the_override_is_a_checkbox_the_server_validates(self):
+        script = self._script()
+        self.assertIn("""data-write-override="' + action""", script)
+        self.assertIn("pickBoxHtml(row.anilist_id, d.field, 'mine'", script)
+        self.assertIn("pickBoxHtml(row.anilist_id, 'completedAt', 'clear'", script,
+                      "a stale completion date needs its own explicit action")
+        self.assertIn("overrides: writeOverrides", script,
+                      "the ticked boxes have to reach the write")
+
+    def test_the_score_scale_is_stated_and_not_guessed(self):
+        script = self._script()
+        self.assertIn("Number(value) + '/100'", script,
+                      "the server compares in POINT_100, so 80 must not look like a 1-10 score")
+
+    def test_undo_and_retry_are_reachable_from_the_page(self):
+        self.assertIn('id="btnUndo"', gui.HTML_TEMPLATE)
+        self.assertIn('id="btnRetry"', gui.HTML_TEMPLATE)
+        self.assertIn('id="undoDeleteCreated"', gui.HTML_TEMPLATE,
+                      "deleting created entries must be a separate, explicit tick")
+        script = self._script()
+        self.assertIn("'/api/anilist-undo'", script)
+        self.assertIn("retry: true", script)
+
+    def test_deleting_created_entries_is_never_the_default(self):
+        self.assertNotIn('id="undoDeleteCreated" checked', gui.HTML_TEMPLATE)
+        script = self._script()
+        self.assertIn("delete_created: !!(deleteBox && deleteBox.checked)", script,
+                      "an absent checkbox must mean false, not a crash or a delete")
+
+    def test_both_streams_share_one_reader(self):
+        script = self._script()
+        self.assertEqual(script.count("async function streamSse("), 1)
+        self.assertEqual(script.count("await streamSse(res,"), 2,
+                         "the write and the undo must not drift apart")
+
+    def test_the_diff_list_is_usable_on_a_narrow_screen(self):
+        # A scrolling list inside a dialog is the shape that broke last time.
+        narrow = gui.HTML_TEMPLATE.split("@media (max-width: 760px)", 1)[1]
+        for rule in (".write-card", ".diff-list", ".diff-field"):
+            self.assertIn(rule, narrow, rule)
 
 
 class MatchPickerTests(unittest.TestCase):

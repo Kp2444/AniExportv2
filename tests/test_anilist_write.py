@@ -5,6 +5,7 @@ user's existing list entries first and supplies the entry id, so a repeated
 write updates in place instead of creating a second row.
 """
 import json
+import os
 import tempfile
 import threading
 import unittest
@@ -88,11 +89,493 @@ class PayloadTests(unittest.TestCase):
                          "The score may not be greater than 100.")
 
 
+def _payload(row, media_type="manga", existing=None, **kwargs):
+    payloads, skipped = gen.iter_write_payloads([row], media_type, existing or {}, **kwargs)
+    assert not skipped, skipped
+    return payloads[0]
+
+
+def _diff_for(payload, field):
+    for row in payload["diff"]:
+        if row["field"] == field:
+            return row
+    return None
+
+
+class ConflictPolicyTests(unittest.TestCase):
+    """The write must never send a value backwards without being told to.
+
+    Each case is the measured data loss from ROADMAP 2.3 turned into a test:
+    the account's value, the row's value, and what actually goes over the wire.
+    """
+
+    MANGA = {"anilist_id": 30642, "title": "Vinland Saga", "chapters": 224, "volumes": 29}
+
+    def existing(self, **fields):
+        base = {"id": 999, "mediaId": 30642, "status": "CURRENT", "progress": 0,
+                "progressVolumes": 0, "score": 0, "repeat": 0, "notes": None,
+                "startedAt": None, "completedAt": None}
+        base.update(fields)
+        return {30642: base}
+
+    def test_progress_never_goes_backwards(self):
+        row = dict(self.MANGA, status="Reading", my_read_chapters=142)
+        payload = _payload(row, existing=self.existing(progress=224))
+        self.assertEqual(payload["variables"]["progress"], 224)
+        self.assertEqual(_diff_for(payload, "progress"),
+                         {"field": "progress", "from": 224, "to": 142,
+                          "applied": 224, "blocked": True})
+
+    def test_a_blank_progress_cannot_zero_the_account(self):
+        # my_read_chapters absent on a Reading row clamps to 0 (M3 live).
+        row = dict(self.MANGA, status="Reading")
+        payload = _payload(row, existing=self.existing(progress=224))
+        self.assertEqual(payload["variables"]["progress"], 224)
+        self.assertTrue(_diff_for(payload, "progress")["blocked"])
+
+    def test_progress_forward_passes_unblocked(self):
+        row = dict(self.MANGA, status="Reading", my_read_chapters=224)
+        payload = _payload(row, existing=self.existing(progress=142))
+        self.assertEqual(payload["variables"]["progress"], 224)
+        self.assertFalse(_diff_for(payload, "progress")["blocked"])
+
+    def test_volumes_get_the_same_rule_as_chapters(self):
+        row = dict(self.MANGA, status="Reading", my_read_chapters=224, my_read_volumes=4)
+        payload = _payload(row, existing=self.existing(progress=224, progressVolumes=29))
+        self.assertEqual(payload["variables"]["progressVolumes"], 29)
+        self.assertTrue(_diff_for(payload, "progressVolumes")["blocked"])
+
+    def test_an_anime_row_never_touches_volumes(self):
+        # AniList returns null for progressVolumes on anime; a bare comparison
+        # against it would raise, and the field must not be sent at all.
+        row = {"anilist_id": 339, "title": "Lain", "episodes": 13, "status": "Watching",
+               "my_watched_episodes": 3}
+        existing = {339: {"id": 7, "mediaId": 339, "status": "CURRENT", "progress": 1,
+                          "progressVolumes": None, "score": None, "repeat": None}}
+        payload = _payload(row, media_type="anime", existing=existing)
+        self.assertNotIn("progressVolumes", payload["variables"])
+        self.assertIsNone(_diff_for(payload, "progressVolumes"))
+        self.assertEqual(payload["variables"]["progress"], 3)
+
+    def test_a_zero_score_cannot_erase_a_real_one(self):
+        row = dict(self.MANGA, status="Completed", score=0)
+        payload = _payload(row, existing=self.existing(status="COMPLETED", progress=224,
+                                                       progressVolumes=29, score=80))
+        self.assertEqual(payload["variables"]["scoreRaw"], 80)
+        self.assertTrue(_diff_for(payload, "scoreRaw")["blocked"])
+
+    def test_a_real_score_replaces_another_real_score(self):
+        row = dict(self.MANGA, status="Completed", score=9)
+        payload = _payload(row, existing=self.existing(status="COMPLETED", progress=224,
+                                                       progressVolumes=29, score=80))
+        self.assertEqual(payload["variables"]["scoreRaw"], 90)
+        self.assertFalse(_diff_for(payload, "scoreRaw")["blocked"])
+
+    def test_repeat_never_goes_backwards(self):
+        # The write sends the literal 1 for any reread, so an account at 5
+        # would be reset without this rule (M5 live).
+        row = dict(self.MANGA, status="Rereading", my_read_chapters=224, my_read_volumes=29)
+        payload = _payload(row, existing=self.existing(progress=224, progressVolumes=29, repeat=5))
+        self.assertEqual(payload["variables"]["repeat"], 5)
+        self.assertTrue(_diff_for(payload, "repeat")["blocked"])
+
+    def test_completed_is_not_replaced_by_anything_but_a_reread(self):
+        completed = self.existing(status="COMPLETED", progress=224, progressVolumes=29)
+        blocked = {"Plan to read": "PLANNING", "Reading": "CURRENT",
+                   "Dropped": "DROPPED", "On-hold": "PAUSED"}
+        for label in blocked:
+            with self.subTest(status=label):
+                row = dict(self.MANGA, status=label, my_read_chapters=224, my_read_volumes=29)
+                payload = _payload(row, existing=completed)
+                self.assertEqual(payload["variables"]["status"], "COMPLETED")
+                self.assertTrue(_diff_for(payload, "status")["blocked"])
+
+        row = dict(self.MANGA, status="Rereading", my_read_chapters=224, my_read_volumes=29)
+        payload = _payload(row, existing=completed)
+        self.assertEqual(payload["variables"]["status"], "REPEATING")
+        self.assertFalse(_diff_for(payload, "status")["blocked"])
+
+    def test_every_other_transition_passes(self):
+        row = dict(self.MANGA, status="Reading", my_read_chapters=10)
+        payload = _payload(row, existing=self.existing(status="DROPPED", progress=10))
+        self.assertEqual(payload["variables"]["status"], "CURRENT")
+        self.assertFalse(_diff_for(payload, "status")["blocked"])
+
+    def test_a_create_blocks_nothing_and_has_no_before(self):
+        row = dict(self.MANGA, status="Completed", score=9)
+        payload = _payload(row, existing={})
+        self.assertFalse(payload["update"])
+        self.assertTrue(payload["diff"], "a create still reports what it will set")
+        for entry in payload["diff"]:
+            self.assertIsNone(entry["from"])
+            self.assertFalse(entry["blocked"])
+        self.assertEqual(payload["variables"]["progress"], 224)
+
+    def test_an_unchanged_row_produces_an_empty_diff(self):
+        row = dict(self.MANGA, status="Completed", score=8)
+        payload = _payload(row, existing=self.existing(status="COMPLETED", progress=224,
+                                                       progressVolumes=29, score=80))
+        self.assertEqual(payload["diff"], [])
+
+    def test_an_override_forces_the_row_through(self):
+        row = dict(self.MANGA, status="Reading", my_read_chapters=142)
+        payload = _payload(row, existing=self.existing(progress=224),
+                           overrides={30642: {"progress": "mine"}})
+        self.assertEqual(payload["variables"]["progress"], 142)
+        self.assertFalse(_diff_for(payload, "progress")["blocked"])
+
+    def test_an_override_key_may_arrive_as_a_string(self):
+        # JSON object keys are strings, so the wire format must still match.
+        row = dict(self.MANGA, status="Reading", my_read_chapters=142)
+        payload = _payload(row, existing=self.existing(progress=224),
+                           overrides={"30642": {"progress": "mine"}})
+        self.assertEqual(payload["variables"]["progress"], 142)
+
+    def test_the_overwrite_policy_drops_every_guard(self):
+        row = dict(self.MANGA, status="Reading", my_read_chapters=1, score=0)
+        payload = _payload(row, existing=self.existing(status="COMPLETED", progress=224,
+                                                       progressVolumes=29, score=80),
+                           policy="overwrite")
+        self.assertEqual(payload["variables"]["progress"], 1)
+        self.assertEqual(payload["variables"]["scoreRaw"], 0)
+        self.assertEqual(payload["variables"]["status"], "CURRENT")
+
+    def test_a_stale_completion_date_is_flagged_not_cleared(self):
+        row = dict(self.MANGA, status="Reading", my_read_chapters=224, my_read_volumes=29,
+                   score=9)
+        existing = self.existing(status="COMPLETED", progress=224, progressVolumes=29,
+                                 score=90, completedAt={"year": 2026, "month": 10, "day": 19})
+        # Forcing the status off COMPLETED is what leaves the date behind.
+        payload = _payload(row, existing=existing, overrides={30642: {"status": "mine"}})
+        self.assertEqual(payload["variables"]["status"], "CURRENT")
+        self.assertTrue(payload["stale_completed_at"])
+        self.assertNotIn("completedAt", payload["variables"],
+                         "the date must not be touched unless the user asks")
+
+    def test_clearing_the_completion_date_sends_an_empty_fuzzy_date(self):
+        row = dict(self.MANGA, status="Reading", my_read_chapters=224, my_read_volumes=29,
+                   score=9)
+        existing = self.existing(status="COMPLETED", progress=224, progressVolumes=29,
+                                 score=90, completedAt={"year": 2026, "month": 10, "day": 19})
+        payload = _payload(row, existing=existing,
+                           overrides={30642: {"status": "mine", "completedAt": "clear"}})
+        self.assertEqual(payload["variables"]["completedAt"],
+                         {"year": None, "month": None, "day": None})
+        self.assertFalse(payload["stale_completed_at"])
+        cleared = _diff_for(payload, "completedAt")
+        self.assertEqual((cleared["to"], cleared["applied"]), (None, None))
+
+    def test_a_still_completed_row_is_not_called_stale(self):
+        row = dict(self.MANGA, status="Completed", my_read_chapters=224, my_read_volumes=29,
+                   score=9)
+        existing = self.existing(status="COMPLETED", progress=224, progressVolumes=29,
+                                 score=90, completedAt={"year": 2026, "month": 10, "day": 19})
+        self.assertFalse(_payload(row, existing=existing)["stale_completed_at"])
+
+    def test_notes_and_dates_are_reported_but_never_guarded(self):
+        row = dict(self.MANGA, status="Reading", my_read_chapters=224,
+                   comments="mine", start_date="2024-03-01")
+        existing = self.existing(progress=224, notes="theirs",
+                                 startedAt={"year": 2020, "month": 1, "day": 1})
+        payload = _payload(row, existing=existing)
+        self.assertEqual(payload["variables"]["notes"], "mine")
+        self.assertEqual(payload["variables"]["startedAt"],
+                         {"year": 2024, "month": 3, "day": 1})
+        for field in ("notes", "startedAt"):
+            with self.subTest(field=field):
+                self.assertFalse(_diff_for(payload, field)["blocked"])
+
+
+class AniListSideEffectTests(unittest.TestCase):
+    """AniList edits some fields itself on a status change, whatever is sent.
+
+    Measured live, not inferred (ROADMAP 2.3, L7-L8). The diff has to predict
+    the account rather than the payload, or the confirm step promises changes
+    the API discards.
+    """
+
+    MANGA = {"anilist_id": 34632, "title": "Punpun", "chapters": 147, "volumes": 13}
+
+    def existing(self, **fields):
+        base = {"id": 999, "mediaId": 34632, "status": "COMPLETED", "progress": 147,
+                "progressVolumes": 13, "score": 90, "repeat": 0, "notes": None,
+                "startedAt": None, "completedAt": None}
+        base.update(fields)
+        return {34632: base}
+
+    def test_a_forced_downgrade_under_completed_predicts_the_total(self):
+        # The live 3a case: "keep mine" sends 40, AniList stores 147 anyway
+        # because the status guard kept the entry COMPLETED.
+        row = dict(self.MANGA, status="Reading", my_read_chapters=40, my_read_volumes=4, score=9)
+        payload = _payload(row, existing=self.existing(),
+                           overrides={34632: {"progress": "mine", "progressVolumes": "mine"}})
+        self.assertEqual(payload["variables"]["progress"], 40, "the payload still says 40")
+        progress = _diff_for(payload, "progress")
+        self.assertEqual(progress["applied"], 147, "but the account will hold 147")
+        self.assertTrue(progress["by_anilist"])
+        self.assertEqual(_diff_for(payload, "progressVolumes")["applied"], 13)
+
+    def test_no_clamp_once_the_status_is_actually_moved_off_completed(self):
+        row = dict(self.MANGA, status="Reading", my_read_chapters=40, my_read_volumes=4, score=9)
+        payload = _payload(row, existing=self.existing(),
+                           overrides={34632: {"progress": "mine", "progressVolumes": "mine",
+                                              "status": "mine"}})
+        self.assertEqual(payload["variables"]["status"], "CURRENT")
+        self.assertEqual(_diff_for(payload, "progress")["applied"], 40)
+        self.assertNotIn("by_anilist", _diff_for(payload, "progress"))
+
+    def test_a_blocked_progress_needs_no_clamp_note(self):
+        # Policy already keeps 147, which is what AniList would force anyway.
+        row = dict(self.MANGA, status="Reading", my_read_chapters=40, my_read_volumes=4, score=9)
+        payload = _payload(row, existing=self.existing())
+        progress = _diff_for(payload, "progress")
+        self.assertEqual(progress["applied"], 147)
+        self.assertTrue(progress["blocked"])
+        self.assertNotIn("by_anilist", progress, "do not blame AniList for the policy's doing")
+
+    def test_finishing_a_reread_predicts_the_repeat_increment(self):
+        row = dict(self.MANGA, status="Completed", my_read_chapters=147,
+                   my_read_volumes=13, score=9)
+        payload = _payload(row, existing=self.existing(status="REPEATING", repeat=5))
+        self.assertNotIn("repeat", payload["variables"], "a non-reread row sends no repeat")
+        bumped = _diff_for(payload, "repeat")
+        self.assertEqual((bumped["from"], bumped["applied"]), (5, 6))
+        self.assertTrue(bumped["by_anilist"])
+        self.assertFalse(bumped["blocked"])
+
+    def test_an_ongoing_series_predicts_nothing_it_cannot_know(self):
+        # chapters 0 means unknown, so there is no total to clamp to.
+        row = {"anilist_id": 34632, "title": "Berserk", "chapters": 0, "volumes": 0,
+               "status": "Completed", "score": 9}
+        payload = _payload(row, existing=self.existing(progress=10, progressVolumes=1))
+        progress = _diff_for(payload, "progress")
+        # The policy still keeps the account's 10 over the unknown-total 0; what
+        # it must not do is claim AniList will raise it to a total nobody knows.
+        self.assertEqual(progress["applied"], 10)
+        self.assertTrue(progress["blocked"])
+        self.assertNotIn("by_anilist", progress)
+
+    def test_an_anime_row_clamps_episodes_and_never_volumes(self):
+        row = {"anilist_id": 339, "title": "Lain", "episodes": 13, "status": "Watching",
+               "my_watched_episodes": 3}
+        existing = {339: {"id": 7, "mediaId": 339, "status": "COMPLETED", "progress": 13,
+                          "progressVolumes": None, "score": 0, "repeat": 0}}
+        payload = _payload(row, media_type="anime", existing=existing,
+                           overrides={339: {"progress": "mine"}})
+        self.assertEqual(_diff_for(payload, "progress")["applied"], 13)
+        self.assertIsNone(_diff_for(payload, "progressVolumes"))
+
+
+class DuplicateRowTests(unittest.TestCase):
+    """Two rows can resolve to one AniList entry - fixing two unmatched titles
+    to the same series does it. The XML path already refuses that; this one has
+    to as well, or the second row writes over the first and the undo snapshot
+    holds two rows for one entry with only one recorded id."""
+
+    def test_the_second_row_on_one_entry_is_skipped_with_a_reason(self):
+        rows = [{"anilist_id": 30642, "title": "Vinland Saga", "chapters": 224,
+                 "status": "Reading", "my_read_chapters": 100},
+                {"anilist_id": 30642, "title": "Vinland Saga: Slave Arc", "chapters": 224,
+                 "status": "Reading", "my_read_chapters": 10}]
+        payloads, skipped = gen.iter_write_payloads(rows, "manga", {})
+        self.assertEqual(len(payloads), 1, "one payload per AniList entry")
+        self.assertEqual(payloads[0]["title"], "Vinland Saga", "the first row wins")
+        self.assertEqual(len(skipped), 1)
+        self.assertIn("Vinland Saga", skipped[0]["reason"])
+        self.assertEqual(skipped[0]["title"], "Vinland Saga: Slave Arc")
+
+    def test_deduplicate_entries_could_not_have_done_this(self):
+        # Different MAL ids and different titles, same AniList entry: the
+        # existing helper keys on neither, which is why the check lives here.
+        rows = [{"anilist_id": 1, "id": 11, "title": "A", "status": "Reading"},
+                {"anilist_id": 1, "id": 22, "title": "B", "status": "Reading"}]
+        self.assertEqual(len(gen.deduplicate_entries(rows)), 2)
+        payloads, skipped = gen.iter_write_payloads(rows, "manga", {})
+        self.assertEqual((len(payloads), len(skipped)), (1, 1))
+
+    def test_distinct_entries_are_all_kept(self):
+        rows = [{"anilist_id": 1, "title": "A", "status": "Reading"},
+                {"anilist_id": 2, "title": "B", "status": "Reading"}]
+        payloads, skipped = gen.iter_write_payloads(rows, "manga", {})
+        self.assertEqual((len(payloads), len(skipped)), (2, 0))
+
+
+class UndoRepeatRepairTests(unittest.TestCase):
+    """Restoring COMPLETED over an entry the write left REPEATING makes AniList
+    increment `repeat`, and its increment beats the value sent alongside the
+    status - measured live (ROADMAP 2.3, L8). A second write carrying only
+    `repeat` does stick, so the restore is followed by one."""
+
+    def snapshot(self, **prior):
+        base = {"id": 500, "status": "COMPLETED", "progress": 249, "progressVolumes": 22,
+                "score": 70, "repeat": 4, "notes": "", "startedAt": None, "completedAt": None}
+        base.update(prior)
+        return {"version": 1, "written_at": 1, "media_type": "manga", "viewer_id": 1,
+                "rows": [{"anilist_id": 30003, "title": "20th Century Boys",
+                          "was_create": False, "prior": base}]}
+
+    def test_a_reread_count_is_repaired_by_a_second_write(self):
+        restores, _, _ = gen.iter_undo_payloads(self.snapshot())
+        self.assertEqual(len(restores), 2, "the restore is followed by a repeat repair")
+        self.assertEqual(restores[1]["repair"], "repeat")
+        self.assertEqual(restores[1]["variables"],
+                         {"id": 500, "mediaId": 30003, "repeat": 4})
+        self.assertNotIn("status", restores[1]["variables"],
+                         "sending the status again would re-trigger the increment")
+
+    def test_an_ordinary_undo_costs_no_extra_request(self):
+        for prior in ({"repeat": 0}, {"status": "CURRENT", "repeat": 4}):
+            with self.subTest(prior=prior):
+                restores, _, _ = gen.iter_undo_payloads(self.snapshot(**prior))
+                self.assertEqual(len(restores), 1)
+                self.assertNotIn("repair", restores[0])
+
+
+class ExistingReadFailureTests(unittest.TestCase):
+    def test_a_failed_chunk_raises_instead_of_looking_like_creates(self):
+        with patch.object(gen, "_execute_anilist_authenticated",
+                          return_value={"error": "AniList returned HTTP 500."}):
+            with self.assertRaises(gen.AniListReadError) as caught:
+                gen.anilist_existing_entries("t", 7, "manga", [1, 2, 3])
+        self.assertIn("500", str(caught.exception))
+
+    def test_a_good_read_still_maps_by_media_id(self):
+        page = {"data": {"Page": {"mediaList": [{"id": 5, "mediaId": 9, "progress": 3}]}}}
+        with patch.object(gen, "_execute_anilist_authenticated", return_value=page):
+            found = gen.anilist_existing_entries("t", 7, "manga", [9])
+        self.assertEqual(found[9]["id"], 5)
+
+    def test_the_query_fetches_what_safety_and_undo_need(self):
+        query = gen.ANILIST_EXISTING_ENTRIES_QUERY
+        for field in ("repeat", "notes", "startedAt", "completedAt"):
+            self.assertIn(field, query, field)
+        self.assertIn("score (format: POINT_100)", query,
+                      "a bare score comes back in the account's own scale, not 0-100")
+
+
+class UndoSnapshotTests(unittest.TestCase):
+    def setUp(self):
+        self._dir = tempfile.TemporaryDirectory()
+        self.addCleanup(self._dir.cleanup)
+        self.dir = Path(self._dir.name)
+        env = patch.dict(os.environ, {"ANIEXPORT_CACHE": str(self.dir / ".anilist_cache.json")})
+        env.start()
+        self.addCleanup(env.stop)
+
+    def snapshot(self):
+        payloads = [
+            {"title": "Vinland Saga", "anilist_id": 30642, "update": True, "variables": {}},
+            {"title": "Punpun", "anilist_id": 34632, "update": False, "variables": {}},
+        ]
+        existing = {30642: {"id": 998, "status": "CURRENT", "progress": 224,
+                            "progressVolumes": 18, "score": 80, "repeat": 2,
+                            "notes": "mine", "startedAt": {"year": 2024, "month": 3, "day": 1},
+                            "completedAt": None}}
+        return gen.build_undo_snapshot("manga", 12345, payloads, existing)
+
+    def test_a_snapshot_keeps_every_field_an_undo_has_to_restore(self):
+        prior = self.snapshot()["rows"][0]["prior"]
+        for field in ("id", "status", "progress", "progressVolumes", "score", "repeat",
+                      "notes", "startedAt", "completedAt"):
+            self.assertIn(field, prior, field)
+
+    def test_a_snapshot_never_holds_a_token(self):
+        text = json.dumps(self.snapshot())
+        self.assertNotIn("token", text.lower())
+
+    def test_a_create_has_no_prior_state_only_a_recorded_id(self):
+        snapshot = self.snapshot()
+        created = snapshot["rows"][1]
+        self.assertTrue(created["was_create"])
+        self.assertIsNone(created["created_entry_id"])
+        gen.record_created_entry(snapshot, 34632, 604576747)
+        self.assertEqual(snapshot["rows"][1]["created_entry_id"], 604576747)
+
+    def test_a_snapshot_round_trips_through_disk(self):
+        snapshot = self.snapshot()
+        name = gen.save_undo_snapshot(snapshot)
+        self.assertTrue(name.startswith(".aniexport_undo_"))
+        self.assertEqual(gen.load_undo_snapshot(name)["viewer_id"], 12345)
+        listed = gen.list_undo_snapshots()
+        self.assertEqual(listed[0]["name"], name)
+        self.assertEqual(listed[0]["creates"], 1)
+
+    def test_only_a_bare_snapshot_name_is_accepted(self):
+        for bad in ("../../etc/passwd", "/etc/passwd", "evil.json", "", None,
+                    ".aniexport_undo_x.json", ".aniexport_undo_1.json.tmp"):
+            with self.subTest(name=bad):
+                self.assertIsNone(gen._undo_snapshot_path(bad))
+        self.assertIsNotNone(gen._undo_snapshot_path(".aniexport_undo_17.json"))
+
+    def test_pruning_keeps_the_newest_few(self):
+        for stamp in range(1000, 1008):
+            gen.save_undo_snapshot(dict(self.snapshot(), written_at=stamp))
+        gen.prune_undo_snapshots(keep=5)
+        left = sorted(q.name for q in self.dir.glob(".aniexport_undo_*.json"))
+        self.assertEqual(len(left), 5)
+        self.assertEqual(left[0], ".aniexport_undo_1003.json")
+
+    def test_a_restore_sends_the_empty_values_the_write_refuses_to(self):
+        snapshot = self.snapshot()
+        snapshot["rows"][0]["prior"]["notes"] = None
+        restores, deletes, unrecoverable = gen.iter_undo_payloads(snapshot)
+        self.assertEqual(len(restores), 1)
+        variables = restores[0]["variables"]
+        self.assertEqual(variables["id"], 998)
+        self.assertEqual(variables["notes"], "")
+        self.assertEqual(variables["completedAt"], {"year": None, "month": None, "day": None})
+        self.assertEqual(variables["progressVolumes"], 18)
+        self.assertEqual(variables["repeat"], 2)
+        self.assertEqual(variables["scoreRaw"], 80)
+        self.assertEqual(deletes, [])
+        self.assertEqual(len(unrecoverable), 1, "the create had no recorded id")
+
+    def test_an_anime_restore_omits_volumes(self):
+        snapshot = dict(self.snapshot(), media_type="anime")
+        restores, _, _ = gen.iter_undo_payloads(snapshot)
+        self.assertNotIn("progressVolumes", restores[0]["variables"])
+
+    def test_a_created_entry_is_deleted_only_when_asked(self):
+        snapshot = self.snapshot()
+        gen.record_created_entry(snapshot, 34632, 777)
+        _, deletes, unrecoverable = gen.iter_undo_payloads(snapshot, delete_created=False)
+        self.assertEqual(deletes, [])
+        self.assertEqual(unrecoverable, [])
+        _, deletes, _ = gen.iter_undo_payloads(snapshot, delete_created=True)
+        self.assertEqual(deletes[0]["entry_id"], 777)
+
+    def test_a_create_with_no_recorded_id_is_reported_not_guessed(self):
+        snapshot = self.snapshot()
+        _, deletes, unrecoverable = gen.iter_undo_payloads(snapshot, delete_created=True)
+        self.assertEqual(deletes, [])
+        self.assertEqual(unrecoverable[0]["title"], "Punpun")
+
+    def test_a_damaged_or_foreign_snapshot_is_refused(self):
+        path = self.dir / ".aniexport_undo_9999.json"
+        path.write_text("not json", encoding="utf-8")
+        self.assertIsNone(gen.load_undo_snapshot(path.name))
+        path.write_text(json.dumps({"version": 99, "rows": []}), encoding="utf-8")
+        self.assertIsNone(gen.load_undo_snapshot(path.name))
+
+    def test_the_delete_mutation_matches_the_schema(self):
+        self.assertIn("DeleteMediaListEntry (id: $id)", gen.ANILIST_DELETE_ENTRY_MUTATION)
+        with patch.object(gen, "_execute_anilist_authenticated",
+                          return_value={"data": {"DeleteMediaListEntry": {"deleted": True}}}):
+            self.assertTrue(gen.anilist_delete_entry("t", 5)["ok"])
+        with patch.object(gen, "_execute_anilist_authenticated",
+                          return_value={"data": {"DeleteMediaListEntry": {"deleted": False}}}):
+            self.assertFalse(gen.anilist_delete_entry("t", 5)["ok"])
+
+
 class WriteEndpointTests(unittest.TestCase):
     def setUp(self):
         self._dir = tempfile.TemporaryDirectory()
         self.addCleanup(self._dir.cleanup)
         out = Path(self._dir.name)
+        env = patch.dict(os.environ, {"ANIEXPORT_CACHE": str(out / ".anilist_cache.json")})
+        env.start()
+        self.addCleanup(env.stop)
+        self.out = out
         for name, value in (("EXPORT_XML_PATH", out / "a.xml"), ("EXPORT_GZ_PATH", out / "a.gz"),
                             ("EXPORT_MANGA_XML_PATH", out / "m.xml"),
                             ("EXPORT_MANGA_GZ_PATH", out / "m.gz")):
@@ -179,6 +662,237 @@ class WriteEndpointTests(unittest.TestCase):
         self.assertEqual(done["type"], "write_complete")
         self.assertEqual(len(done["failed"]), 1)
         self.assertIn("score", done["failed"][0]["error"])
+
+
+class SafeWriteEndpointTests(WriteEndpointTests):
+    """The endpoints around the conflict policy, the snapshot, undo and retry."""
+
+    VIEWER = {"ok": True, "id": 7, "name": "kevin"}
+    ROW = {"anilist_id": 30642, "title": "Vinland Saga", "chapters": 224, "volumes": 29,
+           "status": "Reading", "my_read_chapters": 142}
+    ACCOUNT = {30642: {"id": 999, "mediaId": 30642, "status": "CURRENT", "progress": 224,
+                       "progressVolumes": 29, "score": 80, "repeat": 0, "notes": None,
+                       "startedAt": None, "completedAt": None}}
+
+    def events(self, body):
+        return [json.loads(c[6:]) for c in body.split(chr(10) * 2)
+                if c.strip().startswith("data: ")]
+
+    def test_the_preview_shows_the_conflict_before_anything_is_sent(self):
+        with patch.object(gui, "anilist_viewer", return_value=self.VIEWER), \
+             patch.object(gui, "anilist_existing_entries", return_value=self.ACCOUNT):
+            body, code = self.post("/api/anilist-preview", {
+                "token": "t", "media_type": "manga", "entries": [dict(self.ROW)]})
+        self.assertEqual(code, 200)
+        plan = json.loads(body)
+        self.assertEqual(plan["conflicts"], 1)
+        row = plan["rows"][0]
+        progress = [d for d in row["diff"] if d["field"] == "progress"][0]
+        self.assertEqual((progress["from"], progress["to"], progress["applied"]),
+                         (224, 142, 224))
+        self.assertTrue(progress["blocked"])
+
+    def test_the_preview_counts_rows_that_change_nothing(self):
+        row = {"anilist_id": 30642, "title": "V", "chapters": 224, "volumes": 29,
+               "status": "Reading", "my_read_chapters": 224, "my_read_volumes": 29, "score": 8}
+        with patch.object(gui, "anilist_viewer", return_value=self.VIEWER), \
+             patch.object(gui, "anilist_existing_entries", return_value=self.ACCOUNT):
+            body, _ = self.post("/api/anilist-preview", {
+                "token": "t", "media_type": "manga", "entries": [row]})
+        plan = json.loads(body)
+        self.assertEqual((plan["unchanged"], plan["conflicts"]), (1, 0))
+        self.assertEqual(plan["rows"][0]["diff"], [])
+
+    def test_the_preview_refuses_when_the_account_cannot_be_read(self):
+        with patch.object(gui, "anilist_viewer", return_value=self.VIEWER), \
+             patch.object(gui, "anilist_existing_entries",
+                          side_effect=gui.AniListReadError("AniList returned HTTP 500.")):
+            body, code = self.post("/api/anilist-preview", {
+                "token": "t", "media_type": "manga", "entries": [dict(self.ROW)]})
+        self.assertEqual(code, 502)
+        self.assertIn("second copies", json.loads(body)["error"])
+
+    def test_the_write_refuses_the_same_way_mid_stream(self):
+        with patch.object(gui, "anilist_viewer", return_value=self.VIEWER), \
+             patch.object(gui, "anilist_existing_entries",
+                          side_effect=gui.AniListReadError("AniList returned HTTP 500.")), \
+             patch.object(gui, "anilist_write_entry") as writer:
+            body, _ = self.post("/api/anilist-write", {
+                "token": "t", "confirm": True, "media_type": "manga",
+                "entries": [dict(self.ROW)]})
+        kinds = [e["type"] for e in self.events(body)]
+        self.assertIn("error", kinds)
+        self.assertNotIn("write_progress", kinds)
+        writer.assert_not_called()
+
+    def test_an_override_reaches_the_payload_through_the_endpoint(self):
+        sent = []
+        with patch.object(gui, "anilist_viewer", return_value=self.VIEWER), \
+             patch.object(gui, "anilist_existing_entries", return_value=self.ACCOUNT), \
+             patch.object(gui, "anilist_write_entry",
+                          side_effect=lambda token, p: sent.append(p) or {"ok": True, "id": 1}):
+            self.post("/api/anilist-write", {
+                "token": "t", "confirm": True, "media_type": "manga",
+                "overrides": {"30642": {"progress": "mine"}},
+                "entries": [dict(self.ROW)]})
+        self.assertEqual(sent[0]["variables"]["progress"], 142)
+
+    def test_a_junk_override_is_dropped_not_trusted(self):
+        sent = []
+        with patch.object(gui, "anilist_viewer", return_value=self.VIEWER), \
+             patch.object(gui, "anilist_existing_entries", return_value=self.ACCOUNT), \
+             patch.object(gui, "anilist_write_entry",
+                          side_effect=lambda token, p: sent.append(p) or {"ok": True, "id": 1}):
+            self.post("/api/anilist-write", {
+                "token": "t", "confirm": True, "media_type": "manga",
+                "overrides": {"30642": {"progress": "theirs", "id": "mine"},
+                              "oops": {"progress": "mine"}},
+                "entries": [dict(self.ROW)]})
+        self.assertEqual(sent[0]["variables"]["progress"], 224)
+
+    def test_the_write_saves_a_snapshot_the_undo_can_use(self):
+        with patch.object(gui, "anilist_viewer", return_value=self.VIEWER), \
+             patch.object(gui, "anilist_existing_entries", return_value=self.ACCOUNT), \
+             patch.object(gui, "anilist_write_entry", return_value={"ok": True, "id": 999}):
+            body, _ = self.post("/api/anilist-write", {
+                "token": "super-secret-token-value", "confirm": True, "media_type": "manga",
+                "entries": [dict(self.ROW)]})
+        done = self.events(body)[-1]
+        self.assertEqual(done["type"], "write_complete")
+        name = done["snapshot"]
+        self.assertTrue((self.out / name).is_file())
+        snapshot = gen.load_undo_snapshot(name)
+        self.assertEqual(snapshot["rows"][0]["prior"]["progress"], 224)
+        self.assertNotIn("super-secret-token-value",
+                         (self.out / name).read_text(encoding="utf-8"),
+                         "a snapshot must not carry the token")
+
+    def test_a_created_entry_id_lands_in_the_snapshot_as_the_write_runs(self):
+        row = {"anilist_id": 34632, "title": "Punpun", "chapters": 147, "status": "Reading",
+               "my_read_chapters": 40}
+        with patch.object(gui, "anilist_viewer", return_value=self.VIEWER), \
+             patch.object(gui, "anilist_existing_entries", return_value={}), \
+             patch.object(gui, "anilist_write_entry", return_value={"ok": True, "id": 604576747}):
+            body, _ = self.post("/api/anilist-write", {
+                "token": "t", "confirm": True, "media_type": "manga", "entries": [row]})
+        snapshot = gen.load_undo_snapshot(self.events(body)[-1]["snapshot"])
+        self.assertEqual(snapshot["rows"][0]["created_entry_id"], 604576747)
+
+    def test_undo_restores_prior_values_and_leaves_creates_alone(self):
+        with patch.object(gui, "anilist_viewer", return_value=self.VIEWER), \
+             patch.object(gui, "anilist_existing_entries", return_value=self.ACCOUNT), \
+             patch.object(gui, "anilist_write_entry", return_value={"ok": True, "id": 999}):
+            written, _ = self.post("/api/anilist-write", {
+                "token": "t", "confirm": True, "media_type": "manga",
+                "entries": [dict(self.ROW)]})
+        name = self.events(written)[-1]["snapshot"]
+        sent = []
+        with patch.object(gui, "anilist_viewer", return_value=self.VIEWER), \
+             patch.object(gui, "anilist_write_entry",
+                          side_effect=lambda token, p: sent.append(p) or {"ok": True, "id": 999}), \
+             patch.object(gui, "anilist_delete_entry") as deleter:
+            body, code = self.post("/api/anilist-undo", {
+                "token": "t", "confirm": True, "snapshot": name})
+        self.assertEqual(code, 200)
+        done = self.events(body)[-1]
+        self.assertEqual(done["type"], "undo_complete")
+        self.assertEqual(done["restored"], 1)
+        self.assertEqual(sent[0]["variables"]["progress"], 224)
+        deleter.assert_not_called()
+
+    def test_undo_deletes_a_created_entry_only_when_ticked(self):
+        row = {"anilist_id": 34632, "title": "Punpun", "chapters": 147, "status": "Reading",
+               "my_read_chapters": 40}
+        with patch.object(gui, "anilist_viewer", return_value=self.VIEWER), \
+             patch.object(gui, "anilist_existing_entries", return_value={}), \
+             patch.object(gui, "anilist_write_entry", return_value={"ok": True, "id": 555}):
+            written, _ = self.post("/api/anilist-write", {
+                "token": "t", "confirm": True, "media_type": "manga", "entries": [row]})
+        name = self.events(written)[-1]["snapshot"]
+
+        with patch.object(gui, "anilist_viewer", return_value=self.VIEWER), \
+             patch.object(gui, "anilist_delete_entry") as quiet:
+            body, code = self.post("/api/anilist-undo", {
+                "token": "t", "confirm": True, "snapshot": name})
+        self.assertEqual(code, 400, "nothing to do without the delete box ticked")
+        quiet.assert_not_called()
+
+        with patch.object(gui, "anilist_viewer", return_value=self.VIEWER), \
+             patch.object(gui, "anilist_delete_entry", return_value={"ok": True}) as deleter:
+            body, code = self.post("/api/anilist-undo", {
+                "token": "t", "confirm": True, "snapshot": name, "delete_created": True})
+        self.assertEqual(code, 200)
+        self.assertEqual(deleter.call_args[0][1], 555)
+        self.assertEqual(self.events(body)[-1]["deleted"], 1)
+
+    def test_undo_needs_a_token_and_a_confirmation_and_a_real_snapshot(self):
+        self.assertEqual(self.post("/api/anilist-undo", {})[1], 400)
+        self.assertEqual(self.post("/api/anilist-undo", {"token": "t"})[1], 400)
+        body, code = self.post("/api/anilist-undo",
+                               {"token": "t", "confirm": True, "snapshot": "../etc/passwd"})
+        self.assertEqual(code, 404)
+
+    def test_a_stale_row_fails_alone_and_the_rest_of_the_undo_runs(self):
+        rows = [dict(self.ROW), {"anilist_id": 1, "title": "B", "chapters": 10,
+                                 "status": "Reading", "my_read_chapters": 5}]
+        account = dict(self.ACCOUNT)
+        account[1] = {"id": 1001, "mediaId": 1, "status": "CURRENT", "progress": 9,
+                      "progressVolumes": 0, "score": 0, "repeat": 0}
+        with patch.object(gui, "anilist_viewer", return_value=self.VIEWER), \
+             patch.object(gui, "anilist_existing_entries", return_value=account), \
+             patch.object(gui, "anilist_write_entry", return_value={"ok": True, "id": 9}):
+            written, _ = self.post("/api/anilist-write", {
+                "token": "t", "confirm": True, "media_type": "manga", "entries": rows})
+        name = self.events(written)[-1]["snapshot"]
+        outcomes = [{"ok": False, "error": "Entry does not exist."}, {"ok": True, "id": 1001}]
+        with patch.object(gui, "anilist_viewer", return_value=self.VIEWER), \
+             patch.object(gui, "anilist_write_entry", side_effect=outcomes):
+            body, _ = self.post("/api/anilist-undo", {
+                "token": "t", "confirm": True, "snapshot": name})
+        done = self.events(body)[-1]
+        self.assertEqual((done["restored"], done["failed_count"]), (1, 1))
+
+    def test_the_failed_rows_can_be_retried_without_rebuilding_them(self):
+        with patch.object(gui, "anilist_viewer", return_value=self.VIEWER), \
+             patch.object(gui, "anilist_existing_entries", return_value=self.ACCOUNT), \
+             patch.object(gui, "anilist_write_entry",
+                          return_value={"ok": False, "error": "nope"}):
+            body, _ = self.post("/api/anilist-write", {
+                "token": "t", "confirm": True, "media_type": "manga",
+                "entries": [dict(self.ROW)]})
+        done = self.events(body)[-1]
+        self.assertEqual(done["failed_count"], 1)
+        run_id = done["run_id"]
+
+        sent = []
+        with patch.object(gui, "anilist_viewer", return_value=self.VIEWER), \
+             patch.object(gui, "anilist_existing_entries") as reader, \
+             patch.object(gui, "anilist_write_entry",
+                          side_effect=lambda token, p: sent.append(p) or {"ok": True, "id": 999}):
+            retried, code = self.post("/api/anilist-write", {
+                "token": "t", "confirm": True, "retry": True, "run_id": run_id,
+                "media_type": "manga"})
+        self.assertEqual(code, 200)
+        reader.assert_not_called()
+        self.assertEqual(sent[0]["variables"]["progress"], 224)
+        self.assertEqual(self.events(retried)[-1]["updated"], 1)
+
+    def test_retrying_an_unknown_run_is_refused_not_guessed(self):
+        body, code = self.post("/api/anilist-write", {
+            "token": "t", "confirm": True, "retry": True, "run_id": "nope"})
+        self.assertEqual(code, 404)
+
+    def test_the_snapshot_listing_is_served_without_a_token(self):
+        with patch.object(gui, "anilist_viewer", return_value=self.VIEWER), \
+             patch.object(gui, "anilist_existing_entries", return_value=self.ACCOUNT), \
+             patch.object(gui, "anilist_write_entry", return_value={"ok": True, "id": 999}):
+            self.post("/api/anilist-write", {
+                "token": "t", "confirm": True, "media_type": "manga",
+                "entries": [dict(self.ROW)]})
+        with urllib.request.urlopen(self.base + "/api/anilist-snapshots", timeout=20) as res:
+            listed = json.loads(res.read().decode())
+        self.assertTrue(listed["ok"])
+        self.assertEqual(len(listed["snapshots"]), 1)
 
 
 class ResolveOneTests(unittest.TestCase):

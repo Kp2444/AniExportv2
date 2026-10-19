@@ -12,6 +12,15 @@ output/
 # AniList response cache (safe to delete; rebuilt on the next run)
 .anilist_cache.json
 
+# Undo snapshots for direct AniList writes: what the account held before a run.
+# No tokens, but they describe a private list, so they stay local.
+.aniexport_undo_*.json
+
+# Local secrets. An AniList token is valid for a year and cannot be refreshed,
+# so it must never reach a commit.
+.env
+.env.*
+
 # Local lists (manga.txt is tracked on purpose: the README's CLI example uses it)
 notes.txt
 animes.txt

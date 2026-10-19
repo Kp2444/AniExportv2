@@ -183,6 +183,46 @@ Vinland Saga `30642` (224 / 29). Read back with a **fuller query than the repo's
 | M6 | Create Vinland Saga with `comments`, `start_date: 2024-03-01`, `finish_date: 0000-00-00` | `notes='live test note'`, `startedAt=2024-3-1`, `completedAt` unset. **`notes` and dates all work, and `0000-00-00` is correctly skipped** by `_fuzzy_date` (`:1367-1376`) |
 | M7 | Did AniList invent a `startedAt`? | Yes on M1, where none was sent; no on M6, where one was. So AniList stamps a start date itself when the entry becomes `CURRENT` without one — an account setting, not this tool's write. It matters for undo: restoring "no start date" may not be possible |
 
+#### Phase 1 itself, verified after it shipped — 2026-10-19
+
+Same throwaway account (`Razed2Ground`), through the running server's own endpoints. §12 steps
+2–5. Account state was read before and after every step with a **fuller query than the code under
+test uses**, so the verification is not limited to the fields the implementation happens to fetch.
+
+| # | Step | Result |
+|---|---|---|
+| P1 | 3-row write with deliberate conflicts: progress 40 vs 147, volumes 4 vs 13, score 0 vs 90, repeat 1 vs 5, `COMPLETED` → `Reading`, `COMPLETED` → `Plan to read` | **8 fields blocked across 3 rows**, every one named in the preview first with the exact value it would keep. Account did not move. Two blocks were ones the plan never listed: the `Plan to read` row would have zeroed 249 chapters *and* 22 volumes — M3's catastrophe on a second row |
+| P2 | `CURRENT` → `REPEATING` on the same write | **Allowed and applied.** The `COMPLETED` carve-out (D1) does not over-block |
+| P3 | Override: "keep mine" on progress and volumes | Policy block cleared, payload sent 40 — see P5 for what the account then did |
+| P4 | Override the status off `COMPLETED`, leaving the date | Finish date **stranded** exactly as defect 7 describes: `CURRENT` *and* finished 2026-10-19. The preview flagged `stale_completed_at` beforehand |
+| P5 | **Does an all-`null` `FuzzyDateInput` clear a date?** | **Yes — the date cleared.** This was the last open question in Phase 1 and it is now measured, not assumed |
+| P6 | Undo the write that cleared the date | Date **restored**. The field D2 would have lost, put back |
+| P7 | Undo a 3-row write | All three rows restored field for field against the snapshot's own `prior` — status, progress, volumes, score, repeat, notes, both dates |
+| P8 | Snapshot retention | The step-2 snapshot was **gone** when step 4 asked for it: six writes had happened and five are kept. Pruning works, and undo 404s cleanly instead of guessing |
+| P9 | Create + undo, box unticked | 1 create + 1 update; `created_entry_id` **604614624** recorded in the snapshot as the write ran (D3). Undo restored the update and **left the created entry alone** |
+| P10 | Same snapshot, box ticked | `DeleteMediaListEntry` removed the created entry. **First live exercise of the delete path** |
+| P11 | A row AniList rejects, mid-write | `"The selected media id is invalid."` reported against that row by name; the other row still wrote. **First live failure path** |
+| P12 | Retry | Re-sent **1 row, not 2**, with no fresh account read. A spent run id is refused with 404 rather than silently re-run |
+| P13 | Undo after a reread write (`COMPLETED` → `REPEATING`) | **Found a defect in Phase 1 itself.** Undo restored `repeat` as 5, not the prior 4: L8's increment beats the value sent alongside the status. A second write carrying only `repeat` does stick, so `iter_undo_payloads` now emits one for a row that has a reread count to lose. Re-run end to end: `repeat` restored exactly |
+| P14 | Two rows resolving to one AniList entry | **Found a second defect.** Both were written, the later over the earlier, and the snapshot held two rows for one entry with one recorded id. `iter_write_payloads` now keeps the first and skips the rest with a reason. Verified: 1 row attempted, not 2 |
+
+#### What P1–P12 found that no code reading had
+
+Three AniList-side behaviours, each measured by direct probes that bypass this tool entirely. They
+matter because they make the confirm step lie if it ignores them:
+
+| # | Behaviour | Evidence |
+|---|---|---|
+| L7 | **While `status` is `COMPLETED`, AniList forces `progress` and `progressVolumes` to the media total** — when a lower value is sent explicitly, *and* when none is sent at all | Sent `COMPLETED` + `progress: 40` against a 147-chapter work → stored **147**. Separately, an entry sitting at `CURRENT, 40` sent only `status: COMPLETED` → stored **147**. `CURRENT` + `progress: 40` stores 40, so it is the status that does it |
+| L8 | **`REPEATING` → `COMPLETED` increments `repeat` by one**, whatever is sent | Sent `repeat: 5` on that transition → stored **6**. Sent no `repeat` at all → also **6**. This is also why the test baseline came back `repeat: 2` after being set to 3 |
+| L9 | A transition **to** `REPEATING` zeroes `progress` **only when no progress is sent** | `COMPLETED` → `REPEATING` with `progress: 100` → kept **100**; the same transition sending no progress → **0**. Every payload this tool builds sends a progress, so this one does not bite here |
+
+L7 and L8 are now folded into the diff by `_anilist_side_effects`, and `applied` means **what the
+account will hold**, not merely what gets sent. Without that, P3 would have promised "progress →
+40" while the account kept 147 — a confirm step that lies, which is the exact failure Phase 1
+exists to remove. L9 is recorded and deliberately **not** acted on, because it cannot reach this
+write path.
+
 Phase 1's conflict guard therefore has to cover the manga path specifically: `progressVolumes`
 needs the same never-lower rule as `progress`, and `repeat` needs it too.
 
@@ -218,6 +258,30 @@ every one of them would have produced broken code.
 ---
 
 ## 3. Phase 1 — Make the write safe
+
+> [!NOTE]
+> **Shipped and verified live 2026-10-19.** All six steps, together, because they are one feature.
+> 209 tests pass (140 before), plus a node suite of 57 assertions on the diff renderer, and
+> **§12's live steps 2–6 all passed against the throwaway account** — see §2.3, P1–P12. What
+> landed is recorded in `MANGA_SUPPORT_NOTES.md` under "Write safety"; defects 1, 3, 4, 7 and 8
+> are closed.
+>
+> Two deviations from the plan below, both deliberate:
+> - **Step 1 raises rather than returning `(entries, error)`.** `AniListReadError` keeps
+>   `anilist_existing_entries`' signature, so the existing callers and their tests were untouched.
+> - **Step 3 puts `diff` on each payload** rather than adding a third return value, for the same
+>   reason: `iter_write_payloads` still returns `(payloads, skipped)`.
+>
+> Three things the live run forced, none of them in the plan. The third is the argument for
+> running these steps at all: two were defects in Phase 1 as shipped, found only by exercising it
+> against a real account (§2.3, P13/P14) — undo could not restore `repeat` after a reread, and two
+> rows resolving to one entry were both written.
+>
+> `_anilist_side_effects` is the first:
+> AniList edits `progress` and `repeat` itself on certain status transitions (L7, L8), so a diff
+> that reported only what the payload says would have promised changes the API discards. `applied`
+> therefore means *what the account will hold*, and `by_anilist` marks the fields that are not
+> this tool's doing. Found by the override test (P3) failing against a real account.
 
 Closes §1.1. GUI-only: the CLI has no write path. No new API requests — Step 0 adds fields to a
 query that is already being issued.
@@ -318,7 +382,8 @@ rule. The diff shows it as blocked, and the per-row override is the escape hatch
 
 - `from` — the account's value, `None` on a create.
 - `to` — what the row asked for.
-- `applied` — what will actually be sent, after the policy.
+- `applied` — **what the account will hold** after the write. That is what the policy sends, except
+  where AniList overrides it on a status change (L7–L8), which `by_anilist: true` marks.
 - `blocked` — `True` when `applied != to` because of the policy.
 - Fields whose `from` equals `to` are **omitted**; a payload with an empty `diff` is a no-op row.
 
@@ -672,6 +737,7 @@ loss, so it goes first on merit, not dependency.
 
 | # | Question | How it gets settled |
 |---|---|---|
+| ~~O5~~ | ~~Does AniList honour an all-`null` `FuzzyDateInput` as "clear this date"?~~ | **Settled: yes.** Measured — §2.3, P5. It is how the stale finish date is cleared |
 | ~~O1~~ | ~~Does a document of aliased mutations cost 1 request or N against the rate limit?~~ | **Settled: 1 request.** Measured at 2 aliases — §2.3, L5. Re-confirm at 8 before raising the batch size |
 | O2 | What is `perChunk`'s maximum on `MediaListCollection`? | Start at 500, halve on error — self-correcting, so it needs no answer up front |
 | O3 | Where should `REVIEW_RATIO_FLOOR` sit? | Calibration run described in §6.1, against the real 339-title list |
@@ -699,24 +765,31 @@ loss, so it goes first on merit, not dependency.
 
 ## 12. Verification
 
-- `python -m unittest discover -s tests -t .` — **132 pass today.** Every item above lands with
-  tests; the conflict policy is table-driven, one case per rule per §3 "Phase 1 tests".
-- jsdom suites in the scratchpad for the diff modal, the Needs-review chip and the bulk-edit
-  scoping, run like the existing 15 (295 assertions today).
-- Chrome screenshots at 1440 and 430 plus the width probe. The diff modal is the largest piece of
-  UI added since the narrow breakpoint landed, and it is a scrolling list inside a dialog — exactly
-  the shape that broke at 430px last time.
+- `python -m unittest discover -s tests -t .` — **203 pass today** (132 when this plan was
+  written, 140 after the skip list and match picker). Every item above lands with tests; the
+  conflict policy is table-driven, one case per rule per §3 "Phase 1 tests".
+- jsdom suites in the scratchpad for the diff modal (**done** — 57 assertions, 16 suites and 352
+  assertions in total), the Needs-review chip and the bulk-edit scoping.
+- Chrome screenshots at 1440 and 430 plus the width probe. **Not done for the diff modal** — the
+  Chrome extension would not connect (2026-10-19). The modal follows `fixModal`'s proven shape (a
+  `max-height` scroll box inside `.modal-card`, which caps at `min(900px, 100%)`), every diff line
+  wraps, and `overflow-wrap: anywhere` guards the one unbreakable value a diff can hold, a 60-char
+  note. That is reasoning, not a measurement, and the screenshots are still owed.
 - **Live, on the throwaway account, in this order.** Steps 1 and 2's baseline are **done** — see
   §2.3. The remaining steps all test behaviour Phase 1 has yet to build:
   1. ~~**Spike (O1).** Two aliased mutations; read `X-RateLimit-Remaining` either side; read both
      entries back to confirm both applied.~~ **Done — §2.3, L5/L6. Costs 1 request; both applied.**
      Still to do once `_write_batch_query` exists: re-read the header on a full 8-alias document.
-  2. **Guard.** A 3-row write with deliberate conflicts — one row's progress below the account's,
-     one row's score `0` against a real score, one `COMPLETED` row set to `Plan to read`. Confirm
-     the preview predicted exactly what happened and the account did not go backwards.
-  3. **Override.** Repeat row 1 with "keep mine" ticked; confirm the downgrade is written.
-  4. **Undo.** Confirm the account returns to its prior state including `notes` and dates — the
-     fields D2 would have lost.
-  5. **Create + undo.** A write that creates one entry, then undo with `delete_created` ticked, then
-     a second create undone with it unticked, to confirm both paths and that `created_entry_id` was
-     recorded (D3).
+  2. ~~**Guard.** A 3-row write with deliberate conflicts.~~ **Done — §2.3, P1/P2.** 8 fields
+     blocked across 3 rows, every one predicted by the preview first.
+  3. ~~**Override.** "Keep mine" on a downgrade.~~ **Done — §2.3, P3/P5.** The override works; it
+     also found L7, which the diff now reports.
+  4. ~~**Undo.**~~ **Done — §2.3, P6/P7.** Including a cleared date put back, and retention
+     pruning verified by a real prune (P8).
+  5. ~~**Create + undo, both ways.**~~ **Done — §2.3, P9/P10.** `created_entry_id` recorded as the
+     write ran, and the delete path exercised for the first time.
+  6. ~~**Failure and retry.**~~ **Done — §2.3, P11/P12.** Not in the original list; added because
+     Phase 1 Step 5 had never seen a real failure.
+
+  Still unexercised live: **cancellation mid-write**, and a write large enough to need more than
+  one 50-id existing-entries chunk.

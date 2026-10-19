@@ -23,11 +23,21 @@ from datetime import datetime
 # Import core normalization and generation logic
 from generate_mal_xml import (
     MIN_REQUEST_INTERVAL,
+    AniListReadError,
+    anilist_delete_entry,
     anilist_existing_entries,
     anilist_viewer,
     anilist_write_entry,
     backfill_anilist_ids,
+    build_undo_snapshot,
+    DIFF_FIELDS,
+    iter_undo_payloads,
     iter_write_payloads,
+    list_undo_snapshots,
+    load_undo_snapshot,
+    prune_undo_snapshots,
+    record_created_entry,
+    save_undo_snapshot,
     resolve_one,
     _normalize_status,
     current_interval,
@@ -63,8 +73,73 @@ _run_lock = threading.Lock()
 _active_runs: Dict[str, Dict[str, threading.Event]] = {}
 _runs_guard = threading.Lock()
 
+# The payloads of the rows that failed in the most recent write, so "retry
+# failed" can re-send exactly those. One run's worth only: a new run replaces
+# it, so nothing accumulates. The token is never part of it - a retry needs one
+# re-supplied, exactly like the write.
+_last_failures: Dict[str, Any] = {"run_id": None, "payloads": [], "snapshot": None}
+_failures_guard = threading.Lock()
+
+
+def _remember_failures(run_id: str, payloads: List[Dict[str, Any]],
+                       snapshot: Optional[str]) -> None:
+    with _failures_guard:
+        _last_failures.update({"run_id": run_id, "payloads": payloads, "snapshot": snapshot})
+
+
+def _take_failures(run_id: str) -> Optional[Dict[str, Any]]:
+    """The stored payloads for one run id, cleared as they are handed out.
+
+    The run's snapshot name travels with them so a retry keeps appending to the
+    snapshot the original run wrote, rather than starting a second one that
+    knows nothing about the prior state.
+    """
+    with _failures_guard:
+        if not run_id or _last_failures.get("run_id") != run_id or not _last_failures.get("payloads"):
+            return None
+        return {"payloads": _last_failures["payloads"], "snapshot": _last_failures.get("snapshot")}
+
+
 MAX_PREVIEW_BYTES = 5 * 1024 * 1024
 ARCHIVE_NAME_CHARS = set("abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_.")
+
+
+def _read_failure_message(exc: Exception) -> str:
+    """Why the preview refuses rather than guessing."""
+    return ("Could not read your existing AniList list, so this write was not attempted: "
+            f"{exc}. Writing without it would add second copies of entries you already have.")
+
+
+def _write_policy(data: Dict[str, Any]) -> str:
+    """Only an explicit "overwrite" weakens the guard; anything else is safe."""
+    return "overwrite" if data.get("policy") == "overwrite" else "safe"
+
+
+def _row_overrides(data: Dict[str, Any]) -> Dict[Any, Dict[str, str]]:
+    """{anilist_id: {field: "mine"|"clear"}}, as the confirm modal sends it.
+
+    Filtered rather than trusted: this arrives over HTTP and decides whether a
+    guard applies, so only the known fields and known actions get through.
+    """
+    raw = data.get("overrides")
+    if not isinstance(raw, dict):
+        return {}
+    allowed = {name for name, _ in DIFF_FIELDS}
+    out: Dict[Any, Dict[str, str]] = {}
+    for key, fields in raw.items():
+        if not isinstance(fields, dict):
+            continue
+        try:
+            media_id = int(key)
+        except (TypeError, ValueError):
+            continue
+        # "clear" only means something for completedAt; anywhere else it would
+        # be a silent no-op, so it is dropped rather than accepted.
+        picked = {f: v for f, v in fields.items()
+                  if f in allowed and (v == "mine" or (v == "clear" and f == "completedAt"))}
+        if picked:
+            out[media_id] = picked
+    return out
 
 
 def _register_run() -> tuple:
@@ -857,6 +932,9 @@ HTML_TEMPLATE = """<!DOCTYPE html>
       .fix-result { gap: 0.625rem; padding: 0.625rem; }
       .fix-result .cover-thumb { width: 52px; height: 73px; }
       .fix-search { flex-wrap: wrap; }
+      .write-card { padding: 0.875rem; }
+      .diff-list { max-height: 50vh; padding: 0.375rem; }
+      .diff-field { min-width: 0; font-weight: 600; }
       .fix-search input { flex: 1 1 100%; }
       .modal-head { flex-wrap: wrap; }
       .toolbar-end {
@@ -1224,6 +1302,72 @@ HTML_TEMPLATE = """<!DOCTYPE html>
     }
     .write-plan strong { color: var(--text); }
     .write-plan .warn { color: var(--warning); }
+
+
+    .diff-list {
+      display: flex;
+      flex-direction: column;
+      gap: 0.5rem;
+      max-height: 46vh;
+      overflow-y: auto;
+      padding: 0.5rem;
+      border: 1px solid var(--border);
+      border-radius: var(--radius-lg);
+      background: var(--table-tint);
+    }
+    .diff-row {
+      display: flex;
+      flex-direction: column;
+      gap: 0.25rem;
+      padding: 0.5rem 0.625rem;
+      border-radius: var(--radius-md);
+      background: var(--surface-2);
+    }
+    .diff-head {
+      display: flex;
+      align-items: center;
+      gap: 0.5rem;
+      overflow-wrap: anywhere;
+      font-size: var(--font-sm);
+      color: var(--text);
+      font-weight: 600;
+    }
+    .diff-tag {
+      font-size: var(--font-xs);
+      font-weight: 500;
+      color: var(--text-muted);
+      border: 1px solid var(--border);
+      border-radius: 999px;
+      padding: 0 0.4rem;
+    }
+    .diff-line {
+      display: flex;
+      align-items: center;
+      flex-wrap: wrap;
+      gap: 0.375rem;
+      font-size: var(--font-xs);
+      line-height: 1.5;
+      /* A note read back from AniList can be 60 unbroken characters. */
+      overflow-wrap: anywhere;
+    }
+    .diff-field {
+      min-width: 5.5rem;
+      color: var(--text-muted);
+    }
+    .diff-from { color: var(--text-muted); }
+    .diff-to { color: var(--text); font-variant-numeric: tabular-nums; }
+    .diff-arrow { color: var(--text-muted); }
+    .diff-note { color: var(--text-muted); }
+    .diff-note.warn { color: var(--warning); }
+    .diff-line.blocked .diff-to { color: var(--warning); }
+    .diff-pick {
+      display: inline-flex;
+      align-items: center;
+      gap: 0.3rem;
+      cursor: pointer;
+      color: var(--text-muted);
+    }
+    .diff-pick input { cursor: pointer; }
 
     .fix-counter {
       font-size: var(--font-sm);
@@ -2221,6 +2365,10 @@ HTML_TEMPLATE = """<!DOCTYPE html>
         </div>
         <div class="export-buttons">
           <button id="btnWrite" class="btn btn-primary" title="Write the selected rows to your AniList account">Write to AniList...</button>
+          <button id="btnUndo" class="btn btn-secondary" style="display:none;"
+                  title="Put your AniList account back the way it was before the last write">Undo last write...</button>
+          <button id="btnRetry" class="btn btn-secondary" style="display:none;"
+                  title="Send the rows that failed again">Retry failed</button>
           <button id="btnPreview" class="btn btn-secondary" title="Show the generated XML">Preview XML</button>
           <a id="btnDownloadXml" href="/api/download/xml" class="btn btn-secondary disabled" aria-disabled="true" download="myanimelist_export.xml">
             <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
@@ -2312,7 +2460,7 @@ HTML_TEMPLATE = """<!DOCTYPE html>
 
       <div id="writeModal" class="modal-backdrop" role="dialog" aria-modal="true"
            aria-labelledby="writeModalTitle">
-        <div class="modal-card" style="max-width:560px;">
+        <div class="modal-card write-card">
           <div class="modal-head">
             <strong id="writeModalTitle">Write to AniList</strong>
             <span style="flex:1;"></span>
@@ -2320,6 +2468,19 @@ HTML_TEMPLATE = """<!DOCTYPE html>
             <button id="btnWriteConfirm" class="btn btn-primary">Write now</button>
           </div>
           <div id="writePlan" class="write-plan"></div>
+        </div>
+      </div>
+
+      <div id="undoModal" class="modal-backdrop" role="dialog" aria-modal="true"
+           aria-labelledby="undoModalTitle">
+        <div class="modal-card write-card">
+          <div class="modal-head">
+            <strong id="undoModalTitle">Undo the last AniList write</strong>
+            <span style="flex:1;"></span>
+            <button id="btnUndoCancel" class="btn btn-secondary">Cancel</button>
+            <button id="btnUndoConfirm" class="btn btn-primary">Undo now</button>
+          </div>
+          <div id="undoPlan" class="write-plan"></div>
         </div>
       </div>
 
@@ -2472,6 +2633,12 @@ HTML_TEMPLATE = """<!DOCTYPE html>
     const writePlan = document.getElementById('writePlan');
     const btnWriteConfirm = document.getElementById('btnWriteConfirm');
     const btnWriteCancel = document.getElementById('btnWriteCancel');
+    const undoModal = document.getElementById('undoModal');
+    const undoPlan = document.getElementById('undoPlan');
+    const btnUndo = document.getElementById('btnUndo');
+    const btnRetry = document.getElementById('btnRetry');
+    const btnUndoConfirm = document.getElementById('btnUndoConfirm');
+    const btnUndoCancel = document.getElementById('btnUndoCancel');
     const importFile = document.getElementById('importFile');
     const destinationSelect = document.getElementById('destination');
     const destinationPrompt = document.getElementById('destinationPrompt');
@@ -3074,6 +3241,7 @@ HTML_TEMPLATE = """<!DOCTYPE html>
       destinationField.style.display = destination === '' ? 'none' : '';
       anilistPanel.classList.toggle('show', destination === 'anilist');
       btnWrite.style.display = destination === 'anilist' ? '' : 'none';
+      updateWriteAftermath();
       // Naming the file format while the user is sending rows to an account
       // is the kind of small lie that makes people distrust the rest.
       const action = destination === 'anilist' ? 'Resolve titles' : 'Normalize & Generate XML';
@@ -4036,6 +4204,193 @@ HTML_TEMPLATE = """<!DOCTYPE html>
       return currentAnimes.filter(i => i.enabled !== false && canWrite(i));
     }
 
+    // What the server said the last preview would change, and the per-row
+    // per-field escape hatches the user ticked against it.
+    let lastWritePlan = null;
+    let writeOverrides = {};
+    let lastWriteSnapshot = null;
+    let lastWriteRunId = null;
+    let lastWriteFailed = 0;
+    let lastWriteCreated = 0;
+
+    const AL_STATUS_LABELS = {
+      CURRENT: { anime: 'Watching', manga: 'Reading' },
+      PLANNING: { anime: 'Plan to watch', manga: 'Plan to read' },
+      COMPLETED: { anime: 'Completed', manga: 'Completed' },
+      DROPPED: { anime: 'Dropped', manga: 'Dropped' },
+      PAUSED: { anime: 'On hold', manga: 'On hold' },
+      REPEATING: { anime: 'Rewatching', manga: 'Rereading' },
+    };
+
+    function diffFieldLabel(field) {
+      const manga = mediaType() === 'manga';
+      if (field === 'progress') return manga ? 'chapters' : 'episodes';
+      if (field === 'progressVolumes') return 'volumes';
+      if (field === 'scoreRaw') return 'score';
+      if (field === 'repeat') return manga ? 'rereads' : 'rewatches';
+      if (field === 'startedAt') return 'start date';
+      if (field === 'completedAt') return 'finish date';
+      return field;
+    }
+
+    function diffValueText(field, value) {
+      if (value === null || value === undefined || value === '') return 'none';
+      if (field === 'status') {
+        const row = AL_STATUS_LABELS[value];
+        return row ? row[mediaType() === 'manga' ? 'manga' : 'anime'] : String(value);
+      }
+      // The server asks AniList for POINT_100 on both sides of the comparison,
+      // so the scale is stated rather than left to look like a 1-10 score.
+      if (field === 'scoreRaw') return Number(value) ? Number(value) + '/100' : 'none';
+      if (field === 'startedAt' || field === 'completedAt') {
+        if (!value.year) return 'none';
+        const parts = [String(value.year)];
+        if (value.month) parts.push(String(value.month).padStart(2, '0'));
+        if (value.month && value.day) parts.push(String(value.day).padStart(2, '0'));
+        return parts.join('-');
+      }
+      if (field === 'notes') {
+        const text = String(value);
+        return text.length > 60 ? text.slice(0, 60) + '...' : text;
+      }
+      return String(Number(value) || 0);
+    }
+
+    function writeOverrideFor(id, field) {
+      const row = writeOverrides[id];
+      return row ? row[field] : undefined;
+    }
+
+    function setWriteOverride(id, field, value) {
+      if (!writeOverrides[id]) writeOverrides[id] = {};
+      if (value) writeOverrides[id][field] = value;
+      else delete writeOverrides[id][field];
+      if (!Object.keys(writeOverrides[id]).length) delete writeOverrides[id];
+    }
+
+    function pickBoxHtml(id, field, action, label, on) {
+      return '<label class="diff-pick"><input type="checkbox" data-write-override="' + action
+        + '" data-id="' + id + '" data-field="' + escapeHtml(field) + '"'
+        + (on ? ' checked' : '') + '> ' + escapeHtml(label) + '</label>';
+    }
+
+    function diffLineHtml(row, d) {
+      const forced = writeOverrideFor(row.anilist_id, d.field) === 'mine';
+      // `applied` is what the account will hold, which is not always what gets
+      // sent: AniList overrides some fields on a status change by itself.
+      const sent = (d.by_anilist || (d.blocked && !forced)) ? d.applied : d.to;
+      const bits = [
+        '<span class="diff-field">' + escapeHtml(diffFieldLabel(d.field)) + '</span>',
+        '<span class="diff-from">' + escapeHtml(diffValueText(d.field, d.from)) + '</span>',
+        '<span class="diff-arrow">-&gt;</span>',
+        '<span class="diff-to">' + escapeHtml(diffValueText(d.field, sent)) + '</span>',
+      ];
+      if (d.blocked) {
+        bits.push(forced
+          ? '<span class="diff-note warn">forced: your ' + escapeHtml(diffValueText(d.field, d.to))
+            + ' will overwrite it</span>'
+          : '<span class="diff-note">your ' + escapeHtml(diffValueText(d.field, d.to))
+            + ' would go backwards, so AniList keeps what it has</span>');
+        bits.push(pickBoxHtml(row.anilist_id, d.field, 'mine', 'keep mine', forced));
+      }
+      if (d.by_anilist) {
+        bits.push('<span class="diff-note warn">AniList sets this itself on this status change,'
+          + ' whatever is sent</span>');
+      }
+      return '<div class="diff-line' + (d.blocked ? ' blocked' : '') + '">' + bits.join('') + '</div>';
+    }
+
+    function staleDateLineHtml(row) {
+      const clearing = writeOverrideFor(row.anilist_id, 'completedAt') === 'clear';
+      return '<div class="diff-line blocked">'
+        + '<span class="diff-field">' + escapeHtml(diffFieldLabel('completedAt')) + '</span>'
+        + '<span class="diff-note warn">' + (clearing
+            ? 'will be cleared, so the entry is no longer both in progress and finished'
+            : 'this row stops being completed but keeps its finish date on AniList')
+        + '</span>'
+        + pickBoxHtml(row.anilist_id, 'completedAt', 'clear', 'clear the finish date', clearing)
+        + '</div>';
+    }
+
+    function writeRowHtml(row) {
+      const lines = (row.diff || []).map(d => diffLineHtml(row, d));
+      if (row.stale_completed_at) lines.push(staleDateLineHtml(row));
+      return '<div class="diff-row"><div class="diff-head">' + escapeHtml(row.title)
+        + '<span class="diff-tag">' + (row.update ? 'update' : 'new') + '</span></div>'
+        + lines.join('') + '</div>';
+    }
+
+    function renderWritePlan(plan) {
+      const changing = (plan.rows || []).filter(r => (r.diff || []).length || r.stale_completed_at);
+      const open = writePlan.querySelector('.diff-list');
+      const keepTop = open ? open.scrollTop : 0;
+      const skippedNote = plan.skipped.length
+        ? `<div>${plan.skipped.length} row${plan.skipped.length === 1 ? '' : 's'} will be skipped: ${escapeHtml(plan.skipped.slice(0, 3).map(sk => sk.title).join(', '))}${plan.skipped.length > 3 ? '...' : ''}</div>`
+        : '';
+      const unchangedNote = plan.unchanged
+        ? `<div>${plan.unchanged} already match your account and will not be touched.</div>`
+        : '';
+      const conflictNote = plan.conflicts
+        ? `<div class="warn">${plan.conflicts} row${plan.conflicts === 1 ? '' : 's'} would send a value backwards. Those fields keep what AniList has unless you tick "keep mine".</div>`
+        : '';
+      const list = changing.length
+        ? '<div class="diff-list">' + changing.map(writeRowHtml).join('') + '</div>'
+        : '<div>Nothing on your account changes.</div>';
+      writePlan.innerHTML = `
+        <div>Account: <strong>${escapeHtml(plan.viewer)}</strong></div>
+        <div><strong>${plan.creates}</strong> ${plan.creates === 1 ? 'entry' : 'entries'} will be added,
+             <strong>${plan.updates}</strong> already on your list will be updated.</div>
+        ${skippedNote}${unchangedNote}${conflictNote}
+        ${list}
+        <div class="warn">This modifies your AniList account. Entries already on your list are
+          updated in place, never duplicated, and the state before this write is saved so it
+          can be undone.</div>`;
+      const again = writePlan.querySelector('.diff-list');
+      if (again) again.scrollTop = keepTop;
+    }
+
+    writePlan.addEventListener('change', (e) => {
+      const box = e.target && e.target.closest ? e.target.closest('input[data-write-override]') : null;
+      if (!box) return;
+      setWriteOverride(box.dataset.id, box.dataset.field,
+                       box.checked ? box.dataset.writeOverride : null);
+      if (lastWritePlan) renderWritePlan(lastWritePlan);
+    });
+
+    function updateWriteAftermath() {
+      const live = destination === 'anilist';
+      btnUndo.style.display = (live && lastWriteSnapshot) ? '' : 'none';
+      btnRetry.style.display = (live && lastWriteFailed > 0 && lastWriteRunId) ? '' : 'none';
+      btnRetry.textContent = 'Retry ' + lastWriteFailed + ' failed';
+    }
+
+    // One reader for both streams. Returning false from the handler stops it.
+    async function streamSse(res, onEvent) {
+      const reader = res.body.getReader();
+      const decoder = new TextDecoder('utf-8');
+      let buffer = '';
+      let done = false;
+      while (!done) {
+        const chunk = await reader.read();
+        if (chunk.done) break;
+        buffer += decoder.decode(chunk.value, { stream: true });
+        const parts = buffer.split(String.fromCharCode(10) + String.fromCharCode(10));
+        buffer = parts.pop();
+        for (const part of parts) {
+          const trimmed = part.trim();
+          if (!trimmed.startsWith('data: ')) continue;
+          let event;
+          try {
+            event = JSON.parse(trimmed.slice(6));
+          } catch (errParse) {
+            continue;
+          }
+          if (onEvent(event) === false) { done = true; break; }
+        }
+      }
+      try { reader.cancel(); } catch (e) {}
+    }
+
     function stripForServer(item) {
       const { candidates, ...rest } = item;
       return rest;
@@ -4084,6 +4439,8 @@ HTML_TEMPLATE = """<!DOCTYPE html>
         return;
       }
       writePlan.innerHTML = 'Checking your AniList list...';
+      lastWritePlan = null;
+      writeOverrides = {};
       showModal(writeModal);
       try {
         const res = await fetch('/api/anilist-preview', {
@@ -4102,16 +4459,8 @@ HTML_TEMPLATE = """<!DOCTYPE html>
           writePlan.innerHTML = escapeHtml(plan.error || 'Could not read your AniList list.');
           return;
         }
-        const skippedNote = plan.skipped.length
-          ? `<div>${plan.skipped.length} row${plan.skipped.length === 1 ? '' : 's'} will be skipped: ${escapeHtml(plan.skipped.slice(0, 3).map(sk => sk.title).join(', '))}${plan.skipped.length > 3 ? '...' : ''}</div>`
-          : '';
-        writePlan.innerHTML = `
-          <div>Account: <strong>${escapeHtml(plan.viewer)}</strong></div>
-          <div><strong>${plan.creates}</strong> ${plan.creates === 1 ? 'entry' : 'entries'} will be added,
-               <strong>${plan.updates}</strong> already on your list will be updated.</div>
-          ${skippedNote}
-          <div class="warn">This modifies your AniList account. Entries already on your list are
-            updated in place, never duplicated.</div>`;
+        lastWritePlan = plan;
+        renderWritePlan(plan);
       } catch (e) {
         writePlan.innerHTML = 'Could not reach the local server.';
       }
@@ -4127,81 +4476,194 @@ HTML_TEMPLATE = """<!DOCTYPE html>
       const rows = writableRows();
       if (!token || !rows.length) return;
       hideModal(writeModal);
+      await runWrite({
+        token: token,
+        confirm: true,
+        media_type: mediaType(),
+        status: selectStatus.value,
+        score: parseInt(inputScore.value, 10) || 0,
+        overrides: writeOverrides,
+        entries: rows.map(stripForServer),
+      }, 'Writing to AniList...');
+    });
+
+    btnRetry.addEventListener('click', async () => {
+      const token = anilistToken.value.trim();
+      if (!token) {
+        showToast('Paste and check an AniList token first', 'warning');
+        return;
+      }
+      if (!lastWriteRunId || !lastWriteFailed) return;
+      await runWrite({
+        token: token,
+        confirm: true,
+        retry: true,
+        run_id: lastWriteRunId,
+        media_type: mediaType(),
+      }, 'Retrying the rows that failed...');
+    });
+
+    async function runWrite(body, label) {
       isProcessing = true;
       btnWrite.disabled = true;
+      btnUndo.disabled = true;
+      btnRetry.disabled = true;
       progressCard.style.display = 'flex';
       progressBarFill.style.transform = 'scaleX(0)';
-      progressCurrentTitle.textContent = 'Writing to AniList...';
+      progressCurrentTitle.textContent = label;
       progressCurrentSub.textContent = '';
       try {
         const res = await fetch('/api/anilist-write', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({
-            token: token,
-            confirm: true,
-            media_type: mediaType(),
-            status: selectStatus.value,
-            score: parseInt(inputScore.value, 10) || 0,
-            entries: rows.map(stripForServer),
-          }),
+          body: JSON.stringify(body),
         });
         if (!res.ok) {
           const err = await res.json().catch(() => ({}));
           showToast(err.error || 'The write could not start', 'error');
           return;
         }
-        const reader = res.body.getReader();
-        const decoder = new TextDecoder('utf-8');
-        let buffer = '';
-        let done = false;
-        while (!done) {
-          const chunk = await reader.read();
-          if (chunk.done) break;
-          buffer += decoder.decode(chunk.value, { stream: true });
-          const parts = buffer.split(String.fromCharCode(10) + String.fromCharCode(10));
-          buffer = parts.pop();
-          for (const part of parts) {
-            const trimmed = part.trim();
-            if (!trimmed.startsWith('data: ')) continue;
-            let event;
-            try {
-              event = JSON.parse(trimmed.slice(6));
-            } catch (errParse) {
-              continue;
+        await streamSse(res, (event) => {
+          if (event.type === 'write_progress') {
+            progressBarFill.style.transform = 'scaleX(' + Math.min(1, event.percent / 100) + ')';
+            progressCountLabel.textContent = event.current + ' / ' + event.total;
+            progressPercentLabel.textContent = Math.round(event.percent) + '%';
+            progressCurrentTitle.textContent = `[${event.current}/${event.total}] ${event.title}`;
+            progressCurrentSub.textContent = event.ok ? 'Saved' : 'Failed';
+          } else if (event.type === 'plan') {
+            if (event.snapshot) lastWriteSnapshot = event.snapshot;
+            progressCurrentSub.textContent = `${event.creates} to add, ${event.updates} to update`;
+          } else if (event.type === 'error') {
+            // The existing-entries read failed, so nothing was sent: writing
+            // blind would duplicate entries the account already has.
+            showToast(event.error || 'AniList could not be read', 'error');
+            return false;
+          } else if (event.type === 'write_complete') {
+            const failedCount = event.failed_count !== undefined
+              ? event.failed_count : (event.failed || []).length;
+            lastWriteRunId = event.run_id || null;
+            lastWriteFailed = failedCount;
+            lastWriteCreated = event.created || 0;
+            if (event.snapshot) lastWriteSnapshot = event.snapshot;
+            updateWriteAftermath();
+            showToast(`AniList updated: ${event.created} added, ${event.updated} updated`
+              + (failedCount ? `, ${failedCount} failed` : ''), failedCount ? 'warning' : 'success');
+            if (failedCount) {
+              unresolvedBar.classList.add('show');
+              unresolvedText.innerHTML = `<strong>${failedCount}</strong> AniList ${failedCount === 1 ? 'write' : 'writes'} failed: `
+                + event.failed.slice(0, 3).map(f => escapeHtml(f.title + ' (' + f.error + ')')).join('; ');
             }
-            if (event.type === 'write_progress') {
-              progressBarFill.style.transform = 'scaleX(' + Math.min(1, event.percent / 100) + ')';
-              progressCountLabel.textContent = event.current + ' / ' + event.total;
-              progressPercentLabel.textContent = Math.round(event.percent) + '%';
-              progressCurrentTitle.textContent = `[${event.current}/${event.total}] ${event.title}`;
-              progressCurrentSub.textContent = event.ok ? 'Saved' : 'Failed';
-            } else if (event.type === 'plan') {
-              progressCurrentSub.textContent = `${event.creates} to add, ${event.updates} to update`;
-            } else if (event.type === 'write_complete') {
-              const failedCount = (event.failed || []).length;
-              showToast(`AniList updated: ${event.created} added, ${event.updated} updated`
-                + (failedCount ? `, ${failedCount} failed` : ''), failedCount ? 'warning' : 'success');
-              if (failedCount) {
-                unresolvedBar.classList.add('show');
-                unresolvedText.innerHTML = `<strong>${failedCount}</strong> AniList ${failedCount === 1 ? 'write' : 'writes'} failed: `
-                  + event.failed.slice(0, 3).map(f => escapeHtml(f.title + ' (' + f.error + ')')).join('; ');
-              }
-              done = true;
-              break;
-            } else if (event.type === 'cancelled') {
-              showToast('Write cancelled after ' + event.written + ' entries', 'warning');
-              done = true;
-              break;
-            }
+            return false;
+          } else if (event.type === 'cancelled') {
+            if (event.snapshot) lastWriteSnapshot = event.snapshot;
+            updateWriteAftermath();
+            showToast('Write cancelled after ' + event.written + ' entries', 'warning');
+            return false;
           }
-        }
-        try { reader.cancel(); } catch (e) {}
+        });
       } catch (e) {
         showToast('Lost contact with the local server', 'error');
       } finally {
         isProcessing = false;
         btnWrite.disabled = false;
+        btnUndo.disabled = false;
+        btnRetry.disabled = false;
+        setTimeout(() => { progressCard.style.display = 'none'; }, 1500);
+      }
+    }
+
+    btnUndoCancel.addEventListener('click', () => hideModal(undoModal));
+    undoModal.addEventListener('click', (e) => {
+      if (e.target === undoModal) hideModal(undoModal);
+    });
+
+    btnUndo.addEventListener('click', () => {
+      if (!lastWriteSnapshot) return;
+      const deleteBox = lastWriteCreated
+        ? `<div class="warn"><label class="diff-pick"><input type="checkbox" id="undoDeleteCreated">
+             also delete the ${lastWriteCreated} ${lastWriteCreated === 1 ? 'entry' : 'entries'} this
+             write created</label> Deleting removes them from your account for good; leaving this
+             unticked keeps them exactly as the write left them.</div>`
+        : '';
+      undoPlan.innerHTML = `
+        <div>Putting your account back the way it was before the last write.</div>
+        <div>Rows that already existed are restored field by field, including notes and dates.</div>
+        ${deleteBox}
+        <div class="warn">AniList stamps a start date itself when an entry becomes in-progress
+          without one, so a row that had no start date before may keep the one AniList added.</div>`;
+      showModal(undoModal);
+    });
+
+    btnUndoConfirm.addEventListener('click', async () => {
+      const token = anilistToken.value.trim();
+      if (!token) {
+        showToast('Paste and check an AniList token first', 'warning');
+        return;
+      }
+      if (!lastWriteSnapshot) return;
+      const deleteBox = document.getElementById('undoDeleteCreated');
+      hideModal(undoModal);
+      isProcessing = true;
+      btnWrite.disabled = true;
+      btnUndo.disabled = true;
+      progressCard.style.display = 'flex';
+      progressBarFill.style.transform = 'scaleX(0)';
+      progressCurrentTitle.textContent = 'Undoing the last write...';
+      progressCurrentSub.textContent = '';
+      try {
+        const res = await fetch('/api/anilist-undo', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            token: token,
+            confirm: true,
+            snapshot: lastWriteSnapshot,
+            delete_created: !!(deleteBox && deleteBox.checked),
+          }),
+        });
+        if (!res.ok) {
+          const err = await res.json().catch(() => ({}));
+          showToast(err.error || 'The undo could not start', 'error');
+          return;
+        }
+        await streamSse(res, (event) => {
+          if (event.type === 'write_progress') {
+            progressBarFill.style.transform = 'scaleX(' + Math.min(1, event.percent / 100) + ')';
+            progressCountLabel.textContent = event.current + ' / ' + event.total;
+            progressPercentLabel.textContent = Math.round(event.percent) + '%';
+            progressCurrentTitle.textContent = `[${event.current}/${event.total}] ${event.title}`;
+            progressCurrentSub.textContent = event.ok ? 'Restored' : 'Failed';
+          } else if (event.type === 'plan') {
+            progressCurrentSub.textContent = `${event.restores} to restore, ${event.deletes} to delete`;
+          } else if (event.type === 'undo_complete') {
+            const notes = [];
+            if (event.failed_count) notes.push(event.failed_count + ' failed');
+            if ((event.unrecoverable || []).length) {
+              notes.push((event.unrecoverable || []).length + ' could not be undone');
+            }
+            showToast(`Undo done: ${event.restored} restored, ${event.deleted} deleted`
+              + (notes.length ? ' (' + notes.join(', ') + ')' : ''),
+              notes.length ? 'warning' : 'success');
+            if (notes.length) {
+              unresolvedBar.classList.add('show');
+              unresolvedText.innerHTML = '<strong>Undo was partial.</strong> '
+                + (event.failed || []).slice(0, 3)
+                    .map(f => escapeHtml(f.title + ' (' + f.error + ')')).join('; ')
+                + (event.unrecoverable || []).slice(0, 3)
+                    .map(u => escapeHtml(' ' + u.title + ' (' + u.reason + ')')).join('; ');
+            }
+            return false;
+          } else if (event.type === 'cancelled') {
+            showToast('Undo cancelled after ' + event.written + ' rows', 'warning');
+            return false;
+          }
+        });
+      } catch (e) {
+        showToast('Lost contact with the local server', 'error');
+      } finally {
+        isProcessing = false;
+        btnWrite.disabled = false;
+        btnUndo.disabled = false;
         setTimeout(() => { progressCard.style.display = 'none'; }, 1500);
       }
     });
@@ -4347,6 +4809,20 @@ HTML_TEMPLATE = """<!DOCTYPE html>
       e.returnValue = '';
     });
 
+    // A snapshot outlives the page, so the undo stays offered after a reload.
+    (async () => {
+      try {
+        const res = await fetch('/api/anilist-snapshots');
+        const payload = await res.json().catch(() => ({}));
+        const newest = (payload.snapshots || [])[0];
+        if (newest && !lastWriteSnapshot) {
+          lastWriteSnapshot = newest.name;
+          lastWriteCreated = newest.deletable || 0;
+          updateWriteAftermath();
+        }
+      } catch (e) {}
+    })();
+
     // Initial load: restore the previous session, or start clean.
     if (!restoreState()) {
       updateMediaTypeUI(false);
@@ -4429,6 +4905,12 @@ class MalGuiHandler(BaseHTTPRequestHandler):
 
         elif path == "/api/export-state":
             self.send_json(_export_state())
+            return
+
+        elif path == "/api/anilist-snapshots":
+            # What an undo can be run against. Snapshots hold no token, so this
+            # is safe to serve, and reading it survives a page reload.
+            self.send_json({"ok": True, "snapshots": list_undo_snapshots()})
             return
 
         elif path == "/api/preview-xml":
@@ -4702,14 +5184,21 @@ class MalGuiHandler(BaseHTTPRequestHandler):
             # Rows imported from a MAL export carry only a MAL id; without this
             # they can never be written to AniList.
             filled = backfill_anilist_ids(entries, media_type)
-            existing = anilist_existing_entries(
-                token, viewer["id"], media_type,
-                [e.get("anilist_id") for e in entries],
-            )
+            try:
+                existing = anilist_existing_entries(
+                    token, viewer["id"], media_type,
+                    [e.get("anilist_id") for e in entries],
+                )
+            except AniListReadError as exc:
+                # Refusing is correct: without the existing entries these rows
+                # would be written as creates and duplicate what is already there.
+                self.send_json({"ok": False, "error": _read_failure_message(exc)}, status=502)
+                return
             payloads, skipped = iter_write_payloads(
                 entries, media_type, existing,
                 default_status=data.get("status", "Completed"),
                 default_score=int(data.get("score", 0)),
+                policy=_write_policy(data), overrides=_row_overrides(data),
             )
             self.send_json({
                 "ok": True,
@@ -4717,8 +5206,15 @@ class MalGuiHandler(BaseHTTPRequestHandler):
                 "backfilled": filled,
                 "updates": sum(1 for p in payloads if p["update"]),
                 "creates": sum(1 for p in payloads if not p["update"]),
+                "unchanged": sum(1 for p in payloads if not p["diff"]),
+                "conflicts": sum(1 for p in payloads
+                                 if any(d["blocked"] for d in p["diff"])),
                 "skipped": skipped,
                 "total": len(payloads),
+                "rows": [{"title": p["title"], "anilist_id": p["anilist_id"],
+                          "update": p["update"], "diff": p["diff"],
+                          "stale_completed_at": p["stale_completed_at"]}
+                         for p in payloads],
             })
             return
 
@@ -4731,7 +5227,13 @@ class MalGuiHandler(BaseHTTPRequestHandler):
                 self.send_json({"ok": False, "error": "This writes to your AniList account and needs confirmation."}, status=400)
                 return
             entries = data.get("entries", [])
-            if not entries:
+            retry_payloads = _take_failures(str(data.get("run_id") or "")) if data.get("retry") else None
+            if data.get("retry") and not retry_payloads:
+                self.send_json({"ok": False, "error": "Those failed rows are no longer "
+                                                      "available to retry; run the write again."},
+                               status=404)
+                return
+            if not entries and not retry_payloads:
                 self.send_json({"ok": False, "error": "Nothing selected to write."}, status=400)
                 return
             if not _run_lock.acquire(blocking=False):
@@ -4761,26 +5263,57 @@ class MalGuiHandler(BaseHTTPRequestHandler):
             updated = 0
             created = 0
             failed: List[Dict[str, str]] = []
+            failed_payloads: List[Dict[str, Any]] = []
+            snapshot_name: Optional[str] = None
             try:
                 send_event({"type": "started", "run_id": run_id, "viewer": viewer.get("name", "")})
-                backfill_anilist_ids(entries, media_type)
-                existing = anilist_existing_entries(
-                    token, viewer["id"], media_type,
-                    [e.get("anilist_id") for e in entries],
-                )
-                payloads, skipped = iter_write_payloads(
-                    entries, media_type, existing,
-                    default_status=data.get("status", "Completed"),
-                    default_score=int(data.get("score", 0)),
-                )
+                skipped: List[Dict[str, str]] = []
+                if retry_payloads is not None:
+                    # A retry re-sends the exact payloads that failed, so the
+                    # conflict policy that produced them is not re-run, and it
+                    # keeps writing into the original run's snapshot.
+                    payloads = retry_payloads["payloads"]
+                    snapshot_name = retry_payloads.get("snapshot")
+                    snapshot = load_undo_snapshot(snapshot_name) if snapshot_name else None
+                    if snapshot is None:
+                        snapshot_name = None
+                    existing = {}
+                else:
+                    backfill_anilist_ids(entries, media_type)
+                    try:
+                        existing = anilist_existing_entries(
+                            token, viewer["id"], media_type,
+                            [e.get("anilist_id") for e in entries],
+                        )
+                    except AniListReadError as exc:
+                        send_event({"type": "error", "error": _read_failure_message(exc)})
+                        # The stream is the whole response, so it has to be
+                        # closed here or the client waits for rows that never come.
+                        self.close_connection = True
+                        return
+                    payloads, skipped = iter_write_payloads(
+                        entries, media_type, existing,
+                        default_status=data.get("status", "Completed"),
+                        default_score=int(data.get("score", 0)),
+                        policy=_write_policy(data), overrides=_row_overrides(data),
+                    )
+                    # Captured before the first mutation: the only record of what
+                    # the account held, and it never contains the token.
+                    snapshot = build_undo_snapshot(media_type, viewer.get("id", 0),
+                                                   payloads, existing)
+                    snapshot_name = save_undo_snapshot(snapshot)
+                    if snapshot_name:
+                        prune_undo_snapshots()
                 total = len(payloads)
                 send_event({"type": "plan", "total": total,
                             "updates": sum(1 for p in payloads if p["update"]),
                             "creates": sum(1 for p in payloads if not p["update"]),
+                            "snapshot": snapshot_name,
                             "skipped": skipped})
                 for index, payload in enumerate(payloads, start=1):
                     if control["cancel"].is_set():
-                        send_event({"type": "cancelled", "written": updated + created})
+                        send_event({"type": "cancelled", "written": updated + created,
+                                    "snapshot": snapshot_name})
                         break
                     outcome = anilist_write_entry(token, payload)
                     if outcome.get("ok"):
@@ -4788,8 +5321,14 @@ class MalGuiHandler(BaseHTTPRequestHandler):
                             updated += 1
                         else:
                             created += 1
+                            # A created entry's id exists only in this response,
+                            # and it is the only handle an undo has on the row.
+                            if snapshot and snapshot_name:
+                                record_created_entry(snapshot, payload["anilist_id"], outcome["id"])
+                                save_undo_snapshot(snapshot, snapshot_name)
                     else:
                         failed.append({"title": payload["title"], "error": outcome.get("error", "")})
+                        failed_payloads.append(payload)
                     send_event({
                         "type": "write_progress",
                         "current": index,
@@ -4802,11 +5341,108 @@ class MalGuiHandler(BaseHTTPRequestHandler):
                 else:
                     send_event({
                         "type": "write_complete",
+                        "run_id": run_id,
                         "updated": updated,
                         "created": created,
                         "failed": failed,
+                        "failed_count": len(failed),
+                        "snapshot": snapshot_name,
                         "skipped": skipped,
                     })
+            finally:
+                token = ""
+                _remember_failures(run_id, failed_payloads, snapshot_name)
+                _unregister_run(run_id)
+                _run_lock.release()
+            self.close_connection = True
+            return
+
+        elif path == "/api/anilist-undo":
+            # Undo is itself a write, so it needs the token re-supplied: the
+            # server cleared the one the original run used.
+            token = str(data.get("token") or "").strip()
+            if not token:
+                self.send_json({"ok": False, "error": "Paste an AniList access token first."}, status=400)
+                return
+            if not data.get("confirm"):
+                self.send_json({"ok": False, "error": "Undo writes to your AniList account "
+                                                      "and needs confirmation."}, status=400)
+                return
+            snapshot = load_undo_snapshot(data.get("snapshot"))
+            if not snapshot:
+                self.send_json({"ok": False, "error": "That undo snapshot could not be read."},
+                               status=404)
+                return
+            delete_created = bool(data.get("delete_created"))
+            restores, deletes, unrecoverable = iter_undo_payloads(snapshot, delete_created)
+            if not restores and not deletes:
+                self.send_json({"ok": False, "error": "Nothing in that snapshot can be undone.",
+                                "unrecoverable": unrecoverable}, status=400)
+                return
+            if not _run_lock.acquire(blocking=False):
+                self.send_json({"ok": False, "error": "A run is already in progress"}, status=409)
+                return
+            run_id, control = _register_run()
+            viewer = anilist_viewer(token)
+            if not viewer.get("ok"):
+                _unregister_run(run_id)
+                _run_lock.release()
+                self.send_json(viewer, status=401)
+                return
+
+            self.send_response(HTTPStatus.OK)
+            self.send_header("Content-Type", "text/event-stream; charset=utf-8")
+            self.send_header("Cache-Control", "no-cache")
+            self.send_header("Connection", "keep-alive")
+            self.end_headers()
+
+            def send_event(event_dict: Dict[str, Any]) -> None:
+                payload = f"data: {json.dumps(event_dict, ensure_ascii=False)}\n\n".encode("utf-8")
+                self.wfile.write(payload)
+                self.wfile.flush()
+
+            restored = 0
+            removed = 0
+            failed = []
+            try:
+                send_event({"type": "started", "run_id": run_id, "viewer": viewer.get("name", "")})
+                steps = ([("restore", r) for r in restores]
+                         + [("delete", d) for d in deletes])
+                total = len(steps)
+                send_event({"type": "plan", "total": total, "restores": len(restores),
+                            "deletes": len(deletes), "unrecoverable": unrecoverable})
+                for index, (kind, item) in enumerate(steps, start=1):
+                    if control["cancel"].is_set():
+                        send_event({"type": "cancelled", "written": restored + removed})
+                        break
+                    if kind == "restore":
+                        outcome = anilist_write_entry(token, item)
+                    else:
+                        outcome = anilist_delete_entry(token, item["entry_id"])
+                    if outcome.get("ok"):
+                        if kind != "restore":
+                            removed += 1
+                        elif not item.get("repair"):
+                            restored += 1
+                    else:
+                        # A stale snapshot - the entry was deleted on AniList
+                        # since the write - fails this row and no other.
+                        failed.append({"title": item["title"], "error": outcome.get("error", "")})
+                    send_event({
+                        "type": "write_progress",
+                        "current": index,
+                        "total": total,
+                        "title": item["title"],
+                        "repair": item.get("repair") or "",
+                        "ok": bool(outcome.get("ok")),
+                        "percent": round((index / total) * 100, 1) if total else 100.0,
+                        "interval": current_interval(),
+                    })
+                else:
+                    send_event({"type": "undo_complete", "restored": restored,
+                                "deleted": removed, "failed": failed,
+                                "failed_count": len(failed),
+                                "unrecoverable": unrecoverable})
             finally:
                 token = ""
                 _unregister_run(run_id)
