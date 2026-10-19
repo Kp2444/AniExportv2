@@ -4,7 +4,7 @@
 
 **What shipped, what was actually verified, and what is known to be broken.**
 
-[![Tests](https://img.shields.io/badge/tests-127%20passing-success)](#-verified)
+[![Tests](https://img.shields.io/badge/tests-132%20passing-success)](#-verified)
 [![Browser](https://img.shields.io/badge/jsdom-15%20suites%20%C2%B7%20295%20assertions-success)](#-verified)
 [![Live write](https://img.shields.io/badge/AniList%20write-overwrites%20%28measured%20live%29-critical)](#-not-verified)
 [![Defects](https://img.shields.io/badge/known%20defects-8-orange)](#-known-defects)
@@ -32,6 +32,7 @@ git show 8a35779:ANILIST_FIRST_PLAN.md
 [Polish](#-polish-pass-2026-10-18) ·
 [Verified](#-verified) ·
 [Known defects](#-known-defects) ·
+[Skip list](#-persistent-skip-list-2026-10-19) ·
 [Not verified](#-not-verified)
 
 ---
@@ -141,7 +142,7 @@ about the CSS. **Three of the five findings were invisible from the source.**
 ## ✅ Verified
 
 ```bash
-python -m unittest discover -s tests -t .    # 127 tests
+python -m unittest discover -s tests -t .    # 132 tests
 python -m py_compile generate_mal_xml.py gui.py
 python generate_mal_xml.py --help
 ```
@@ -234,6 +235,35 @@ moment anything compares against it, and ROADMAP Phase 1 does exactly that:
 The write is one `SaveMediaListEntry` per row through `_throttle()`, so **339 rows take roughly
 twelve minutes**. Resolution solved the identical problem by aliasing 8 queries per document.
 → **ROADMAP Phase 2**
+
+---
+
+## 🧹 Persistent skip list (2026-10-19)
+
+Unchecking a row only ever excluded it from the current list; paste the same titles again and they
+came back. **Always skip unchecked** writes those titles to `localStorage` under
+`aniexport.ignored`, so they stay unchecked in future lists, and **Forget N skipped** clears them.
+
+| Decision | Why |
+|---|---|
+| A separate button rather than making the checkbox itself persistent | The checkbox has always meant "include in this export". Making an unchecked box permanent would change an existing control silently, which is the kind of surprise this project avoids |
+| Keyed by `entryKey` — MAL id when present, else lower-cased title | Same key the session store and the server's `deduplicate_entries` use, so a remembered row matches however it was resolved |
+| Stored per media type | A MAL id identifies a different work in each type, so one list per type |
+| A manually picked match re-enables the row | Choosing a match by hand is explicit; it overrides the skip list rather than being silently overruled by it |
+| `.toolbar-end` gained `flex-wrap: wrap` | Three buttons now live there; without it the toolbar overflowed at the 430px width the narrow pass fixed |
+
+Covered by five static guards in `tests/test_gui_template.py::SkipListTests` (the wiring) and eight
+behavioural checks run in node against the functions extracted from the template itself (the
+logic): a fresh browser, persistence across a reload, per-media-type isolation, the title fallback,
+an unresolved row staying disabled, the Forget button hiding itself, and a blocked `localStorage`
+write surfacing as an error rather than throwing.
+
+### Not a defect: no export path field
+
+The GUI has no "save to this path" control, and should not grow one. `Download XML` sends
+`Content-Disposition: attachment` (`gui.py:4262`), so the browser's own save dialog already chooses
+the location. A server-side path field would mean accepting a filesystem path from a web page, and
+any page in the browser can post to a local port.
 
 ---
 

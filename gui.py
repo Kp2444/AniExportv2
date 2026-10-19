@@ -1414,6 +1414,7 @@ HTML_TEMPLATE = """<!DOCTYPE html>
       margin-left: auto;
       display: flex;
       align-items: center;
+      flex-wrap: wrap;          /* three buttons now; they must wrap, not overflow */
       gap: 0.625rem;
     }
     .filter-count {
@@ -2297,6 +2298,10 @@ HTML_TEMPLATE = """<!DOCTYPE html>
           <div id="chipRow" class="chip-row"></div>
           <div class="toolbar-end">
             <span id="filterCountLabel" class="filter-count">Showing 0</span>
+            <button id="btnRemember" class="btn btn-secondary btn-xs"
+                    title="Skip the rows you have unchecked in future lists too, not just this one">Always skip unchecked</button>
+            <button id="btnForgetIgnored" class="btn btn-secondary btn-xs" style="display:none;"
+                    title="Stop skipping the remembered titles">Forget 0 skipped</button>
             <button id="btnReset" class="btn btn-secondary btn-xs" title="Clear the saved session and start from an empty list">Start over</button>
           </div>
         </div>
@@ -2352,6 +2357,7 @@ HTML_TEMPLATE = """<!DOCTYPE html>
 
   <script>
     let currentAnimes = [];
+    let ignoredKeys = new Set();
     let isProcessing = false;
 
     // Elements
@@ -2406,6 +2412,8 @@ HTML_TEMPLATE = """<!DOCTYPE html>
     const anilistPanel = document.getElementById('anilistPanel');
     const anilistToken = document.getElementById('anilistToken');
     const btnTokenTest = document.getElementById('btnTokenTest');
+    const btnRemember = document.getElementById('btnRemember');
+    const btnForgetIgnored = document.getElementById('btnForgetIgnored');
     const tokenStatus = document.getElementById('tokenStatus');
     const btnWrite = document.getElementById('btnWrite');
     const writeModal = document.getElementById('writeModal');
@@ -2529,6 +2537,8 @@ HTML_TEMPLATE = """<!DOCTYPE html>
         renderTable([]);
         updateStatsAndExport();
       }
+      ignoredKeys = loadIgnored();
+      updateIgnoredLabel();
       updateLineCounter();
       refreshExportState();
     }
@@ -2711,7 +2721,7 @@ HTML_TEMPLATE = """<!DOCTYPE html>
                     const key = entryKey(entry);
                     if (seen.has(key)) return;   // same dedupe the final list applies
                     seen.add(key);
-                    currentAnimes.push({ ...entry, enabled: isActionable(entry) });
+                    currentAnimes.push({ ...entry, enabled: enabledFor(entry) });
                     added = true;
                   });
                   if (added) {
@@ -2732,7 +2742,7 @@ HTML_TEMPLATE = """<!DOCTYPE html>
                 const existing = new Map(currentAnimes.map(i => [entryKey(i), i]));
                 currentAnimes = (event.entries || []).map(e => {
                   const row = existing.get(entryKey(e));
-                  return row || { ...e, enabled: isActionable(e) };
+                  return row || { ...e, enabled: enabledFor(e) };
                 });
                 renderTable(currentAnimes);
                 showToast('Run cancelled - ' + (event.resolved || 0) + ' titles resolved', 'warning');
@@ -2758,7 +2768,7 @@ HTML_TEMPLATE = """<!DOCTYPE html>
                 const existing = new Map(currentAnimes.map(i => [entryKey(i), i]));
                 currentAnimes = event.entries.map(e => {
                   const row = existing.get(entryKey(e));
-                  return row || { ...e, enabled: isActionable(e) };
+                  return row || { ...e, enabled: enabledFor(e) };
                 });
                 selectAllCheckbox.checked = true;
                 selectAllCheckbox.indeterminate = false;
@@ -3262,6 +3272,44 @@ HTML_TEMPLATE = """<!DOCTYPE html>
     function entryKey(entry) {
       const id = Number(entry.id) || 0;
       return id > 0 ? 'id:' + id : 'title:' + String(entry.title || '').trim().toLowerCase();
+    }
+
+    // Titles the user has chosen to skip for good, per media type. Unchecking a
+    // box stays per-session as it always has; this list only changes when the
+    // button is pressed, so the checkbox keeps its original meaning.
+    const IGNORE_KEY = 'aniexport.ignored';
+
+    function readIgnoreStore() {
+      try {
+        return JSON.parse(window.localStorage.getItem(IGNORE_KEY) || '{}') || {};
+      } catch (e) {
+        return {};
+      }
+    }
+
+    function loadIgnored() {
+      const all = readIgnoreStore();
+      return new Set(Array.isArray(all[mediaType()]) ? all[mediaType()] : []);
+    }
+
+    function saveIgnored() {
+      const all = readIgnoreStore();
+      all[mediaType()] = Array.from(ignoredKeys);
+      try {
+        window.localStorage.setItem(IGNORE_KEY, JSON.stringify(all));
+      } catch (e) {
+        showToast('Could not save the skip list - browser storage is full or blocked.', 'error');
+      }
+    }
+
+    function enabledFor(entry) {
+      return isActionable(entry) && !ignoredKeys.has(entryKey(entry));
+    }
+
+    function updateIgnoredLabel() {
+      const n = ignoredKeys.size;
+      btnForgetIgnored.textContent = 'Forget ' + n + ' skipped';
+      btnForgetIgnored.style.display = n ? '' : 'none';
     }
 
     function fixRowHtml(item, idx) {
@@ -3852,6 +3900,27 @@ HTML_TEMPLATE = """<!DOCTYPE html>
       showFixCurrent();
     }
 
+    btnRemember.addEventListener('click', () => {
+      const excluded = currentAnimes.filter(item => isActionable(item) && item.enabled === false);
+      if (!excluded.length) {
+        showToast('Nothing is unchecked, so there is nothing to skip.', 'warning');
+        return;
+      }
+      excluded.forEach(item => ignoredKeys.add(entryKey(item)));
+      saveIgnored();
+      updateIgnoredLabel();
+      showToast(excluded.length + (excluded.length === 1 ? ' title' : ' titles')
+        + ' will stay unchecked in future lists.');
+    });
+
+    btnForgetIgnored.addEventListener('click', () => {
+      const n = ignoredKeys.size;
+      ignoredKeys = new Set();
+      saveIgnored();
+      updateIgnoredLabel();
+      showToast('No longer skipping ' + n + (n === 1 ? ' title' : ' titles') + '.');
+    });
+
     btnFixUnmatched.addEventListener('click', () => openFixer(-1));
     btnFixSearch.addEventListener('click', runFixSearch);
     fixIdKind.addEventListener('change', runFixSearch);
@@ -4110,7 +4179,7 @@ HTML_TEMPLATE = """<!DOCTYPE html>
           existing.enabled = isActionable(existing);
           matched += 1;
         } else if (addUnmatchedImports.checked) {
-          currentAnimes.push({ ...entry, original: entry.title, enabled: isActionable(entry) });
+          currentAnimes.push({ ...entry, original: entry.title, enabled: enabledFor(entry) });
           added += 1;
         }
       });

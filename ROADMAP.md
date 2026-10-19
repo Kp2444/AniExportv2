@@ -699,7 +699,7 @@ loss, so it goes first on merit, not dependency.
 
 ## 12. Verification
 
-- `python -m unittest discover -s tests -t .` — **127 pass today.** Every item above lands with
+- `python -m unittest discover -s tests -t .` — **132 pass today.** Every item above lands with
   tests; the conflict policy is table-driven, one case per rule per §3 "Phase 1 tests".
 - jsdom suites in the scratchpad for the diff modal, the Needs-review chip and the bulk-edit
   scoping, run like the existing 15 (295 assertions today).

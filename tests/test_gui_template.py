@@ -161,5 +161,44 @@ class InterfaceCopyTests(unittest.TestCase):
                       "the table must scroll rather than crush the title column")
 
 
+class SkipListTests(unittest.TestCase):
+    """Unchecking a row is per-session; the skip list is the persistent version of
+    it. The two must not be confused, so the wiring is asserted here: the
+    behaviour itself is covered by the node checks described in MANGA_SUPPORT_NOTES."""
+
+    def _script(self) -> str:
+        return SCRIPT_RE.findall(gui.HTML_TEMPLATE)[-1]
+
+    def test_both_controls_exist(self):
+        self.assertIn('id="btnRemember"', gui.HTML_TEMPLATE)
+        self.assertIn('id="btnForgetIgnored"', gui.HTML_TEMPLATE,
+                      "a persistent skip list the user cannot clear is a trap")
+
+    def test_new_rows_consult_the_skip_list(self):
+        script = self._script()
+        self.assertEqual(script.count("enabled: enabledFor("), 4,
+                         "every path that builds a fresh row must honour the skip list")
+        self.assertNotIn("enabled: isActionable(e)", script,
+                         "a row rebuilt after a run ignored the skip list")
+
+    def test_a_manually_picked_match_overrides_the_skip_list(self):
+        script = self._script()
+        self.assertEqual(script.count("{ enabled: isActionable("), 3,
+                         "choosing a match by hand is an explicit act and must re-enable the row")
+
+    def test_the_skip_list_is_per_media_type(self):
+        script = self._script()
+        self.assertIn("all[mediaType()] = Array.from(ignoredKeys)", script,
+                      "a MAL id means a different work in each media type")
+        self.assertIn("ignoredKeys = loadIgnored()", script,
+                      "switching media type must load that type's own list")
+
+    def test_a_blocked_write_does_not_throw(self):
+        script = self._script()
+        body = script.split("function saveIgnored()", 1)[1].split("function enabledFor", 1)[0]
+        self.assertIn("catch (e)", body,
+                      "localStorage throws in private windows; the page must survive it")
+
+
 if __name__ == "__main__":
     unittest.main()

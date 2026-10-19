@@ -6,7 +6,7 @@
 
 [![Python](https://img.shields.io/badge/python-3.9%2B-3776AB?logo=python&logoColor=white)](https://www.python.org/)
 [![Dependencies](https://img.shields.io/badge/dependencies-zero-success)](requirements.txt)
-[![Tests](https://img.shields.io/badge/tests-127%20passing-success)](#-tests)
+[![Tests](https://img.shields.io/badge/tests-132%20passing-success)](#-tests)
 [![License](https://img.shields.io/badge/license-MIT-lightgrey)](LICENSE)
 
 </div>
@@ -137,6 +137,9 @@ elsewhere.
   in and hand it back on close, and `prefers-reduced-motion` turns the transitions off.
 - Everything survives a refresh. **Start over** clears the saved session (two clicks, on purpose);
   loading `#reset` clears it too if the page is ever stuck.
+- Unchecking a row excludes it from *this* list. **Always skip unchecked** makes that stick, so the
+  same titles stay unchecked the next time you paste them — kept per media type, and undone by
+  **Forget N skipped** beside it. Unchecking alone never changes anything permanently.
 
 Nothing disappears silently: the notice bar accounts for titles with no MAL id, titles found
 nowhere, lines merged into an existing row, and any title AniList could not be reached for.
@@ -203,9 +206,14 @@ you turn that off. Imported rows carry no AniList id until you resolve or search
 
 ### Export files
 
-`Download XML` / `Download .XML.GZ` serve the current selection. Anime and manga write to separate
-files, so one media type can never overwrite or impersonate the other. **Preview XML** shows the
-generated file, and **Keep timestamped copies** also writes `..._YYYYmmdd_HHMMSS.xml` on every save.
+`Download XML` / `Download .XML.GZ` serve the current selection as a normal browser download, so
+**your browser picks where the file goes** — the copy kept beside the script is a convenience, not
+the delivery. Anime and manga write to separate files, so one media type can never overwrite or
+impersonate the other. **Preview XML** shows the generated file, and **Keep timestamped copies**
+also writes `..._YYYYmmdd_HHMMSS.xml` on every save.
+
+There is deliberately no "export to this path" field. The server would have to accept a filesystem
+path from a web page, and any page in your browser can post to a local port.
 
 ## ⌨️ CLI
 
@@ -248,12 +256,15 @@ them), and titles that were not found at all.
 - **A confident match can still be wrong.** Ranking prefers exact titles, full series over
   one-shots and released entries, but it cannot know your intent. Check the picker on rows that
   matter.
-- **The direct AniList write is untested live and overwrites on update** — see the warning above.
+- **The direct AniList write overwrites on update** — measured against a live account, not merely
+  read off the code; see the warning above.
+- **Nothing here can delete an entry from your AniList account.** The write only creates or
+  updates. Unchecking a row removes it from the export, never from your list.
 - AniList's own rate limit is the floor on speed; nothing here can make a cold run faster than the
   API allows.
 
 Known defects, each with the code that causes them, are listed in
-[MANGA_SUPPORT_NOTES.md](MANGA_SUPPORT_NOTES.md#known-defects).
+[MANGA_SUPPORT_NOTES.md](MANGA_SUPPORT_NOTES.md#-known-defects).
 
 ## 🧪 Tests
 
@@ -261,11 +272,12 @@ Known defects, each with the code that causes them, are listed in
 python -m unittest discover -s tests -t .
 ```
 
-**127 tests** covering the XML builders, status and date handling, batched resolution, the disk
+**132 tests** covering the XML builders, status and date handling, batched resolution, the disk
 cache, candidate ranking, run control, the GUI event contract, the AniList write payloads, the MAL
 XML importer, the unmatched-title resolver (links, ids and free text), the command line (both
 media types, input discovery, cache flags, error paths), the no-store headers on the page and the
-downloads, and the markup's accessibility contract (header scope, focusable sortable headers,
+downloads, the persistent skip list's wiring, and the markup's accessibility contract (header
+scope, focusable sortable headers,
 dialog roles, named fields) and its copy (the primary action naming the chosen destination, no
 stale claims about unbuilt features).
 
