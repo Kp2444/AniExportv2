@@ -7,7 +7,7 @@
 [![Tests](https://img.shields.io/badge/tests-127%20passing-success)](#-verified)
 [![Browser](https://img.shields.io/badge/jsdom-15%20suites%20%C2%B7%20295%20assertions-success)](#-verified)
 [![Live write](https://img.shields.io/badge/AniList%20write-overwrites%20%28measured%20live%29-critical)](#-not-verified)
-[![Defects](https://img.shields.io/badge/known%20defects-7-orange)](#-known-defects)
+[![Defects](https://img.shields.io/badge/known%20defects-8-orange)](#-known-defects)
 
 </div>
 
@@ -159,6 +159,10 @@ Found by reading the write path and the GUI while researching [ROADMAP.md](ROADM
 verified in the code. **None is a regression from the passes above — they all predate them.**
 Worst first, with the phase that closes it.
 
+Defects 1 and 4 have since been **reproduced against a live throwaway account** (2026-10-19, both
+the anime and the manga path; evidence in `ROADMAP.md` §2.3). They are measurements now, not
+readings.
+
 > [!CAUTION]
 > **1 — The direct write overwrites what is already on the account.** `iter_write_payloads`
 > (`generate_mal_xml.py:1379-1450`) sends `status`, `scoreRaw` and `progress` on *every* row
@@ -167,7 +171,12 @@ Worst first, with the phase that closes it.
 > `0` and **`0` is written**. The existing `status`, `progress`, `progressVolumes` and `score`
 > *are* fetched (`ANILIST_EXISTING_ENTRIES_QUERY`, `:1219-1232`) and then never read. The confirm
 > step shows counts only (`gui.py:4553-4561`), so none of this is visible before it happens.
-> → **ROADMAP Phase 1**
+>
+> **Measured live, and worse than the paragraph above.** A manga entry sitting at
+> `COMPLETED, 147 chapters, 13 volumes, score 90` was handed one row with the chapters left blank
+> and a status of Reading. It came back `CURRENT, 0, 0, score 0` — four fields destroyed in one
+> write, reported as `"ok": true`. On the anime path an account at episode 10 went to 3 the same
+> way. → **ROADMAP Phase 1**
 
 **2 — The list-wide score box re-stamps every row on every keystroke.** `inputScore`
 (`gui.py:3653-3657`) is bound to `input` and does `currentAnimes.forEach(...)`. With defect 1, one
@@ -182,7 +191,8 @@ rely on. → **ROADMAP Phase 1**
 
 **4 — A reread lowers the account's repeat count.** `repeat` is written as the literal `1`
 (`:1430-1431`) whenever the row is marked Rereading/Rewatching. An account showing `repeat: 5` is
-set back to `1`. → **ROADMAP Phase 1**
+set back to `1`. **Measured live:** an entry set to `repeat: 5` was written as Rereading and came
+back `repeat: 1`. → **ROADMAP Phase 1**
 
 **5 — The inline Find button guesses.** `repairRow` (`gui.py:3500-3535`) applies `entries[0]`
 without rendering the candidate list, unlike the fixer modal. → **ROADMAP Phase 4**
@@ -191,7 +201,13 @@ without rendering the candidate list, unlike the fixer modal. → **ROADMAP Phas
 `difflib.SequenceMatcher` against both titles, but the ratio only ever serves as a sort key, so a
 confidently-wrong match renders identically to a perfect one. → **ROADMAP Phase 4**
 
-**7 — A created entry's id is discarded.** `anilist_write_entry` returns `{"ok", "id", "status"}`
+**7 — A stale completion date is left behind.** `completedAt` is sent only when the row carries
+one (`:1435-1440`), which is what stops a blank row from blanking it — but it also means a write
+that moves an entry from `COMPLETED` to `CURRENT` leaves the old completion date in place. Found
+live: an entry ended up in progress *and* finished on a date. Nothing in the tool can clear it,
+since clearing requires sending an empty value. → **ROADMAP Phase 1**
+
+**8 — A created entry's id is discarded.** `anilist_write_entry` returns `{"ok", "id", "status"}`
 (`:1453-1462`) and the caller keeps none of it (`gui.py:4620-4640`). That id is the only handle on
 a row the write created, so there is currently no way to undo a create. → **ROADMAP Phase 1**
 
@@ -206,6 +222,12 @@ moment anything compares against it, and ROADMAP Phase 1 does exactly that:
   fixed 0–100. Comparing the two compares different units.
 - **`progressVolumes` is `null` on anime entries.** Verified against a live account. `None < 5`
   raises `TypeError` in Python 3, so any naive "never lower" comparison crashes on every anime row.
+  On manga it is written and read back correctly (`ROADMAP.md` §2.3, M1), so the guard has to be
+  media-type aware rather than simply skipped.
+- **AniList stamps its own `startedAt`.** On a live create with no `startedAt` sent, the entry came
+  back with today's date; a create that did send one kept it (§2.3, M7). The date comes from an
+  account setting, not from this tool — but it means an undo cannot reliably restore "no start
+  date", which Phase 1's snapshot design has to state rather than assume.
 
 ### Performance limitation
 
@@ -218,15 +240,15 @@ twelve minutes**. Resolution solved the identical problem by aliasing 8 queries 
 ## ⚠️ Not verified
 
 > [!IMPORTANT]
-> **The direct AniList write has now been run against a live throwaway account** (2026-10-19,
-> recorded as `ROADMAP.md` §2.3). What that run established: a create works; a repeated write of
-> the same row is classified as an update and keeps the same list-entry `id`, so duplicate
-> creation really is designed out; and **defect 1 is real** — an account at episode 10 was written
-> back to 3 and the write reported success, with the preview beforehand saying only *"1 update"*.
+> **The direct AniList write has been run against a live throwaway account** (2026-10-19, both the
+> anime and the manga path; evidence in `ROADMAP.md` §2.3). Established: creates work,
+> `progressVolumes`, `notes` and dates all land correctly, `0000-00-00` is correctly skipped, a
+> repeated write of the same row is classified as an update and keeps the same list-entry `id` — so
+> duplicate creation really is designed out — and defects 1, 4 and 7 are real rather than inferred.
 >
-> What it did **not** establish: `notes`, dates, `repeat` and the whole manga write path are still
-> untested live, and every automated test remains mocked. Use a throwaway account, or a handful of
-> rows, and add what you find here.
+> Still untested live: `DeleteMediaListEntry`, a multi-row write, cancellation mid-write, and
+> **every failure path** — each row in both runs returned `"ok": true`, so nothing exercised the
+> per-row error reporting. All automated coverage remains mocked. Add what you find here.
 
 - The XML is structurally tested against a public description of the MAL format, not against a
   real MyAnimeList import. Import a small sample before a list you care about.

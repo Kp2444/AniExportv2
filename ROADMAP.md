@@ -70,6 +70,14 @@ Not affected, **verified** at `generate_mal_xml.py:1428-1440`: `progressVolumes`
 them on the account. They can still be *replaced* when the row does carry a value, which is why
 they belong in the diff even though they need no guard.
 
+That protection has a cost the live run exposed (§2.3, M3). Because `completedAt` is never sent
+empty, a write that takes an entry from `COMPLETED` to `CURRENT` **leaves the old completion date
+behind**, so the account is left holding an entry that is in progress and also finished on a date.
+Nothing in this tool can clear it, because clearing it means sending an empty value, which is
+precisely what the guard above prevents. `_reconcile_with_existing`-style field guards do not fix
+this; the diff has to offer "clear the completion date" as an explicit action when the status
+moves off `COMPLETED`. Scoped into Phase 1, Step 2.
+
 This is the only irreversible feature in the tool. It has now been **run against a live
 throwaway account** and the overwrite was reproduced exactly as described above — see §2.3, L3.
 Unit coverage in `tests/test_anilist_write.py` remains mock-only.
@@ -146,6 +154,8 @@ Texhnolyze `26`, Kaiba `3701`. L1–L4 went through the running server's `/api/a
 the whole handler path was exercised, not just the library. Account state was read back after each
 step through `anilist_existing_entries`.
 
+#### The anime path
+
 | # | Step | Result |
 |---|---|---|
 | L1 | Write Lain at episode 3, `Watching`, onto an empty account | `creates: 1`; entry `604576747` created, `status=CURRENT progress=3`. **The create path works live — this had never been run before** |
@@ -155,9 +165,35 @@ step through `anilist_existing_entries`.
 | L5 | Rate-limit cost of a 2-alias `SaveMediaListEntry` document | Control: three single-operation requests decremented `X-RateLimit-Remaining` `15 → 14 → 13`, one each. The aliased document then took it `13 → 12`: **cost 1 request for 2 mutations.** `X-RateLimit-Limit` read `30`, so this was measured in the degraded state |
 | L6 | Did both aliases apply? | Yes — `data.m0` and `data.m1` each returned a distinct new entry (`604576843` mediaId 26 progress 4; `604576844` mediaId 3701 progress 5), both confirmed present on a fresh read |
 
-What this changes: **§1.1's data loss is no longer a code reading, it is a measurement**, and
-**O1/O4 are answered** (§9). What it does not change: the mocked unit tests are still the only automated
-coverage of the write, and nothing here tested `notes`, dates, `repeat`, or the manga path.
+#### The manga path
+
+Same account, same day, same route through `/api/anilist-write` with `media_type: "manga"`.
+Media ids resolved through `fetch_manga_info_online`: Goodnight Punpun `34632` (147 ch / 13 vol),
+Vinland Saga `30642` (224 / 29). Read back with a **fuller query than the repo's own**, adding
+`repeat`, `notes`, `startedAt`, `completedAt` and `score(format: POINT_100)` — fields
+`ANILIST_EXISTING_ENTRIES_QUERY` does not fetch, so the repo could not have observed them.
+
+| # | Step | Result |
+|---|---|---|
+| M1 | Create Punpun at chapter 40 / volume 4, `Reading` | `ch=40 vol=4`. **`progressVolumes` works live** — the one field the anime path never sends. AniList also stamped `startedAt` with today's date, which was never sent (see M7) |
+| M2 | Same row at chapter 147 / volume 13, `Completed`, score 9 | `COMPLETED ch=147 vol=13 score=90`. The `finished` branch and `scoreRaw` both correct. Read back as `90` only because the query asked for `format: POINT_100` — E4's trap, confirmed |
+| M3 | Same row with **chapters blank**, `Reading` | `COMPLETED 147/13 score 90` → **`CURRENT 0/0 score 0`.** One blank row destroyed four fields in a single write, reported `"ok": true`. This is the worst case in §1.1 and it is worse than the prose suggested — the score goes too |
+| M4 | `completedAt` after M3 | **Still `2026-10-19`.** The entry is now `CURRENT` *and* carries a completion date. The "never sent empty" guard (§1.1) is what prevents clearing it |
+| M5 | Set `repeat: 5` directly, then write the row as `Rereading` | `repeat` `5` → **`1`**. Defect D9 reproduced: `repeat` is the literal `1` (R18), so a reread write resets the account's count |
+| M6 | Create Vinland Saga with `comments`, `start_date: 2024-03-01`, `finish_date: 0000-00-00` | `notes='live test note'`, `startedAt=2024-3-1`, `completedAt` unset. **`notes` and dates all work, and `0000-00-00` is correctly skipped** by `_fuzzy_date` (`:1367-1376`) |
+| M7 | Did AniList invent a `startedAt`? | Yes on M1, where none was sent; no on M6, where one was. So AniList stamps a start date itself when the entry becomes `CURRENT` without one — an account setting, not this tool's write. It matters for undo: restoring "no start date" may not be possible |
+
+Phase 1's conflict guard therefore has to cover the manga path specifically: `progressVolumes`
+needs the same never-lower rule as `progress`, and `repeat` needs it too.
+
+What this changes: **§1.1's data loss is no longer a code reading, it is a measurement**, **O1/O4
+are answered** (§9), and **D9 and the manga write path are confirmed live** rather than inferred.
+M3 and M4 found damage the earlier prose did not describe: the score is lost with the progress, and
+a stale `completedAt` is left behind.
+
+What it does not change: every automated test is still against a mocked API. Untested live:
+`DeleteMediaListEntry`, a document of 8 aliases rather than 2, a multi-row write, cancellation
+mid-write, and any failure path — every row in both runs returned `"ok": true`.
 
 ---
 
