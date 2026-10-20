@@ -214,7 +214,10 @@ class CacheTests(CacheIsolatedCase):
     def _resolve(self, titles, **kwargs):
         def fake_batch(query, variables, max_retries=3):
             return {f"t{i}": {"media": [node(321, name)]} for i, name in enumerate(variables.values())}
-        with patch.object(gen, "_execute_anilist_batch", side_effect=fake_batch) as batched:
+        # Sequel expansion walks relations through _execute_anilist_request,
+        # which the batch stub does not cover - leaving it unstubbed made this
+        # test reach the live API.
+        with patch.object(gen, "_execute_anilist_batch", side_effect=fake_batch) as batched,              patch.object(gen, "_execute_anilist_request", return_value=None):
             out = gen.resolve_many_entries(titles, "manga", **kwargs)
         return out, batched.call_count
 

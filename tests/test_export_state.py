@@ -64,7 +64,10 @@ class ExportStateTests(unittest.TestCase):
             out, base = self._serve(directory)
             manga = [{"id": 321, "anilist_id": 654, "title": "T", "type": "Manga",
                       "chapters": 42, "volumes": 4}]
-            with patch.object(gui, "resolve_manga_entries", return_value=manga):
+            # /api/process resolves through resolve_many_entries; patching
+            # resolve_manga_entries did nothing, so this test was silently
+            # making a real request to AniList on every run.
+            with patch.object(gui, "resolve_many_entries", return_value={"T": manga}):
                 self._post(base, "/api/process", {
                     "content": "T", "media_type": "manga", "status": "Reading", "score": 0})
             self.assertTrue((out / "m.xml").is_file())

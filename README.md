@@ -6,7 +6,7 @@
 
 [![Python](https://img.shields.io/badge/python-3.9%2B-3776AB?logo=python&logoColor=white)](https://www.python.org/)
 [![Dependencies](https://img.shields.io/badge/dependencies-zero-success)](requirements.txt)
-[![Tests](https://img.shields.io/badge/tests-216%20passing-success)](#-tests)
+[![Tests](https://img.shields.io/badge/tests-333%20passing-success)](#-tests)
 [![License](https://img.shields.io/badge/license-MIT-lightgrey)](LICENSE)
 
 </div>
@@ -45,8 +45,8 @@ progress, score and dates per row.
 
 **🚀 Delivers**
 
-Straight to your AniList account, or out as a MAL-compatible XML file — including the titles MAL
-has never heard of.
+Straight to your AniList account, out as MAL-compatible XML, or copied wholesale from one AniList
+account to another — anime and manga, every field.
 
 </td>
 </tr>
@@ -57,6 +57,7 @@ has never heard of.
 [Two destinations](#-two-destinations-and-why-it-matters) ·
 [Install](#-install) ·
 [GUI](#-gui) ·
+[Copy an account](#copying-one-account-onto-another) ·
 [CLI](#-cli) ·
 [Data notes](#-data-notes) ·
 [Limitations](#-limitations) ·
@@ -189,6 +190,14 @@ Nothing goes backwards unless you say so. The confirm step applies a conflict po
 | Status | Never replace **Completed** with anything except a reread |
 | Notes, start date, finish date | Only ever sent when your row carries one, so a blank row never blanks them |
 
+Rows go out **eight per request**, so a 339-row write takes about ninety seconds rather than
+twelve minutes. One request, eight entries, one unit of rate limit — measured, not assumed.
+
+**Cancel run** stops a write, an undo or a copy. Because rows travel eight at a time a cancel
+lands *between* batches: the eight already in flight still get written, the next batch never
+starts, and what did land stays undoable. Measured live — cancelling a 14-row write mid-flight
+stopped it at exactly 8.
+
 Each blocked field carries a **keep mine** tick, so a downgrade you actually want is one click
 away. Rows that already match collapse to a count. A row that stops being completed is flagged,
 because AniList keeps the old finish date otherwise — **clear the finish date** is offered there,
@@ -196,7 +205,7 @@ and is the only thing in this tool that sends an empty value.
 
 The diff shows what your account will end up holding, not merely what gets sent, because those
 are not always the same thing. AniList changes two fields on its own, whatever it is asked for,
-and both are measured rather than assumed ([ROADMAP.md](ROADMAP.md) §2.3, L7–L8):
+and both are measured rather than assumed ([measured live](MANGA_SUPPORT_NOTES.md#-measured-against-the-live-api), L7–L8):
 
 - While an entry is **Completed**, progress and volumes are forced to the work's total. So
   "keep mine" on a lower chapter count does nothing unless you also move the status off Completed.
@@ -218,12 +227,71 @@ confirm step never promises a change the API will quietly discard.
 > - **Undo is itself a write and can fail halfway.** Each row is reported on its own; if you
 >   deleted an entry on AniList after the write, that row cannot be restored and says so.
 > - **A restored "no start date" may not stick.** AniList stamps a start date itself when an entry
->   becomes in-progress without one — measured, not assumed ([ROADMAP.md](ROADMAP.md) §2.3, M7).
+>   becomes in-progress without one — measured, not assumed ([measured live](MANGA_SUPPORT_NOTES.md#-measured-against-the-live-api), M7).
 > - **Two things have still never run against a real account:** cancelling a write part-way, and
 >   a write big enough to need more than one 50-id lookup batch. Everything else here — the guard,
 >   every override, the stale-date clear, undo in both directions, snapshot pruning, deleting a
 >   created entry, a per-row rejection and the retry — was measured on a throwaway account
->   ([ROADMAP.md](ROADMAP.md) §2.3, P1–P12), on top of the mocked test suite.
+>   ([measured live](MANGA_SUPPORT_NOTES.md#-measured-against-the-live-api), P1–P12), on top of the mocked test suite.
+
+### Reading a list back out of AniList
+
+**From AniList…** pulls an existing list straight in — status, score, progress, notes and dates —
+and merges it with whatever is already on screen. Nothing is written to any account.
+
+- A **public** list needs nothing but the username.
+- Leave the username blank and it reads **your own** list using the token, which is the only way
+  to get at a private one.
+- Entries AniList has but MyAnimeList does not are counted and kept, not dropped: they are the
+  same *AniList only* rows the rest of the tool reports.
+
+The CLI has the read-only half of this as `--from-anilist USERNAME`, which writes the list
+straight to MAL XML:
+
+```bash
+python generate_mal_xml.py --from-anilist someone --media-type manga
+```
+
+That makes **AniList → MyAnimeList** possible, which it was not before: previously titles could
+only travel in one direction.
+
+### Copying one account onto another
+
+**Copy an account…** reads **every anime and every manga** from one AniList account and writes
+them to the account whose token is in the panel above. Use it to move to a new account, or to
+mirror one you control.
+
+What travels: status, score, progress, volumes, rereads, notes, start and finish dates, and the
+`private`, `hidden from status lists` and `priority` flags — everything AniList will both hand
+back and accept.
+
+**Check** first. It names both accounts and, per media type, shows what will be added, what will
+be overwritten, and what the destination has that the source does not:
+
+```
+From Razed2Ground to second-account.
+Anime: 3 on the source, 3 to add, 0 to overwrite.
+Manga: 14 on the source, 11 to add, 3 to overwrite, 1 already identical.
+       6 on the destination are not on the source and will be left as they are.
+```
+
+> [!WARNING]
+> A copy **mirrors**: where both accounts already have a title, the source wins, including values
+> that go backwards. This is the one place the never-go-backwards guard is deliberately switched
+> off, because "an exact copy" means exactly that. It is saved and undoable like any other write —
+> as two snapshots, one per media type, and Undo replays both.
+>
+> Nothing is ever deleted. Entries the destination has and the source does not are untouched, so
+> the destination ends up a **superset** rather than an identical twin. The Check step says how
+> many.
+
+Three things cannot be copied, because AniList will not hand them back in a form it will accept:
+
+| Not copied | Why |
+|---|---|
+| Custom lists | Read as a JSON object, written as a list of names, and the destination would need the same lists defined first |
+| Advanced scores | Read keyed by category; the destination's categories may differ, so there is no safe mapping |
+| "No start date" on an in-progress entry | AniList stamps today's date itself when an entry becomes in-progress without one — measured, and not something this tool can override |
 
 ### Importing an existing MAL export
 
@@ -238,6 +306,10 @@ you turn that off. Imported rows carry no AniList id until you resolve or search
 the delivery. Anime and manga write to separate files, so one media type can never overwrite or
 impersonate the other. **Preview XML** shows the generated file, and **Keep timestamped copies**
 also writes `..._YYYYmmdd_HHMMSS.xml` on every save.
+
+**List Status** and **Score (0-10)** apply to the rows you have selected, or to every row the
+filter is showing when nothing is selected. Each says which, under the control. They used to stamp
+every row in the list on every keystroke.
 
 There is deliberately no "export to this path" field. The server would have to accept a filesystem
 path from a web page, and any page in your browser can post to a local port.
@@ -280,15 +352,26 @@ them), and titles that were not found at all.
 - **Misspellings are not auto-recoverable.** AniList returns zero hits for `Raphsody` or
   `Aristrocat`, so no destination, retry or ranking change finds them on its own. Fix unmatched is
   the answer: search the right title, or paste the AniList link.
-- **A confident match can still be wrong.** Ranking prefers exact titles, full series over
-  one-shots and released entries, but it cannot know your intent. Check the picker on rows that
-  matter.
+- **A confident match can still be wrong, and the tool can only sometimes tell.** A
+  **Needs review** chip flags rows worth a second look, but it is deliberately quiet: calibrated
+  against a real 339-title list it flags about 3%. Flagging on title similarity alone would have
+  flagged **half the list**, because a correct match often shares almost no characters with what
+  you pasted — `First God Of War` is really `Di Yi Zhan Shen`. What it does catch reliably is a
+  match that scored *worse* on your title than one the ranker passed over. Some wrong matches are
+  not detectable at all; check the picker on rows that matter.
 - **An overwrite you confirm is still an overwrite.** The policy blocks a value going backwards,
   not a value going forwards: a row at chapter 300 replaces an account at 224 without comment,
   because that is an ordinary edit. The diff shows it either way.
 - **Deleting an entry from your AniList account is only possible as part of an undo.** The write
   creates and updates; undo can delete the entries that same run created, if you tick it. Nothing
   else here removes anything from your list, and unchecking a row never does.
+- **One unwritable row used to take its whole batch down.** AniList validates a batched mutation
+  document before running any of it, so a single stale media id made all eight fail. Fixed: the
+  rows that did not execute are re-sent one at a time, so the good ones land and only the bad one
+  is reported. It costs extra requests, but only when something is actually wrong.
+- **The page refuses requests from other websites.** The server is local and has no login, so any
+  page you had open could otherwise POST to it — not to your AniList account, which needs the
+  token that only this page holds, but enough to spend your rate limit or overwrite an export.
 - AniList's own rate limit is the floor on speed; nothing here can make a cold run faster than the
   API allows.
 
@@ -301,7 +384,7 @@ Known defects, each with the code that causes them, are listed in
 python -m unittest discover -s tests -t .
 ```
 
-**216 tests** covering the XML builders, status and date handling, batched resolution, the disk
+**333 tests** covering the XML builders, status and date handling, batched resolution, the disk
 cache, candidate ranking, run control, the GUI event contract, the AniList write payloads, the
 conflict policy (one case per rule, including the blank-progress and score-zero cases that
 motivate it), the per-row diff, the undo snapshot and its restore and delete paths, retrying
@@ -319,8 +402,12 @@ backslash escapes that Python would consume before the browser ever sees them.
 
 | Document | What it holds |
 |---|---|
-| [ROADMAP.md](ROADMAP.md) | What is queued next, and why — including the write-safety work |
-| [MANGA_SUPPORT_NOTES.md](MANGA_SUPPORT_NOTES.md) | What shipped, what was verified, and the known defects |
+| [MANGA_SUPPORT_NOTES.md](MANGA_SUPPORT_NOTES.md) | Every change, what was measured against the live API to prove it, and the defects found along the way |
+
+The planning document that drove the write-safety, batching, list-reading and review work was
+deleted once all four phases shipped and were verified; it lives in git history
+(`git show 7e90450:ROADMAP.md`). Its evidence tables moved into the notes above, which is what the
+code comments cite.
 
 <div align="center">
 

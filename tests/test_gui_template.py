@@ -98,7 +98,8 @@ class AccessibilityTests(unittest.TestCase):
         markup = self._markup()
         backdrops = re.findall(r'<div\s+id="(\w+Modal)"[^>]*>', markup)
         self.assertEqual(sorted(backdrops),
-                         ["fixModal", "previewModal", "undoModal", "writeModal"])
+                         ["copyModal", "fixModal", "listImportModal", "previewModal",
+                          "undoModal", "writeModal"])
         for ident in backdrops:
             tag = re.search(r'<div\s+id="' + ident + r'"[^>]*>', markup, re.S).group(0)
             self.assertIn('role="dialog"', tag, ident + " is not announced as a dialog")
@@ -258,8 +259,8 @@ class WriteDiffTests(unittest.TestCase):
     def test_both_streams_share_one_reader(self):
         script = self._script()
         self.assertEqual(script.count("async function streamSse("), 1)
-        self.assertEqual(script.count("await streamSse(res,"), 2,
-                         "the write and the undo must not drift apart")
+        self.assertEqual(script.count("await streamSse(res,"), 3,
+                         "the write, the undo and the copy must not drift apart")
 
     def test_the_diff_list_is_usable_on_a_narrow_screen(self):
         # A scrolling list inside a dialog is the shape that broke last time.

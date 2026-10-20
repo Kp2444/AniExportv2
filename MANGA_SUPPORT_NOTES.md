@@ -4,17 +4,17 @@
 
 **What shipped, what was actually verified, and what is known to be broken.**
 
-[![Tests](https://img.shields.io/badge/tests-216%20passing-success)](#-verified)
+[![Tests](https://img.shields.io/badge/tests-333%20passing-success)](#-verified)
 [![Browser](https://img.shields.io/badge/jsdom-16%20suites%20%C2%B7%20360%20assertions-success)](#-verified)
 [![Live write](https://img.shields.io/badge/AniList%20write-guarded%20%2B%20undoable%20%28verified%20live%29-success)](#-not-verified)
-[![Defects](https://img.shields.io/badge/known%20defects-4-orange)](#-known-defects)
+[![Defects](https://img.shields.io/badge/known%20defects-0-success)](#-known-defects)
 
 </div>
 
 ---
 
 This is the running record. [README.md](README.md) is the user-facing description;
-[ROADMAP.md](ROADMAP.md) is what is queued next and why.
+Every claim here is backed by [a measurement against the live API](#-measured-against-the-live-api).
 
 The two planning documents this work was built from, `PLAN.md` and `ANILIST_FIRST_PLAN.md`, were
 deleted once everything in them had shipped. They remain in git history:
@@ -33,6 +33,12 @@ git show 8a35779:ANILIST_FIRST_PLAN.md
 [Verified](#-verified) ·
 [Known defects](#-known-defects) ·
 [Write safety](#-write-safety-2026-10-19) ·
+[Batched writes](#-batched-writes-2026-10-19) ·
+[Reading a list](#-reading-a-list-back-out-of-anilist-2026-10-19) ·
+[Match confidence](#-match-confidence-2026-10-19) ·
+[Still open](#-still-open) ·
+[Measured live](#-measured-against-the-live-api) ·
+[Ground-up audit](#-ground-up-audit-2026-10-20) ·
 [Skip list](#-persistent-skip-list-2026-10-19) ·
 [Not verified](#-not-verified)
 
@@ -143,7 +149,7 @@ about the CSS. **Three of the five findings were invisible from the source.**
 ## ✅ Verified
 
 ```bash
-python -m unittest discover -s tests -t .    # 216 tests
+python -m unittest discover -s tests -t .    # 333 tests
 python -m py_compile generate_mal_xml.py gui.py
 python generate_mal_xml.py --help
 ```
@@ -157,12 +163,12 @@ lifecycle, persistence, fixer, sorting, dialog focus, destination copy — four 
 
 ## 🐛 Known defects
 
-Found by reading the write path and the GUI while researching [ROADMAP.md](ROADMAP.md). Each was
+Found by reading the write path and the GUI while planning the write-safety work. Each was
 verified in the code. **None is a regression from the passes above — they all predate them.**
 Worst first, with the phase that closes it.
 
 Defects 1 and 4 were **reproduced against a live throwaway account** (2026-10-19, both the anime
-and the manga path; evidence in `ROADMAP.md` §2.3) — measurements, not readings. **Defects 1, 3,
+and the manga path; evidence in [measured live](#-measured-against-the-live-api)) — measurements, not readings. **Defects 1, 3,
 4, 7 and 8 are now fixed** by the write-safety pass below; they are kept here with their fixes
 noted, because the measurement is the reason the fix is shaped the way it is.
 
@@ -181,16 +187,18 @@ noted, because the measurement is the reason the fix is shaped the way it is.
 > write, reported as `"ok": true`. On the anime path an account at episode 10 went to 3 the same
 > way.
 >
-> **Fixed** by `_reconcile_with_existing` (ROADMAP Phase 1, Step 2): progress, volumes, score and
+> **Fixed** by `_reconcile_with_existing`: progress, volumes, score and
 > repeat can no longer go backwards, and `COMPLETED` is only replaced by a reread. Every change is
 > shown field by field before it is sent, and each blocked field carries a per-row override. →
 > **shipped 2026-10-19**
 
-**2 — The list-wide score box re-stamps every row on every keystroke.** `inputScore`
-(`gui.py:3653-3657`) is bound to `input` and does `currentAnimes.forEach(...)`. With defect 1, one
-stray keypress before a write can zero the score of every entry it touches on the account. The
-status select behaves the same way. Both also overwrite rows the user hand-edited, rows left
-unchecked, and rows hidden by the filter. → **ROADMAP Phase 4**
+**2 — FIXED. The list-wide score box re-stamped every row on every keystroke.** `inputScore` was
+bound to `input` and did `currentAnimes.forEach(...)`, so typing "10" wrote a 1 across the whole
+list first. The status select behaved the same way. Both also overwrote rows the user had
+hand-edited, rows left unchecked, and rows hidden by the filter. Both now go through
+`bulkTargets()` — selected-and-visible rows, or every visible row when nothing is selected — the
+score moved to `change`, and each control carries a label saying which of the two is in force. →
+**shipped 2026-10-19**
 
 **3 — FIXED. A failed existing-entries chunk was swallowed.** `anilist_existing_entries` did
 `if result.get("error"): continue`, so 50 rows silently became creates with no `id` — exactly the
@@ -203,12 +211,18 @@ raises `AniListReadError`, and both the preview and the write refuse rather than
 to `1`. **Measured live:** an entry set to `repeat: 5` was written as Rereading and came back
 `repeat: 1`. `repeat` now gets the same never-lower rule as progress. → **shipped 2026-10-19**
 
-**5 — The inline Find button guesses.** `repairRow` (`gui.py:3500-3535`) applies `entries[0]`
-without rendering the candidate list, unlike the fixer modal. → **ROADMAP Phase 4**
+**5 — FIXED. The inline Find button guessed.** `repairRow` applied `entries[0]` without rendering
+the candidate list, which is the same confidently-wrong failure the fixer exists to prevent. More
+than one hit, or a top hit below the review floor, now opens the fixer on that row with the
+results already in hand. A bare id still applies outright: there is nothing to choose between. →
+**shipped 2026-10-19**
 
-**6 — Match confidence is computed and thrown away.** `_media_rank` (`:328-364`) runs
-`difflib.SequenceMatcher` against both titles, but the ratio only ever serves as a sort key, so a
-confidently-wrong match renders identically to a perfect one. → **ROADMAP Phase 4**
+**6 — FIXED, and the fix is smaller than it looks.** `_media_rank` ran `difflib.SequenceMatcher`
+against both titles and used the ratio only as a sort key, so a confidently-wrong match rendered
+identically to a perfect one. The ratio is now extracted into `_title_ratio`, carried on every
+parsed entry as `match_ratio`, and paired with `runner_up_gap`. **What the calibration showed is
+that the ratio is a poor correctness signal on real data** — see "Match confidence" below. →
+**shipped 2026-10-19**
 
 **7 — FIXED. A stale completion date was left behind.** `completedAt` is sent only when the row
 carries one, which is what stops a blank row from blanking it — but it also meant a write that
@@ -237,7 +251,7 @@ it, so all three are now handled rather than latent:
   score.
 - **`progressVolumes` is `null` on anime entries.** Verified against a live account. `None < 5`
   raises `TypeError` in Python 3, so any naive "never lower" comparison crashes on every anime row.
-  On manga it is written and read back correctly (`ROADMAP.md` §2.3, M1), so the guard has to be
+  On manga it is written and read back correctly ([measured live](#-measured-against-the-live-api), M1), so the guard has to be
   media-type aware rather than simply skipped. **Handled:** every comparison coerces with
   `int(x or 0)`, and the volumes rule only applies to manga.
 - **AniList stamps its own `startedAt`.** On a live create with no `startedAt` sent, the entry came
@@ -247,18 +261,18 @@ it, so all three are now handled rather than latent:
   says so to the user, and the README repeats it. No amount of code on this side can override an
   account setting on the other.
 
-### Performance limitation
+### Performance limitation — fixed
 
-The write is one `SaveMediaListEntry` per row through `_throttle()`, so **339 rows take roughly
-twelve minutes**. Resolution solved the identical problem by aliasing 8 queries per document.
-→ **ROADMAP Phase 2**
+The write was one `SaveMediaListEntry` per row through `_throttle()`, so **339 rows took roughly
+twelve minutes**. It now batches eight per request, the same trick resolution uses, measured at
+one rate-limit unit per document. → **shipped 2026-10-19**, see "Batched writes" above
 
 ---
 
 ## 🛡 Write safety (2026-10-19)
 
 The direct write was the only irreversible thing in the tool, it had no guard, and defect 1 above
-is what it did when pointed at a real account. ROADMAP Phase 1, all six steps, shipped together
+is what it did when pointed at a real account. All six steps of the write-safety work shipped together
 because they are one feature: a write you can see before it happens and reverse after it does.
 
 **What the account is read for.** `ANILIST_EXISTING_ENTRIES_QUERY` already fetched `status`,
@@ -302,7 +316,7 @@ retry keeps writing into the original run's snapshot, so an entry created on the
 still undoable.
 
 **AniList edits some fields itself**, which the diff has to predict or it lies. Measured by probes
-that bypass this tool entirely (`ROADMAP.md` §2.3, L7-L9):
+that bypass this tool entirely ([L7-L9](#-measured-against-the-live-api)):
 
 - While `status` is `COMPLETED`, `progress` and `progressVolumes` are **forced to the media
   total** - when a lower value is sent explicitly, and when none is sent at all. So a forced
@@ -326,7 +340,7 @@ driving the shipped diff renderer. 214 tests pass in total, 140 before this pass
 confirmed by introspection against the live API before either was used.
 
 **Verified, live** on the throwaway account, through the running server's own endpoints
-(`ROADMAP.md` §2.3, P1-P12): 8 fields blocked across a 3-row conflict write, every one predicted
+([P1-P12](#-measured-against-the-live-api)): 8 fields blocked across a 3-row conflict write, every one predicted
 beforehand; `CURRENT` -> `REPEATING` still allowed, so the carve-out does not over-block; the
 override honoured; the stale finish date stranded on purpose and then cleared, which **answers the
 last open question - an all-`null` `FuzzyDateInput` does clear a date**; that cleared date restored
@@ -336,8 +350,7 @@ and the created entry deleted only once the box was ticked, the **first live exe
 `DeleteMediaListEntry`**; and a genuine per-row rejection reported by name, then retried as 1 row
 rather than 2.
 
-**Two defects in Phase 1 as first shipped, found by that live run and fixed** (`ROADMAP.md` §2.3,
-P13-P14). Both are recorded because neither was reachable by reading the code:
+**Two defects in Phase 1 as first shipped, found by that live run and fixed** ([P13-P14](#-measured-against-the-live-api)). Both are recorded because neither was reachable by reading the code:
 
 - **Undo could not restore `repeat` after a reread write.** The carve-out lets a row take an entry
   `COMPLETED` -> `REPEATING`; undoing that sends `REPEATING` -> `COMPLETED`, and L8's increment
@@ -369,6 +382,319 @@ P13-P14). Both are recorded because neither was reachable by reading the code:
 
 **Still not verified:** cancellation mid-write, and a write large enough to need more than one
 50-id existing-entries chunk.
+
+---
+
+## 📦 Batched writes (2026-10-19)
+
+The write sent one `SaveMediaListEntry` per row through a ~2.1s throttle, so 339 rows took roughly
+twelve minutes. `_write_batch_query` now builds one document of up to eight aliased saves, with
+only the arguments each row actually carries declared - sending an explicit null for a field the
+row left alone would blank it on the account.
+
+**Partial failure.** Aliases execute serially and a failing one does not stop the rest, so the
+authoritative per-row signal is `data["mk"] is None`. Error messages carry `locations` but no
+`path`, so they are matched back to an alias by the character offset recorded when the document
+was built; an error that cannot be placed is reported against every failed alias in that batch
+rather than guessed at.
+
+> [!CAUTION]
+> **One bad row used to take its whole batch down, and the audit found it.** AniList validates the
+> arguments of the entire document *before* executing any of it and answers HTTP 400, so a single
+> stale media id came back as `{m0: null, m1: null, m2: null}` - **the good rows never ran**. The
+> roadmap's premise that "a failing alias does not stop later ones" is true for runtime errors and
+> false for validation. Worse, "Retry failed" re-batched the same rows, so the batch could never
+> succeed. Measured live: 3 rows with one bad id wrote **0 of 3**.
+>
+> `anilist_write_batch` now re-sends the stalled rows one at a time when a document is refused on
+> validation, and only then - auth and transport failures are not retried, because every row would
+> fail the same way. Same case after the fix: **2 of 3 written**, the bad row named on its own.
+
+**Measured, at the size that ships.** The original spike used two aliases and argued eight should
+behave the same. A real eight-alias document took `X-RateLimit-Remaining` from 18 to 17 - **one
+request for eight mutations**, against a control request that also cost 1 - and all eight aliases
+applied. A three-row write through the endpoint took 4.6s wall clock with one request, three
+progress events and an ETA.
+
+**The undo batches too.** Restores are `SaveMediaListEntry` like any write, so they go eight to
+a document; deletes are a different mutation and cannot share one, so they stay serial. Order
+survives batching, which matters because a repeat repair is a second write for a row and has to
+land after the restore it repairs - verified live: 4 restores went out as **one request**, with
+four progress events and `restored: 3`, the repair not counted twice.
+
+**The snapshot is saved once per create, not once per batch.** Saving per batch left a window
+where a crash between a batch returning and the file being written stranded up to eight created
+entries with no recorded id - and undo cannot delete what it cannot name. The file is small and
+the write is atomic, so the cost is noise.
+
+**Two things the UI had to say differently.** The write phase gained the ETA only the resolve
+phase had. And cancellation is now batch-level: a cancel lands between batches, so the rows
+already in flight still get written, and the toast says so rather than implying otherwise.
+
+---
+
+## 📥 Reading a list back out of AniList (2026-10-19)
+
+Nothing could read an AniList list, which made AniList → MAL XML impossible and left no way to ask
+"how much of this list am I already tracking". `anilist_list_collection` reads one, chunking while
+`hasNextChunk`.
+
+Details that are not arbitrary:
+
+- `forceSingleCompletedList: true`, or a split completed list comes back as several groups.
+- Groups with `isCustomList` are skipped, and everything is deduped by media id anyway: a custom
+  list repeats entries that already appear under their status group.
+- `score (format: POINT_100)`, for the same reason the write needed it - a bare score arrives in
+  whatever format the account displays.
+- A FuzzyDate becomes a date **only when all three parts are present**. A partial one becomes
+  blank rather than an invented first-of-the-month.
+- `ANILIST_STATUS_REVERSE` is media-type aware, because the forward map is not invertible:
+  `CURRENT` is reached from both "reading" and "watching". A test asserts every enum member maps
+  back for both types, so a future AniList addition fails loudly.
+- `perChunk` starts at 500 and halves **at most twice**. A wrong username fails identically to an
+  over-large chunk, and the original five retries only delayed a wrong answer; the error now names
+  all three possible causes instead of claiming AniList was unreachable.
+
+A token travels even when a username is given. Dropping it meant you could not read **your own
+private** list by typing your own name - only by leaving the field blank. Visibility is decided by
+who the request authenticates as, so sending both is simply correct.
+
+Three surfaces, one merge: `POST /api/anilist-import`, a **From AniList…** button, and
+`--from-anilist USERNAME` on the CLI. The button reuses the MAL-XML import merge rather than
+growing a second one - the merge gained an AniList-id fallback, since an AniList row may have no
+MAL id at all and a MAL export never carries an AniList id.
+
+**Measured:** 14 entries read from a real account with a token *and* by public username with none;
+written to MAL XML by the CLI; read back by `parse_mal_xml` with status, score, progress, notes
+and both dates intact. The one entry with no MAL id was reported, not dropped.
+
+---
+
+## 🔍 Match confidence (2026-10-19)
+
+`_media_rank` computed a title-similarity ratio and used it only as a sort key, so a confidently
+wrong match looked exactly like a perfect one. The ratio is now extracted into `_title_ratio`,
+used by both the ranker and the badge, and carried on every parsed entry.
+
+**The calibration is the interesting part, because it overturned the plan.** Run over the user's
+own 338-line `manga.txt` (339 titles, 268 resolved):
+
+| Threshold | Rows flagged |
+|---|---|
+| `ratio < 0.6` (proposed) | 121 of 268 — **45.1%** |
+| `ratio < 0.6 or gap < 0.05` (proposed rule) | 138 of 268 — **51.5%** |
+| `gap < 0 or ratio < 0.15` (shipped) | 9 of 268 — **3.4%** |
+
+A rule that flags half the list is not a review queue; it trains the user to ignore the chip. The
+reason the proposed floor fails is visible in the data: this list is full of translated titles
+whose official romaji name shares almost no characters with the English one that was pasted.
+`First God Of War` resolves **correctly** to `Di Yi Zhan Shen` at a ratio of 0.129. Median ratio is
+0.677 and a third of all matches are exact, so the low tail is mostly correct, not wrong.
+
+**No floor works.** The known-bad case recorded in the original plan —
+`I Am Being Chased To Fall In Love Everyday` → `Forced to Date with BOSS Everyday` — sits at
+**0.56**, mid-distribution. A floor of 0.55 misses it; 0.6 catches it along with 121 others. It
+resolved to a single candidate, so the runner-up gap cannot catch it either. **That case is not
+detectable by either signal**, and saying so is more honest than shipping a threshold that flags
+half the list to catch one row.
+
+**What does carry signal is an inversion:** the entry the ranker chose matched the searched title
+*worse* than a candidate it passed over, because a tier above the title score - usually "has a MAL
+id" - overrode it. Five of 268 rows, and all five look wrong on inspection, the worst being
+`Dragon Master` → `I Got Reincarnated as a Maid…` at a gap of −0.612. A plain **tie** is not a
+signal: `One Punch Man` ties with `One-Punch Man` at ratio 1.0 and is right, which is why
+`REVIEW_TIE_GAP` is 0.0 rather than the proposed 0.05.
+
+The chip is a filter and the row carries the reason, because "needs review" with no explanation is
+just nagging. A hand-picked match clears the flag: the ratio describes the original search and
+means nothing once a person has chosen.
+
+**A bug the calibration found first.** The bulk resolver parses the chosen node directly and
+attaches `_candidates` separately, so `runner_up_gap` - which only exists on the ranked list -
+never reached the resolved row. Every row in the first run came back with `gap: None`.
+
+**Cost:** `CACHE_VERSION` goes to 2, so every cache is invalidated once and the next run is a cold
+resolve. The alternative is serving entries with no confidence data at all.
+
+---
+
+## 🧭 Still open
+
+Not unfinished work - everything planned has shipped and been verified. These two need data that
+only a real account can supply:
+
+- **The review floor has only been calibrated on manga.** `REVIEW_RATIO_FLOOR = 0.15` came from a
+  338-line manga list where translated titles are the norm and a correct match often shares almost
+  no characters with what was pasted. An anime list should sit much higher, so the constant may
+  deserve to be per media type rather than one number. Re-run the calibration against an anime list
+  before changing it.
+- **Any change to `_media_rank` invalidates both thresholds.** They describe the ranker as it is
+  today, not a property of the data.
+
+---
+
+## 🔬 Measured against the live API
+
+Everything below was observed, not reasoned about: a response from
+`graphql.anilist.co`, or an account read back after a write. The labels are stable because the
+code cites them — a comment saying "measured, not assumed (L5)" points here.
+
+These moved from the planning document when it was deleted; all four phases it described had
+shipped and been verified. It lives in git history (`git show 7e90450:ROADMAP.md`) along with the
+reasoning that produced them.
+
+### Schema facts (E) — introspection and unauthenticated queries
+
+| # | Fact |
+|---|---|
+| E2 | `MediaListCollection` accepts a **username with no token**, and pages through `hasNextChunk` |
+| E4 | **`MediaList.score` takes `format: ScoreFormat`.** Without it the account's own display scale comes back, so a `POINT_5` user's 4 would be compared against a 0–100 value |
+| E6 | **`progressVolumes` is `null` on anime entries** |
+| E8 | **Split completed lists appear as separate groups with the same status.** One account returned `Completed TV` (7) and `Completed TV Short` (1); `forceSingleCompletedList: true` merged them into one group of 8 |
+| E9 | `MediaListStatus` is exactly `CURRENT, PLANNING, COMPLETED, DROPPED, PAUSED, REPEATING` |
+| E10 | `FuzzyDate` and `FuzzyDateInput` are both `{year, month, day}` as nullable `Int` |
+| E11 | Aliased mutations parse and resolve **per alias** — each gets its own entry in `data` and its own error with `locations`. True for runtime errors; **false for validation**, see P22 |
+| E12 | `errors[]` carries `message`, `status`, `locations` and `validation`. **No `path` field**, so an error cannot be mapped to a row by path |
+| E13 | `DeleteMediaListEntry(id)` exists and returns `Deleted { deleted }` |
+| E15 | `SaveMediaListEntry` accepts `id, mediaId, status, score, scoreRaw, progress, progressVolumes, repeat, priority, private, notes, hiddenFromStatusLists, customLists, advancedScores, startedAt, completedAt` |
+
+### The write, on a throwaway account (L, M)
+
+The account was empty before the first run. Media ids were resolved through this repo's own
+lookups, so nothing depended on search ranking.
+
+| # | Step | Result |
+|---|---|---|
+| L1 | Write Lain at episode 3 onto an empty account | Entry created, `CURRENT progress=3`. **The create path had never been run before** |
+| L2 | Write the identical row again | Classified as an update, entry id **unchanged**. The one guarantee the README makes — a repeat cannot duplicate — holds live |
+| L3 | Write episode 10, then episode 3 | Account went `3 → 10 → 3`. **The overwrite reproduced, reported as `"ok": true`** |
+| L5 | Rate-limit cost of a 2-alias mutation document | Control: three single requests took `X-RateLimit-Remaining` 15 → 14 → 13. The aliased document then took it 13 → 12: **1 request for 2 mutations** |
+| L6 | Did both aliases apply? | Yes — two distinct new entries, both present on a fresh read |
+| L7 | **While `status` is `COMPLETED`, AniList forces `progress` and `progressVolumes` to the media total** | Sent `COMPLETED` + `progress: 40` against a 147-chapter work → stored **147**. An entry at `CURRENT, 40` sent only `status: COMPLETED` → also **147**. `CURRENT` + 40 stores 40, so the status is what does it |
+| L8 | **`REPEATING` → `COMPLETED` increments `repeat` by one**, whatever is sent | Sent `repeat: 5` → stored **6**. Sent none → also **6** |
+| L9 | A transition **to** `REPEATING` zeroes `progress` only when none is sent | With `progress: 100` → kept 100; without → 0. Every payload here sends one, so this cannot bite |
+| M1 | Create Punpun at chapter 40 / volume 4 | `ch=40 vol=4`. **`progressVolumes` works live.** AniList also stamped `startedAt` with today, which was never sent |
+| M3 | Same row with **chapters blank**, `Reading` | `COMPLETED 147/13 score 90` → **`CURRENT 0/0 score 0`.** One blank row destroyed four fields, reported `"ok": true` |
+| M4 | `completedAt` after M3 | **Still set.** The entry was in progress *and* finished on a date |
+| M5 | `repeat: 5`, then write the row as `Rereading` | `5` → **`1`**: the literal `1` in the payload reset the account's count |
+| M6 | Create with notes and dates, `finish_date: 0000-00-00` | Notes and `startedAt` both stored; the placeholder date correctly skipped |
+| M7 | Does AniList invent a `startedAt`? | **Yes**, when an entry becomes in-progress without one. An account setting, not this tool — so restoring "no start date" may not be possible |
+
+### Write safety, after it shipped (P)
+
+| # | Step | Result |
+|---|---|---|
+| P1 | 3-row write with deliberate conflicts | **8 fields blocked across 3 rows**, every one named in the preview first. The account did not move. Two blocks the plan never listed: a `Plan to read` row would have zeroed 249 chapters *and* 22 volumes |
+| P2 | `CURRENT` → `REPEATING` on the same write | **Allowed.** The `COMPLETED` carve-out does not over-block |
+| P5 | **Does an all-`null` `FuzzyDateInput` clear a date?** | **Yes.** This is how the stale finish date is cleared |
+| P6 | Undo the write that cleared it | Date **restored** |
+| P7 | Undo a 3-row write | All three restored field for field, notes and both dates included |
+| P8 | Snapshot retention | The oldest snapshot was **gone** after six writes; five are kept, and undo 404s cleanly rather than guessing |
+| P9 | Create + undo, delete box unticked | `created_entry_id` recorded as the write ran; undo restored the update and **left the created entry alone** |
+| P10 | Same snapshot, box ticked | The created entry was deleted. **First live exercise of the delete path** |
+| P11 | A row AniList rejects, mid-write | Reported against that row by name; the other row still wrote |
+| P12 | Retry | Re-sent **1 row, not 2**, with no fresh account read. A spent run id is refused |
+| P13 | Undo after a reread write | **Found a defect.** Undo restored `repeat` as 5, not 4 — L8's increment beats the value sent alongside the status. A follow-up write carrying only `repeat` does stick, so undo now emits one |
+| P14 | Two rows resolving to one entry | **Found a second defect.** Both were written, the later over the earlier. The first now wins and the rest are skipped with a reason |
+| P15 | **An 8-alias document**, the real batch size | `X-RateLimit-Remaining` 18 → 17: **one request for eight mutations**. All eight applied |
+| P20 | Reading a list back | 14 entries read with a token **and** by public username with none; written to MAL XML and read back with every field intact |
+| P22 | **A batch with one bad row** | `{m0: null, m1: null, m2: null}` and HTTP 400 — AniList validates the whole document before running any of it, so **the good rows never executed**, and retry re-batched them for ever. Fixed by re-sending stalled rows one at a time on a validation refusal. Same case after: **2 of 3 written** |
+| P23 | Undo batched | 4 restores went out as **one request**; a repeat repair is not counted as a second restored row |
+| P25 | **Cancellation mid-write** | Cancelled a 14-row write in flight: stopped at exactly **8 of 14** — the batch in flight finished, the next never started, and a snapshot was offered so the partial write stays undoable |
+| P26 | **Both chunk loops, forced against real data** | `MediaListCollection` at `perChunk=5` read the same 14 entries across **3 chunks** with no loss or duplication; the 50-id existing-entries loop merged 14 ids across 3 requests and returned every one |
+
+---
+
+## 🔎 Ground-up audit (2026-10-20)
+
+A re-read of the whole repository against the running app, rather than against
+the plan. Six real defects, four of them invisible to the test suite because
+the suite itself was part of the problem.
+
+**The test suite was reaching the live AniList API.** Two mocks patched a name
+the code under test never calls:
+
+- `test_export_state.py` patched `gui.resolve_manga_entries`, but `/api/process`
+  resolves through `resolve_many_entries`. The patch did nothing, the real
+  resolver ran, and the test only passed because the network happened to work.
+- `test_batch_resolution.py` stubbed `_execute_anilist_batch` but left
+  `_execute_anilist_request` alone, so sequel expansion walked out to AniList.
+
+Proved by wrapping `socket.socket.connect`: the suite made two outbound
+connections to AniList per run. It would have failed offline and it spent rate
+limit every time. Both mocks now patch what is actually called, and
+`tests/__init__.py` blocks non-loopback connections for the whole suite - a
+vacuous mock now fails loudly instead of quietly phoning home. **Outbound
+connections during the suite: 0.**
+
+> [!CAUTION]
+> **Any website you had open could POST to the server.** It is local and has no
+> login, and a JSON body sent as `Content-Type: text/plain` is a CORS "simple
+> request", so nothing preflighted it and nothing refused it. Measured against
+> the running app: a POST carrying `Origin: https://evil.example` was accepted.
+>
+> It could not write to AniList - the token lives in the page and is never
+> stored server-side - but it could spend the AniList rate limit through
+> `/api/process` and overwrite the export through `/api/update-export`.
+>
+> `do_POST` now refuses a request whose `Origin` is present and is not this
+> server. An absent `Origin` still passes, because curl and the tests send none.
+>
+> **The first version of that guard broke the app**, and the audit caught it:
+> it compared against `127.0.0.1` only, so opening the page as
+> `http://localhost:5173` - which the browser treats as a different origin -
+> got a 403 on every action. Every loopback spelling is accepted now, while a
+> lookalike like `127.0.0.1.evil.example` is not.
+
+**A long write could not be stopped, and the fix needed a second pass.**
+`runControls` - the Cancel and Pause buttons - was only ever shown by the
+resolve run. The write, undo and copy runs
+register with the same control block and check `cancel` between batches, but
+the buttons never appeared, so there was no way to stop a copy of a large
+account from the page. Cancel is now shown for all of them. **Pause stays
+hidden** for write-type runs: only the resolve loop waits on it, and a button
+that does nothing is worse than no button.
+
+Showing it was not enough. In the browser the control turned out to live in the
+**left column's panel footer**, under the Process button - sensible for the
+resolve run, which starts there, but a write, an undo and a copy all start from
+the right column and report into the progress card on the right. The Cancel
+button was rendering 1400px down the page, half a screen below the fold, while
+the user watched the progress bar. It now sits **inside the progress card**,
+directly under the bar, which is the one place every run type reports to. The
+resolve run gets the same benefit: its controls used to be nowhere near its own
+progress.
+
+**A half-finished copy could not be undone.** The copy writes anime and manga
+as separate stages with a snapshot each. `lastWriteSnapshots` was only set on
+`copy_complete`, so a copy that wrote the anime stage and then failed - or was
+cancelled - left the account changed with no Undo button, even though the
+snapshot was sitting on disk. Both paths now hand the collected snapshots over.
+
+**The copy sat silent while it read.** The server emitted `stage_started` and
+the page ignored it, so reading two whole lists showed nothing until the first
+row was written. The page now says which list it is reading, and that nothing
+has been written yet.
+
+**Switching media type silently destroyed a resolve.** The Media Type dropdown
+cleared every row - no confirmation, no toast - and `saveState` then wrote the
+empty list to storage, so a 339-title resolve was gone for good on one mis-click,
+unrecoverable even by reloading. Rows genuinely cannot cross media types (an
+anime row has no chapter count and the wrong ids), so clearing was right;
+losing them was not. They are now set aside per type and come back when you
+switch back, with a toast either way. Driven in the browser: resolve 3 anime →
+switch to manga ("3 anime rows set aside") → switch back → all three returned
+with their totals intact.
+
+**A fixed row still claimed to be unresolved.** The placeholder carries
+`unresolved: true`; a picked match replaces the row's identity but has no such
+key, so `Object.assign` left the old flag behind. Nothing in the page reads it,
+so nothing was visibly wrong - but a field that states the opposite of the truth
+is a trap for whatever reads it next. Cleared on both fix paths.
+
+**Dead code.** Batching the undo removed the last caller of
+`anilist_write_entry`; it was still defined, still imported, and referenced by
+nothing - along with three other unused imports in `gui.py`. Removed.
 
 ---
 
@@ -405,7 +731,7 @@ any page in the browser can post to a local port.
 
 > [!IMPORTANT]
 > **The direct AniList write has been run against a live throwaway account** (2026-10-19, both the
-> anime and the manga path; evidence in `ROADMAP.md` §2.3). Established: creates work,
+> anime and the manga path; evidence in [measured live](#-measured-against-the-live-api)). Established: creates work,
 > `progressVolumes`, `notes` and dates all land correctly, `0000-00-00` is correctly skipped, a
 > repeated write of the same row is classified as an update and keeps the same list-entry `id` — so
 > duplicate creation really is designed out — and defects 1, 4 and 7 are real rather than inferred.
@@ -421,6 +747,6 @@ any page in the browser can post to a local port.
 
 <div align="center">
 
-Records are kept honest on purpose · see [ROADMAP.md](ROADMAP.md) for what closes each defect
+Records are kept honest on purpose · every fix cites the measurement that proved it
 
 </div>

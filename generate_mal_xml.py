@@ -374,6 +374,12 @@ def _parse_media_node(media: Dict[str, Any], fallback_title: str = "") -> Dict[s
         "can_export_xml": mal_id > 0,
         "can_write_anilist": anilist_id > 0,
     }
+    # How close this was to what the user actually typed. None when nothing was
+    # searched - a row read back from an AniList list was never a guess.
+    if fallback_title:
+        ratio = round(_title_ratio(media, fallback_title), 4)
+        entry["match_ratio"] = ratio
+        entry["needs_review"] = ratio < REVIEW_RATIO_FLOOR
     if detail:
         entry["details"] = detail
     return entry
@@ -400,6 +406,17 @@ def _candidates(nodes: Sequence[Dict[str, Any]], media_type: str, fallback_title
             continue
         seen.add(key)
         out.append(parse(node, fallback_title=fallback_title))
+    if out and out[0].get("match_ratio") is not None:
+        # A tie is as suspicious as a poor match: two candidates scoring the
+        # same means the ranker had no real reason to prefer either. With fewer
+        # than two candidates there is no gap, which is not the same as a gap
+        # of zero and must not be read as a tie.
+        gap = None
+        if len(out) > 1 and out[1].get("match_ratio") is not None:
+            gap = round(out[0]["match_ratio"] - out[1]["match_ratio"], 4)
+        out[0]["runner_up_gap"] = gap
+        if gap is not None and gap < REVIEW_TIE_GAP:
+            out[0]["needs_review"] = True
     return out
 
 
@@ -409,6 +426,44 @@ def _normalize_title(value: Any) -> str:
     text = "".join(ch for ch in text if not unicodedata.combining(ch))
     text = "".join(ch if ch.isalnum() else " " for ch in text)
     return " ".join(text.split())
+
+
+# Calibrated against the user's own 339-title list, not guessed. The plan's
+# proposed floor of 0.6 would have flagged **51.5% of resolved rows**, because
+# this list is full of translated titles whose official romaji name shares
+# almost no characters with the English one the user pasted - "First God Of
+# War" resolves correctly to "Di Yi Zhan Shen" at a ratio of 0.129. Title
+# similarity is therefore close to useless as a correctness signal here.
+#
+# What does carry signal is an *inversion*: the entry the ranker chose matched
+# the searched title worse than a candidate it passed over, which means a tier
+# above the title score (usually "has a MAL id") overrode the better name. All
+# five inversions in the calibration look wrong on inspection. A plain tie does
+# not count - "One Punch Man" ties with "One-Punch Man" at 1.0 and is right.
+#
+# Together these flag 3.4% of rows (9 of 268). Numbers and method are recorded
+# in MANGA_SUPPORT_NOTES under "Match confidence".
+REVIEW_RATIO_FLOOR = 0.15      # a floor of last resort; flagged 4 rows, all of them correct
+REVIEW_TIE_GAP = 0.0           # gap < 0 means an inversion, which is the real signal
+
+
+def _title_ratio(node: Dict[str, Any], search_title: str) -> float:
+    """How close a node's titles are to what was searched, 0.0 to 1.0.
+
+    The better of the English and romaji forms, both folded to a comparable
+    shape first. Lives here rather than inside the ranking key because it is
+    wanted twice: to sort, and to tell the user how sure the sort was.
+    """
+    wanted = _normalize_title(search_title)
+    if not wanted:
+        return 0.0
+    titles = node.get("title") or {}
+    english = _normalize_title(titles.get("english"))
+    romaji = _normalize_title(titles.get("romaji"))
+    return max(
+        difflib.SequenceMatcher(None, wanted, english).ratio() if english else 0.0,
+        difflib.SequenceMatcher(None, wanted, romaji).ratio() if romaji else 0.0,
+    )
 
 
 def _media_rank(node: Dict[str, Any], search_title: str = "", prefer_mal_id: bool = True) -> tuple:
@@ -436,11 +491,7 @@ def _media_rank(node: Dict[str, Any], search_title: str = "", prefer_mal_id: boo
             score += 300
         elif romaji and romaji == wanted:
             score += 260
-        best_ratio = max(
-            difflib.SequenceMatcher(None, wanted, english).ratio() if english else 0.0,
-            difflib.SequenceMatcher(None, wanted, romaji).ratio() if romaji else 0.0,
-        )
-        score += best_ratio * 200
+        score += _title_ratio(node, search_title) * 200
     popularity = int(node.get("popularity") or 0)
     score += min(50, round(math.log10(popularity + 1) * 10))
     if not prefer_mal_id:
@@ -524,6 +575,12 @@ def _parse_manga_node(media: Dict[str, Any], fallback_title: str = "") -> Dict[s
         "can_export_xml": int(media.get("idMal") or 0) > 0,
         "can_write_anilist": int(media.get("id") or 0) > 0,
     }
+    # How close this was to what the user actually typed. None when nothing was
+    # searched - a row read back from an AniList list was never a guess.
+    if fallback_title:
+        ratio = round(_title_ratio(media, fallback_title), 4)
+        entry["match_ratio"] = ratio
+        entry["needs_review"] = ratio < REVIEW_RATIO_FLOOR
     if detail:
         entry["details"] = detail
     return entry
@@ -1038,7 +1095,7 @@ BATCH_SIZE = 8
 last_run_failures: List[List[str]] = []
 CACHE_TTL_SECONDS = 7 * 24 * 60 * 60
 CACHE_MAX_ENTRIES = 10000
-CACHE_VERSION = 1
+CACHE_VERSION = 2          # entries gained match_ratio/needs_review
 _cache_lock = threading.Lock()
 
 
@@ -1182,7 +1239,15 @@ def resolve_many_entries(
             # resolver never applied that rule, so the two paths disagreed.
             if best and int(best.get("id") or 0) > 0:
                 entry = parse(best, fallback_title=name)
-                entry["candidates"] = _candidates(nodes, media_type, name, prefer_mal_id)
+                candidates = _candidates(nodes, media_type, name, prefer_mal_id)
+                entry["candidates"] = candidates
+                # The runner-up gap only exists where the ranked list does, and
+                # the chosen entry is parsed from the node rather than taken
+                # from that list, so it has to be carried across explicitly.
+                if candidates:
+                    entry["runner_up_gap"] = candidates[0].get("runner_up_gap")
+                    if candidates[0].get("needs_review"):
+                        entry["needs_review"] = True
                 found[name] = [entry]
             if stage == "resolve":
                 done += 1
@@ -1360,6 +1425,178 @@ ANILIST_STATUS_MAP = {
 }
 
 
+# AniList's own vocabulary back into MAL's. ANILIST_STATUS_MAP above is not
+# invertible - CURRENT is reached from both "reading" and "watching" - so the
+# reverse has to be media-type aware, and lives next to it so the two cannot
+# drift apart.
+ANILIST_STATUS_REVERSE = {
+    "anime": {"CURRENT": "Watching", "PLANNING": "Plan to Watch", "COMPLETED": "Completed",
+              "PAUSED": "On-Hold", "DROPPED": "Dropped", "REPEATING": "Rewatching"},
+    "manga": {"CURRENT": "Reading", "PLANNING": "Plan to Read", "COMPLETED": "Completed",
+              "PAUSED": "On-Hold", "DROPPED": "Dropped", "REPEATING": "Rereading"},
+}
+
+ANILIST_LIST_COLLECTION_QUERY = """
+query ($name: String, $userId: Int, $type: MediaType, $chunk: Int, $perChunk: Int) {
+  MediaListCollection (userName: $name, userId: $userId, type: $type,
+                       chunk: $chunk, perChunk: $perChunk,
+                       forceSingleCompletedList: true) {
+    hasNextChunk
+    lists {
+      name
+      status
+      isCustomList
+      entries {
+        id status progress progressVolumes repeat notes
+        private hiddenFromStatusLists priority
+        score (format: POINT_100)
+        startedAt { year month day }
+        completedAt { year month day }
+        media {
+          id idMal format status popularity
+          title { english romaji }
+          episodes chapters volumes
+          startDate { year }
+          coverImage { medium }
+        }
+      }
+    }
+  }
+}
+"""
+
+# 500 is the commonly used value; the documented maximum is not published, so a
+# wrong guess is handled by halving rather than by asking.
+LIST_PER_CHUNK = 500
+
+
+def _full_date(value: Any) -> str:
+    """A FuzzyDate as YYYY-MM-DD, but only when all three parts are present.
+
+    A partial date becomes blank rather than an invented day: `_mal_date`
+    rejects anything that is not a complete padded date, and guessing the 1st
+    would put a date on the account the user never set.
+    """
+    if not isinstance(value, dict):
+        return ""
+    year, month, day = value.get("year"), value.get("month"), value.get("day")
+    if not (year and month and day):
+        return ""
+    return "%04d-%02d-%02d" % (int(year), int(month), int(day))
+
+
+def _row_from_list_entry(entry: Dict[str, Any], media_type: str) -> Optional[Dict[str, Any]]:
+    """One MediaList entry as an export row, the shape the resolvers produce."""
+    media = entry.get("media") or {}
+    if not media.get("id"):
+        return None
+    parse = _parse_manga_node if media_type == "manga" else _parse_media_node
+    row = parse(media)
+    status = ANILIST_STATUS_REVERSE[media_type].get(str(entry.get("status") or ""))
+    if status:
+        row["status"] = status
+    # Scores come back as POINT_100 by request, so the account's display format
+    # cannot leak in; the rows this app works with are 0-10.
+    row["score"] = int(round(int(entry.get("score") or 0) / 10))
+    if media_type == "manga":
+        row["my_read_chapters"] = int(entry.get("progress") or 0)
+        row["my_read_volumes"] = int(entry.get("progressVolumes") or 0)
+        row["_rereading"] = str(entry.get("status") or "") == "REPEATING"
+    else:
+        row["my_watched_episodes"] = int(entry.get("progress") or 0)
+        row["_rewatching"] = str(entry.get("status") or "") == "REPEATING"
+    row["comments"] = str(entry.get("notes") or "")
+    row["start_date"] = _full_date(entry.get("startedAt"))
+    row["finish_date"] = _full_date(entry.get("completedAt"))
+    # AniList-only flags. Always set, so "absent" (a MAL-XML row) stays
+    # distinguishable from "present and false" (an AniList row that is public).
+    row["private"] = bool(entry.get("private"))
+    row["hidden_from_status_lists"] = bool(entry.get("hiddenFromStatusLists"))
+    row["priority"] = int(entry.get("priority") or 0)
+    row["original"] = row.get("title", "")
+    return row
+
+
+def anilist_list_collection(media_type: str, username: str = "", token: str = "",
+                            user_id: int = 0, per_chunk: int = LIST_PER_CHUNK) -> Dict[str, Any]:
+    """Read a whole AniList list. Read-only, and a public list needs no token.
+
+    Returns {ok, entries, skipped, chunks, per_chunk} or {ok: False, error}.
+    A private list queried by name comes back with no lists rather than an
+    error, so that case is named plainly instead of being reported as empty.
+    """
+    media_enum = "MANGA" if media_type == "manga" else "ANIME"
+    variables: Dict[str, Any] = {"type": media_enum}
+    if user_id:
+        variables["userId"] = int(user_id)
+    elif username:
+        variables["name"] = str(username)
+    else:
+        return {"ok": False, "error": "A username or a token is needed to read a list."}
+
+    rows: List[Dict[str, Any]] = []
+    seen: set = set()
+    skipped = 0
+    chunk = 1
+    halvings = 0
+    saw_any_list = False
+    while True:
+        payload = dict(variables, chunk=chunk, perChunk=per_chunk)
+        if token:
+            result = _execute_anilist_authenticated(ANILIST_LIST_COLLECTION_QUERY, payload, token)
+            data, error = result.get("data"), result.get("error")
+        else:
+            # No error detail comes back from this path, only None, and a
+            # wrong name fails exactly like an unreachable API - so leave the
+            # message to the handler below, which names both possibilities.
+            data = _request_graphql(ANILIST_LIST_COLLECTION_QUERY, payload)
+            error = None
+        if error or data is None:
+            # A perChunk the server will not accept is indistinguishable from
+            # any other failure here, so halve and retry - but only twice. A
+            # wrong username fails identically, and retrying it five times just
+            # delays a wrong answer.
+            if per_chunk > 125 and halvings < 2:
+                per_chunk //= 2
+                halvings += 1
+                continue
+            if error:
+                return {"ok": False, "error": error}
+            return {"ok": False,
+                    "error": ("AniList would not return that list. The name may be wrong or "
+                              "the list private - a private list can only be read with a "
+                              "token - or AniList may be unreachable.")}
+        collection = (data or {}).get("MediaListCollection") or {}
+        for group in collection.get("lists") or []:
+            # A custom list repeats entries that already appear under their
+            # status group. Skipping the custom groups is the precise fix; the
+            # dedupe below is the belt and braces.
+            if group.get("isCustomList"):
+                continue
+            saw_any_list = True
+            for entry in group.get("entries") or []:
+                media_id = ((entry or {}).get("media") or {}).get("id")
+                if not media_id or media_id in seen:
+                    continue
+                seen.add(media_id)
+                row = _row_from_list_entry(entry, media_type)
+                if row:
+                    rows.append(row)
+                else:
+                    skipped += 1
+        if not collection.get("hasNextChunk"):
+            break
+        chunk += 1
+        if chunk > 100:                      # 50,000 entries; nobody has that
+            break
+    if not rows and not saw_any_list and not token:
+        return {"ok": False,
+                "error": ("AniList returned no lists for that name. The list may be "
+                          "private, which only a token can read, or the name may be wrong.")}
+    return {"ok": True, "media_type": media_type, "entries": rows,
+            "skipped": skipped, "chunks": chunk, "per_chunk": per_chunk}
+
+
 def _execute_anilist_authenticated(query: str, variables: Dict[str, Any], token: str,
                                    max_retries: int = 3) -> Dict[str, Any]:
     """Authenticated request. Returns {"data": ...} or {"error": "..."}.
@@ -1385,7 +1622,9 @@ def _execute_anilist_authenticated(query: str, variables: Dict[str, Any], token:
             errors = result.get("errors") or []
             if errors and not result.get("data"):
                 return {"error": _describe_anilist_error(errors)}
-            return {"data": result.get("data") or {}}
+            # A batched mutation can come back with data *and* errors: one alias
+            # failed and the rest applied. Callers that do not batch ignore this.
+            return {"data": result.get("data") or {}, "errors": errors}
         except urllib.error.HTTPError as exc:
             _record_rate_limit(exc.headers)
             if exc.code == 429:
@@ -1406,7 +1645,11 @@ def _execute_anilist_authenticated(query: str, variables: Dict[str, Any], token:
                     pass
                 if exc.code in (401, 403):
                     return {"error": "AniList rejected the token. Paste a fresh one."}
-                return {"error": _describe_anilist_error(body.get("errors") or [])}
+                # A 400 is AniList refusing the document on argument validation.
+                # It validates the whole document before running any of it, so a
+                # batched caller learns nothing about which row is at fault here.
+                return {"error": _describe_anilist_error(body.get("errors") or []),
+                        "validation": True}
             attempt += 1
             if attempt >= max_retries:
                 return {"error": f"AniList returned HTTP {exc.code}."}
@@ -1502,6 +1745,9 @@ DIFF_FIELDS = (
     ("notes", "notes"),
     ("startedAt", "startedAt"),
     ("completedAt", "completedAt"),
+    ("private", "private"),
+    ("hiddenFromStatusLists", "hiddenFromStatusLists"),
+    ("priority", "priority"),
 )
 _NUMERIC_DIFF_FIELDS = {"progress", "progressVolumes", "scoreRaw", "repeat"}
 _DATE_DIFF_FIELDS = {"startedAt", "completedAt"}
@@ -1550,6 +1796,9 @@ def _guarded_value(field: str, before: Any, wanted: Any, media_type: str) -> Any
         return wanted
     if field in ("progress", "repeat") or (field == "progressVolumes" and media_type == "manga"):
         return before if int(wanted or 0) < int(before or 0) else wanted
+    # private, hiddenFromStatusLists and priority have no direction: a lower
+    # priority is not a regression and neither boolean is a quantity, so there
+    # is nothing here to guard against.
     return wanted
 
 
@@ -1573,7 +1822,7 @@ def _anilist_side_effects(variables: Dict[str, Any], known: Optional[Dict[str, A
 
     AniList changes some fields itself on a status transition, whatever the
     write asks for. Both of these were **measured** against a live account
-    (ROADMAP 2.3, L7-L8), not inferred from docs:
+    (MANGA_SUPPORT_NOTES, L7-L8), not inferred from docs:
 
     - While `status` is `COMPLETED`, `progress` and `progressVolumes` are forced
       to the media total, even when a lower value is sent explicitly, and even
@@ -1731,6 +1980,14 @@ def iter_write_payloads(entries: Sequence[Dict[str, Any]], media_type: str,
         completed = _fuzzy_date(entry.get("finish_date"))
         if completed:
             variables["completedAt"] = completed
+        # Only a row read back from AniList carries these, so a MAL-XML row is
+        # unaffected: the keys are absent and nothing is sent.
+        if "private" in entry:
+            variables["private"] = bool(entry["private"])
+        if "hidden_from_status_lists" in entry:
+            variables["hiddenFromStatusLists"] = bool(entry["hidden_from_status_lists"])
+        if "priority" in entry:
+            variables["priority"] = int(entry.get("priority") or 0)
 
         known = existing.get(anilist_id)
         row_overrides = (overrides or {}).get(anilist_id) or (overrides or {}).get(str(anilist_id)) or {}
@@ -1755,18 +2012,6 @@ def iter_write_payloads(entries: Sequence[Dict[str, Any]], media_type: str,
                          "update": bool(known), "variables": variables,
                          "diff": diff, "stale_completed_at": stale_completed_at})
     return payloads, skipped
-
-
-def anilist_write_entry(token: str, payload: Dict[str, Any]) -> Dict[str, Any]:
-    """Write one entry. Returns {"ok": True, "id": ...} or {"ok": False, "error": ...}."""
-    result = _execute_anilist_authenticated(
-        ANILIST_SAVE_ENTRY_MUTATION, payload["variables"], token)
-    if result.get("error"):
-        return {"ok": False, "error": result["error"]}
-    saved = ((result.get("data") or {}).get("SaveMediaListEntry")) or {}
-    if not saved.get("id"):
-        return {"ok": False, "error": "AniList did not confirm the save."}
-    return {"ok": True, "id": int(saved["id"]), "status": saved.get("status")}
 
 
 def anilist_delete_entry(token: str, entry_id: int) -> Dict[str, Any]:
@@ -1919,7 +2164,7 @@ def iter_undo_payloads(snapshot: Dict[str, Any], delete_created: bool = False) -
 
     One caveat that cannot be coded around: AniList stamps `startedAt` itself
     when an entry becomes CURRENT without one, so restoring "no start date" may
-    not stick. Measured, not assumed - see ROADMAP 2.3, M7.
+    not stick. Measured, not assumed - see MANGA_SUPPORT_NOTES, M7.
     """
     media_type = "manga" if snapshot.get("media_type") == "manga" else "anime"
     restores: List[Dict[str, Any]] = []
@@ -1972,6 +2217,154 @@ def iter_undo_payloads(snapshot: Dict[str, Any], delete_created: bool = False) -
                              "variables": {"id": entry_id, "mediaId": anilist_id,
                                            "repeat": int(prior.get("repeat") or 0)}})
     return restores, deletes, unrecoverable
+
+
+# ---------------------------------------------------------------------------
+# Batched writes
+#
+# One document carrying several aliased SaveMediaListEntry calls costs a single
+# request against the rate limit - measured, not assumed. A two-alias document
+# decremented X-RateLimit-Remaining by exactly 1 against a control of three
+# single-operation requests that took 1 each, and an eight-alias one did the
+# same (MANGA_SUPPORT_NOTES, L5 and P15). At 339 rows that turns roughly twelve
+# minutes of writing into about ninety seconds.
+# ---------------------------------------------------------------------------
+WRITE_BATCH_SIZE = 8
+
+# Every argument a payload may carry, with its GraphQL type. Only the arguments
+# an alias actually has are declared, so a batch never sends an explicit null
+# for a field the row left alone - which would blank it on the account.
+WRITE_FIELD_TYPES = {
+    "id": "Int",
+    "mediaId": "Int",
+    "status": "MediaListStatus",
+    "scoreRaw": "Int",
+    "progress": "Int",
+    "progressVolumes": "Int",
+    "repeat": "Int",
+    "notes": "String",
+    "startedAt": "FuzzyDateInput",
+    "completedAt": "FuzzyDateInput",
+    "private": "Boolean",
+    "hiddenFromStatusLists": "Boolean",
+    "priority": "Int",
+}
+
+
+def _write_batch_query(payloads: Sequence[Dict[str, Any]]) -> tuple:
+    """Build one document of m0..mN aliased saves.
+
+    Returns (query, variables, spans). `spans[i]` is the (start, end) character
+    range of alias i inside the finished document, which is the only way to map
+    an error back to a row: GraphQL errors carry `locations`, never a `path`.
+
+    Built per batch rather than from a fixed template, because the optional
+    arguments differ row by row - unlike the search batcher, where every alias
+    has the same shape.
+    """
+    declarations: List[str] = []
+    variables: Dict[str, Any] = {}
+    blocks: List[str] = []
+    for index, payload in enumerate(payloads):
+        fields = [f for f in WRITE_FIELD_TYPES if f in (payload.get("variables") or {})]
+        for field in fields:
+            declarations.append(f"${field}{index}: {WRITE_FIELD_TYPES[field]}")
+            variables[f"{field}{index}"] = payload["variables"][field]
+        arguments = ", ".join(f"{field}: ${field}{index}" for field in fields)
+        blocks.append(f"\n  m{index}: SaveMediaListEntry({arguments}) {{ id mediaId status }}")
+    head = f"mutation ({', '.join(declarations)}) {{"
+    spans: List[tuple] = []
+    cursor = len(head)
+    for block in blocks:
+        spans.append((cursor, cursor + len(block)))
+        cursor += len(block)
+    return head + "".join(blocks) + "\n}", variables, spans
+
+
+def _offset_of(query: str, line: int, column: int) -> Optional[int]:
+    """Turn a GraphQL error location into a character offset in the document."""
+    try:
+        line, column = int(line), int(column)
+    except (TypeError, ValueError):
+        return None
+    if line < 1 or column < 1:
+        return None
+    offset = 0
+    for number, text in enumerate(query.split("\n"), start=1):
+        if number == line:
+            return offset + column - 1
+        offset += len(text) + 1
+    return None
+
+
+def _attribute_batch_errors(errors: Sequence[Dict[str, Any]], query: str,
+                            spans: Sequence[tuple]) -> Dict[int, str]:
+    """Map alias index -> message, using each error's location.
+
+    An error whose location falls outside every alias - or carries no usable
+    location at all - is not guessed at. The caller reports the batch-level
+    message against every failed alias instead.
+    """
+    found: Dict[int, str] = {}
+    for error in errors or []:
+        message = _describe_anilist_error([error])
+        for location in (error.get("locations") or []):
+            offset = _offset_of(query, location.get("line"), location.get("column"))
+            if offset is None:
+                continue
+            for index, (start, end) in enumerate(spans):
+                if start <= offset < end:
+                    found.setdefault(index, message)
+                    break
+    return found
+
+
+def anilist_write_batch(token: str, payloads: Sequence[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    """Write several entries in one request. One result per payload, in order.
+
+    Aliases execute serially and a failing one does not stop the rest, so the
+    authoritative signal that row k failed is `data["mk"] is None` - not the
+    error list, which may be shorter, longer, or unattributable.
+    """
+    if not payloads:
+        return []
+    query, variables, spans = _write_batch_query(payloads)
+    result = _execute_anilist_authenticated(query, variables, token)
+    if result.get("error"):
+        out = [{"ok": False, "error": result["error"]} for _ in payloads]
+        # Validation refuses the whole document and names no alias, so the
+        # faulty row is only findable one row at a time. Auth and transport
+        # failures are not retried: every row would fail the same way.
+        if result.get("validation") and len(payloads) > 1:
+            for index in range(len(payloads)):
+                out[index] = anilist_write_batch(token, [payloads[index]])[0]
+        return out
+    data = result.get("data") or {}
+    errors = result.get("errors") or []
+    per_alias = _attribute_batch_errors(errors, query, spans)
+    batch_message = _describe_anilist_error(errors) if errors else ""
+    out: List[Dict[str, Any]] = []
+    for index, _payload in enumerate(payloads):
+        saved = data.get(f"m{index}")
+        if saved and saved.get("id"):
+            out.append({"ok": True, "id": int(saved["id"]), "status": saved.get("status")})
+        else:
+            out.append({"ok": False,
+                        "error": per_alias.get(index) or batch_message
+                        or "AniList did not confirm the save."})
+
+    # AniList validates the arguments of the whole document before executing
+    # any of it, so one unwritable row nulls *every* alias in its batch -
+    # measured against the live API, not inferred from the docs. Without this
+    # fallback a single stale media id would take the other seven rows down
+    # with it, and "Retry failed" would re-batch the same eight for ever.
+    # Only aliases that came back null are re-sent, so a row that did execute
+    # is never written twice.
+    stalled = [i for i, row in enumerate(out) if not row["ok"]]
+    if stalled and len(payloads) > 1:
+        for index in stalled:
+            out[index] = anilist_write_batch(token, [payloads[index]])[0]
+    return out
 
 
 def deduplicate_entries(entries: Sequence[Dict[str, Any]]) -> List[Dict[str, Any]]:
@@ -2340,6 +2733,64 @@ def process_anime_list(
     return target_xml, target_gz, anime_nodes
 
 
+def _cli_output_paths(args) -> tuple:
+    """Where the CLI writes, for whichever route produced the rows."""
+    manga = args.media_type == "manga"
+    stem = "myanimelist_manga_export" if manga else "myanimelist_export"
+    if args.output:
+        output_xml = Path(args.output)
+    elif Path("output").is_dir():
+        output_xml = Path("output/%s.xml" % stem)
+    else:
+        output_xml = None
+    if args.gz_output:
+        output_gz = Path(args.gz_output)
+    elif Path("output").is_dir():
+        output_gz = Path("output/%s.xml.gz" % stem)
+    else:
+        output_gz = None
+    return output_xml, output_gz
+
+
+def _export_anilist_list(args) -> None:
+    """--from-anilist: read a public list and write it straight to MAL XML.
+
+    Read-only, so it needs no token and takes none. Entries AniList has but
+    MyAnimeList does not are counted rather than dropped quietly - they are the
+    same "AniList only" rows the GUI reports.
+    """
+    media_type = args.media_type
+    print("[*] Reading %s's %s list from AniList..." % (args.from_anilist, media_type))
+    result = anilist_list_collection(media_type, username=args.from_anilist)
+    if not result.get("ok"):
+        print("Error: %s" % result.get("error", "could not read that list."))
+        sys.exit(1)
+    rows = result["entries"]
+    if not rows:
+        print("That list is empty: nothing to export.")
+        sys.exit(1)
+    exportable = [r for r in rows if r.get("can_export_xml")]
+    anilist_only = len(rows) - len(exportable)
+    print("[*] %d entries read, %d exportable as MAL XML, %d AniList-only (no MAL id)"
+          % (len(rows), len(exportable), anilist_only))
+
+    output_xml, output_gz = _cli_output_paths(args)
+    builder = build_mal_manga_xml if media_type == "manga" else build_mal_xml
+    stem = "myanimelist_manga_export" if media_type == "manga" else "myanimelist_export"
+    xml_bytes = builder(rows, args.status, args.score).encode("utf-8")
+    target_xml = output_xml or (Path.cwd() / ("%s.xml" % stem))
+    target_gz = output_gz or (Path.cwd() / ("%s.xml.gz" % stem))
+    target_xml.parent.mkdir(parents=True, exist_ok=True)
+    target_gz.parent.mkdir(parents=True, exist_ok=True)
+    target_xml.write_bytes(xml_bytes)
+    target_gz.write_bytes(gzip.compress(xml_bytes, compresslevel=9))
+    root = ET.fromstring(xml_bytes)
+    count = len(root.findall("manga" if media_type == "manga" else "anime"))
+    print("[OK] XML validated. Exportable %s entries: %d" % (media_type, count))
+    print("[+] XML: %s" % target_xml.resolve())
+    print("[+] GZ:  %s" % target_gz.resolve())
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(
         description="Convert a plain-text anime or manga title list into MAL-compatible XML for AniList import."
@@ -2395,8 +2846,20 @@ def main() -> None:
         action="store_true",
         help="Automatically include direct sequel relations (anime sequels/movies or manga sequels).",
     )
+    parser.add_argument(
+        "--from-anilist",
+        metavar="USERNAME",
+        default=None,
+        help="Read an existing AniList list instead of resolving a text file, and export it as "
+             "MAL XML. Read-only. The list must be public; a private one needs the GUI, which "
+             "can supply a token.",
+    )
 
     args = parser.parse_args()
+
+    if args.from_anilist:
+        _export_anilist_list(args)
+        return
 
     input_path_str = args.input_flag or args.input
     if input_path_str:
@@ -2412,19 +2875,7 @@ def main() -> None:
         else:
             parser.error("No input file specified and no 'notes.txt' or 'animes.txt' found in current directory.")
 
-    if args.output:
-        output_xml = Path(args.output)
-    elif Path("output").is_dir():
-        output_xml = Path("output/myanimelist_manga_export.xml" if args.media_type == "manga" else "output/myanimelist_export.xml")
-    else:
-        output_xml = None
-
-    if args.gz_output:
-        output_gz = Path(args.gz_output)
-    elif Path("output").is_dir():
-        output_gz = Path("output/myanimelist_manga_export.xml.gz" if args.media_type == "manga" else "output/myanimelist_export.xml.gz")
-    else:
-        output_gz = None
+    output_xml, output_gz = _cli_output_paths(args)
 
     titles = load_titles_from_txt(input_file)
     if not titles:

@@ -22,14 +22,15 @@ from datetime import datetime
 
 # Import core normalization and generation logic
 from generate_mal_xml import (
-    MIN_REQUEST_INTERVAL,
     AniListReadError,
     anilist_delete_entry,
     anilist_existing_entries,
+    anilist_list_collection,
     anilist_viewer,
-    anilist_write_entry,
+    anilist_write_batch,
     backfill_anilist_ids,
     build_undo_snapshot,
+    REVIEW_RATIO_FLOOR,
     DIFF_FIELDS,
     iter_undo_payloads,
     iter_write_payloads,
@@ -38,6 +39,7 @@ from generate_mal_xml import (
     prune_undo_snapshots,
     record_created_entry,
     save_undo_snapshot,
+    WRITE_BATCH_SIZE,
     resolve_one,
     _normalize_status,
     current_interval,
@@ -48,8 +50,6 @@ from generate_mal_xml import (
     build_mal_xml,
     build_mal_manga_xml,
     deduplicate_entries,
-    resolve_anime_entries,
-    resolve_manga_entries,
     sanitize_title_line,
     set_rate_limit_notifier,
 )
@@ -100,8 +100,48 @@ def _take_failures(run_id: str) -> Optional[Dict[str, Any]]:
         return {"payloads": _last_failures["payloads"], "snapshot": _last_failures.get("snapshot")}
 
 
+# Every spelling of "this machine" a browser may put in an Origin header.
+LOOPBACK_HOSTS = {"127.0.0.1", "localhost", "::1", "[::1]"}
+
 MAX_PREVIEW_BYTES = 5 * 1024 * 1024
 ARCHIVE_NAME_CHARS = set("abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_.")
+
+
+# A copy touches both media types, so every stage is described the same way
+# and the caller only varies what it does with the payloads.
+COPY_MEDIA_TYPES = ("anime", "manga")
+
+
+def _copy_stage(media_type: str, source_username: str, source_token: str,
+                dest_token: str, dest_user_id: int, policy: str) -> Dict[str, Any]:
+    """Read one media type from the source and plan the write to the destination.
+
+    Returns {"ok": True, rows, existing, payloads, skipped} or {"ok": False, error}.
+    The source is read with its own credentials - the destination's token says
+    nothing about what the source account has made public.
+    """
+    found = anilist_list_collection(media_type, username=source_username,
+                                    token=source_token, user_id=0)
+    if not found.get("ok"):
+        return {"ok": False, "error": found.get("error", "Could not read the source list.")}
+    rows = found["entries"]
+    if not rows:
+        return {"ok": True, "rows": [], "existing": {}, "payloads": [], "skipped": []}
+    try:
+        existing = anilist_existing_entries(
+            dest_token, dest_user_id, media_type, [r.get("anilist_id") for r in rows])
+    except AniListReadError as exc:
+        return {"ok": False, "error": _read_failure_message(exc)}
+    payloads, skipped = iter_write_payloads(rows, media_type, existing, policy=policy)
+    return {"ok": True, "rows": rows, "existing": existing,
+            "payloads": payloads, "skipped": skipped}
+
+
+def _copy_request(data: Dict[str, Any]) -> tuple:
+    """Pull the three identities a copy needs out of a request body."""
+    return (str(data.get("source_username") or "").strip(),
+            str(data.get("source_token") or "").strip(),
+            str(data.get("token") or "").strip())
 
 
 def _read_failure_message(exc: Exception) -> str:
@@ -217,6 +257,16 @@ def _import_date(value: str) -> Optional[str]:
     except ValueError:
         return None
     return value
+
+
+def _page_html() -> str:
+    """The page with the server's own tuning constants substituted in.
+
+    The review floor is calibrated from real data and lives in
+    generate_mal_xml; copying the number into the template by hand would drift
+    the first time it is retuned.
+    """
+    return HTML_TEMPLATE.replace("__REVIEW_RATIO_FLOOR__", repr(float(REVIEW_RATIO_FLOOR)))
 
 
 def parse_mal_xml(raw: str) -> Dict[str, Any]:
@@ -1241,6 +1291,20 @@ HTML_TEMPLATE = """<!DOCTYPE html>
       line-height: 1.45;
       color: var(--text-muted);
     }
+    .bulk-scope {
+      display: block;
+      margin-top: 0.25rem;
+      font-size: var(--font-xs);
+      color: var(--text-subtle);
+    }
+
+    .row-focus > td { background: var(--row-hover); }
+    .needs-review-mark {
+      margin-left: 0.3rem;
+      color: var(--warning);
+      cursor: help;
+    }
+
     .token-status.ok { color: var(--success); }
     .token-status.bad { color: var(--danger); }
 
@@ -2285,10 +2349,12 @@ HTML_TEMPLATE = """<!DOCTYPE html>
               <option value="Paused">Paused</option>
               <option value="Dropped">Dropped</option>
             </select>
+            <span class="bulk-scope"></span>
           </div>
           <div>
             <label for="inputScore">Score (0-10):</label>
             <input type="number" id="inputScore" min="0" max="10" value="0" placeholder="0 = Unscored">
+            <span class="bulk-scope"></span>
           </div>
         </div>
 
@@ -2344,10 +2410,6 @@ HTML_TEMPLATE = """<!DOCTYPE html>
           </svg>
           <span id="btnProcessLabel">Normalize &amp; Generate XML</span>
         </button>
-        <div id="runControls" class="run-controls">
-          <button id="btnPause" class="btn btn-secondary" style="flex:1;">Pause</button>
-          <button id="btnCancel" class="btn btn-secondary" style="flex:1;">Cancel run</button>
-        </div>
       </div>
     </section>
 
@@ -2372,6 +2434,10 @@ HTML_TEMPLATE = """<!DOCTYPE html>
         </div>
         <div class="export-buttons">
           <button id="btnWrite" class="btn btn-primary" title="Write the selected rows to your AniList account">Write to AniList...</button>
+          <button id="btnCopyAccount" class="btn btn-secondary" style="display:none;"
+                  title="Copy another AniList account's anime and manga onto the account whose token is above">Copy an account...</button>
+          <button id="btnAniListImport" class="btn btn-secondary" style="display:none;"
+                  title="Read a list straight from AniList instead of pasting titles">From AniList...</button>
           <button id="btnUndo" class="btn btn-secondary" style="display:none;"
                   title="Put your AniList account back the way it was before the last write">Undo last write...</button>
           <button id="btnRetry" class="btn btn-secondary" style="display:none;"
@@ -2435,6 +2501,10 @@ HTML_TEMPLATE = """<!DOCTYPE html>
         <div class="progress-track" role="progressbar" aria-valuenow="0" aria-valuemin="0" aria-valuemax="100">
           <div id="progressBarFill" class="progress-fill"></div>
         </div>
+        <div id="runControls" class="run-controls">
+          <button id="btnPause" class="btn btn-secondary" style="flex:1;">Pause</button>
+          <button id="btnCancel" class="btn btn-secondary" style="flex:1;">Cancel run</button>
+        </div>
       </section>
 
       <div id="fixModal" class="modal-backdrop" role="dialog" aria-modal="true"
@@ -2444,6 +2514,7 @@ HTML_TEMPLATE = """<!DOCTYPE html>
             <strong id="fixModalTitle">Fix unmatched titles</strong>
             <span id="fixCounter" class="fix-counter"></span>
             <span style="flex:1;"></span>
+            <button id="btnFixBack" class="btn btn-secondary">Back</button>
             <button id="btnFixSkip" class="btn btn-secondary">Skip</button>
             <button id="btnFixClose" class="btn btn-secondary">Done</button>
           </div>
@@ -2475,6 +2546,57 @@ HTML_TEMPLATE = """<!DOCTYPE html>
             <button id="btnWriteConfirm" class="btn btn-primary">Write now</button>
           </div>
           <div id="writePlan" class="write-plan"></div>
+        </div>
+      </div>
+
+      <div id="copyModal" class="modal-backdrop" role="dialog" aria-modal="true"
+           aria-labelledby="copyModalTitle">
+        <div class="modal-card write-card">
+          <div class="modal-head">
+            <strong id="copyModalTitle">Copy an AniList account</strong>
+            <span style="flex:1;"></span>
+            <button id="btnCopyCancel" class="btn btn-secondary">Cancel</button>
+            <button id="btnCopyCheck" class="btn btn-secondary">Check</button>
+            <button id="btnCopyRun" class="btn btn-primary" disabled>Copy now</button>
+          </div>
+          <div class="write-plan">
+            <div>Reads <strong>every anime and every manga</strong> from the account below and
+              writes them to the account whose token is in the AniList panel - status, score,
+              progress, volumes, rereads, notes, start and finish dates, and the private,
+              hidden and priority flags.</div>
+            <label for="copySourceUser">Copy from this AniList username</label>
+            <input type="text" id="copySourceUser" class="token-input" placeholder="e.g. Razed2Ground"
+                   autocomplete="off" spellcheck="false">
+            <div class="warn">The destination is whoever the token above belongs to. Check first -
+              it names both accounts before anything is written.</div>
+            <div id="copyPlan" class="write-plan"></div>
+            <div class="warn">Where both accounts already have a title, <strong>the source
+              wins</strong>, including values that go backwards. Entries the destination has and
+              the source does not are left alone: nothing here deletes. Every run is saved so it
+              can be undone.</div>
+          </div>
+        </div>
+      </div>
+
+      <div id="listImportModal" class="modal-backdrop" role="dialog" aria-modal="true"
+           aria-labelledby="listImportTitle">
+        <div class="modal-card write-card">
+          <div class="modal-head">
+            <strong id="listImportTitle">Import from AniList</strong>
+            <span style="flex:1;"></span>
+            <button id="btnListImportCancel" class="btn btn-secondary">Cancel</button>
+            <button id="btnListImportGo" class="btn btn-primary">Read list</button>
+          </div>
+          <div class="write-plan">
+            <div>Reads an existing AniList list and brings the rows in - status, score,
+              progress, notes and dates. Nothing is written to any account.</div>
+            <label for="listImportUser">AniList username</label>
+            <input type="text" id="listImportUser" placeholder="e.g. Razed2Ground"
+                   class="token-input" autocomplete="off" spellcheck="false">
+            <div>Leave it blank to read <strong>your own</strong> list using the token above,
+              which is the only way to read a private list.</div>
+            <div id="listImportStatus" class="token-status"></div>
+          </div>
         </div>
       </div>
 
@@ -2576,7 +2698,16 @@ HTML_TEMPLATE = """<!DOCTYPE html>
   </div>
 
   <script>
+    // Substituted by the server from the calibrated module constant.
+    const REVIEW_RATIO_FLOOR = __REVIEW_RATIO_FLOOR__;
     let currentAnimes = [];
+    // Rows belong to one media type: an anime row cannot live in a manga list,
+    // so a switch has to put them down. It used to drop them on the floor -
+    // silently, and `saveState` then persisted the empty list, so one mis-click
+    // on the dropdown destroyed a long resolve with no way back. They are set
+    // aside per type now, and switching back picks them up again.
+    const rowsByMedia = { anime: [], manga: [] };
+    let lastMediaType = 'anime';
     let ignoredKeys = new Set();
     let isProcessing = false;
 
@@ -2627,6 +2758,7 @@ HTML_TEMPLATE = """<!DOCTYPE html>
     const fixCounter = document.getElementById('fixCounter');
     const btnFixSearch = document.getElementById('btnFixSearch');
     const btnFixSkip = document.getElementById('btnFixSkip');
+    const btnFixBack = document.getElementById('btnFixBack');
     const btnFixClose = document.getElementById('btnFixClose');
     const btnFixUnmatched = document.getElementById('btnFixUnmatched');
     const anilistPanel = document.getElementById('anilistPanel');
@@ -2643,6 +2775,19 @@ HTML_TEMPLATE = """<!DOCTYPE html>
     const undoModal = document.getElementById('undoModal');
     const undoPlan = document.getElementById('undoPlan');
     const btnUndo = document.getElementById('btnUndo');
+    const btnAniListImport = document.getElementById('btnAniListImport');
+    const btnCopyAccount = document.getElementById('btnCopyAccount');
+    const copyModal = document.getElementById('copyModal');
+    const copySourceUser = document.getElementById('copySourceUser');
+    const copyPlan = document.getElementById('copyPlan');
+    const btnCopyCheck = document.getElementById('btnCopyCheck');
+    const btnCopyRun = document.getElementById('btnCopyRun');
+    const btnCopyCancel = document.getElementById('btnCopyCancel');
+    const listImportModal = document.getElementById('listImportModal');
+    const listImportUser = document.getElementById('listImportUser');
+    const listImportStatus = document.getElementById('listImportStatus');
+    const btnListImportGo = document.getElementById('btnListImportGo');
+    const btnListImportCancel = document.getElementById('btnListImportCancel');
     const btnRetry = document.getElementById('btnRetry');
     const btnUndoConfirm = document.getElementById('btnUndoConfirm');
     const btnUndoCancel = document.getElementById('btnUndoCancel');
@@ -2731,7 +2876,7 @@ HTML_TEMPLATE = """<!DOCTYPE html>
       return mediaTypeSelect.value === 'manga' ? 'manga' : 'anime';
     }
 
-    function updateMediaTypeUI(clearResults = false) {
+    function updateMediaTypeUI() {
       const isManga = mediaType() === 'manga';
       // Same order in both sets, so a switch carries the equivalent state across
       // by index (Reading <-> Watching, Rereading <-> Rewatching, ...).
@@ -2758,11 +2903,6 @@ HTML_TEMPLATE = """<!DOCTYPE html>
       ).join(String.fromCharCode(10));
       btnDownloadXml.download = isManga ? 'myanimelist_manga_export.xml' : 'myanimelist_export.xml';
       btnDownloadGz.download = isManga ? 'myanimelist_manga_export.xml.gz' : 'myanimelist_export.xml.gz';
-      if (clearResults) {
-        currentAnimes = [];
-        renderTable([]);
-        updateStatsAndExport();
-      }
       ignoredKeys = loadIgnored();
       updateIgnoredLabel();
       updateLineCounter();
@@ -2770,7 +2910,22 @@ HTML_TEMPLATE = """<!DOCTYPE html>
     }
 
     mediaTypeSelect.addEventListener('change', () => {
-      updateMediaTypeUI(true);
+      const previous = lastMediaType;
+      const next = mediaType();
+      updateMediaTypeUI();
+      if (previous !== next) {
+        rowsByMedia[previous] = currentAnimes;
+        currentAnimes = rowsByMedia[next] || [];
+        lastMediaType = next;
+        renderTable(currentAnimes);
+        updateStatsAndExport();
+        const kept = rowsByMedia[previous].length;
+        if (currentAnimes.length) {
+          showToast(`Back to ${currentAnimes.length} ${next} row${currentAnimes.length === 1 ? '' : 's'}`);
+        } else if (kept) {
+          showToast(`${kept} ${previous} row${kept === 1 ? '' : 's'} set aside - switch back to return to them`);
+        }
+      }
       saveState();
     });
 
@@ -3247,6 +3402,9 @@ HTML_TEMPLATE = """<!DOCTYPE html>
       destinationPrompt.classList.toggle('show', destination === '');
       destinationField.style.display = destination === '' ? 'none' : '';
       anilistPanel.classList.toggle('show', destination === 'anilist');
+      btnAniListImport.style.display = destination === '' ? 'none' : '';
+      // Copying writes to an account, so it belongs with the AniList destination.
+      btnCopyAccount.style.display = destination === 'anilist' ? '' : 'none';
       btnWrite.style.display = destination === 'anilist' ? '' : 'none';
       updateWriteAftermath();
       // Naming the file format while the user is sending rows to an account
@@ -3333,12 +3491,16 @@ HTML_TEMPLATE = """<!DOCTYPE html>
       toggleFresh.checked = false;
       setDestination('', false);
       mediaTypeSelect.value = 'anime';
+      // Start over means start over: the set-aside rows go too.
+      rowsByMedia.anime = [];
+      rowsByMedia.manga = [];
+      lastMediaType = 'anime';
       document.querySelectorAll('th.sortable').forEach(th => {
         const mark = th.querySelector('.sort-mark');
         if (mark) mark.textContent = '';
         th.setAttribute('aria-sort', 'none');
       });
-      updateMediaTypeUI(false);
+      updateMediaTypeUI();
       renderTable(currentAnimes);
       updateStats();
       refreshExportState();
@@ -3389,10 +3551,11 @@ HTML_TEMPLATE = """<!DOCTYPE html>
 
       if (saved.mediaType === 'manga' || saved.mediaType === 'anime') {
         mediaTypeSelect.value = saved.mediaType;
+        lastMediaType = saved.mediaType;
       }
       // Rebuild the media-specific controls first, then restore the values that
       // depend on them - the status options only exist after this call.
-      updateMediaTypeUI(false);
+      updateMediaTypeUI();
       if (typeof saved.status === 'string') {
         const allowed = STATUS_SETS[mediaType()];
         if (allowed.indexOf(saved.status) >= 0) selectStatus.value = saved.status;
@@ -3453,12 +3616,26 @@ HTML_TEMPLATE = """<!DOCTYPE html>
       { id: 'dropped', label: 'Dropped' },
       { id: 'anilistonly', label: 'AniList only' },
       { id: 'unresolved', label: 'Not found' },
+      { id: 'review', label: 'Needs review' },
     ];
 
     function chipLabel(chip) {
       // The list is one media type at a time; naming both is noise.
       if (chip.id === 'reading') return mediaType() === 'manga' ? 'Reading' : 'Watching';
       return chip.label;
+    }
+
+    // Why a row was flagged, in the row itself: the chip is a filter, not an
+    // explanation, and "needs review" without a reason is just nagging.
+    function reviewMarkHtml(item) {
+      if (!item.needs_review) return '';
+      const gap = item.runner_up_gap;
+      const why = (gap !== undefined && gap !== null && gap < 0)
+        ? 'A candidate further down the list matched your title better than this one did'
+        : 'This title barely resembles the one you pasted'
+          + (item.match_ratio !== undefined && item.match_ratio !== null
+             ? ' (' + Math.round(item.match_ratio * 100) + '% alike)' : '');
+      return '<span class="needs-review-mark" title="' + escapeHtml(why) + '">needs review</span>';
     }
 
     function chipBucket(item) {
@@ -3478,6 +3655,9 @@ HTML_TEMPLATE = """<!DOCTYPE html>
       currentAnimes.forEach(item => {
         const bucket = chipBucket(item);
         counts[bucket] = (counts[bucket] || 0) + 1;
+        // "Needs review" is a flag rather than a bucket, so it is counted
+        // separately or the chip would never appear.
+        if (item.needs_review) counts.review = (counts.review || 0) + 1;
       });
       chipRow.innerHTML = CHIPS.filter(chip => chip.id === '' || counts[chip.id])
         .map(chip => {
@@ -3488,7 +3668,11 @@ HTML_TEMPLATE = """<!DOCTYPE html>
 
     function matchesFilters(item) {
       const q = searchInput.value.toLowerCase().trim();
-      if (statusFilter && chipBucket(item) !== statusFilter) return false;
+      // "Needs review" cuts across the status buckets - a row can be both
+      // Completed and doubtful - so it filters on the flag, not the bucket.
+      if (statusFilter === 'review') {
+        if (!item.needs_review) return false;
+      } else if (statusFilter && chipBucket(item) !== statusFilter) return false;
       if (!q) return true;
       const title = (item.title || '').toLowerCase();
       const orig = (item.original || '').toLowerCase();
@@ -3615,6 +3799,7 @@ HTML_TEMPLATE = """<!DOCTYPE html>
     // Render Table
     function renderTable(items) {
       renderChips();
+      if (typeof updateBulkLabels === 'function') updateBulkLabels();
       const matched = applySort(items.filter(matchesFilters));
       const capped = showAllRows ? matched : matched.slice(0, ROW_CAP);
 
@@ -3660,6 +3845,7 @@ HTML_TEMPLATE = """<!DOCTYPE html>
                     ${malUrl ? `<a href="${malUrl}" class="id-link" target="_blank" rel="noopener noreferrer" title="View on MyAnimeList">MAL ${item.id}</a>` : '<span class="id-missing">no MAL ID</span>'}
                     ${alUrl ? `<a href="${alUrl}" class="id-link" target="_blank" rel="noopener noreferrer" title="View on AniList">AL ${item.anilist_id}</a>` : ''}
                     ${hasRenamed ? `<span class="cell-original" title="${escapeHtml(item.original)}">from ${escapeHtml(item.original)}</span>` : ''}
+                    ${reviewMarkHtml(item)}
                   </div>
                   ${pickerHtml(item, globalIdx)}
                   ${fixRowHtml(item, globalIdx)}
@@ -3693,6 +3879,89 @@ HTML_TEMPLATE = """<!DOCTYPE html>
       });
       renderTable(currentAnimes);
       updateStatsAndExport();
+    });
+
+    // --- 6.4: shift-click a range, and drive the list from the keyboard ---
+    let lastClickedRow = -1;
+    let focusedRow = -1;
+
+    function visibleIndexes() {
+      // What is actually on screen. renderTable caps at ROW_CAP, so the raw
+      // filter result would let arrow navigation walk off into rows that were
+      // never rendered - silently, with no focus ring and nothing to toggle.
+      const matched = currentAnimes.map((item, i) => matchesFilters(item) ? i : -1)
+        .filter(i => i >= 0);
+      return showAllRows ? matched : matched.slice(0, ROW_CAP);
+    }
+
+    function setRowFocus(index) {
+      focusedRow = index;
+      document.querySelectorAll('tr.row-focus').forEach(tr => tr.classList.remove('row-focus'));
+      const box = tableBody.querySelector('.row-checkbox[data-index="' + index + '"]');
+      const tr = box && box.closest('tr');
+      if (tr) {
+        tr.classList.add('row-focus');
+        tr.scrollIntoView({ block: 'nearest' });
+      }
+    }
+
+    tableBody.addEventListener('click', (e) => {
+      const box = e.target.closest && e.target.closest('.row-checkbox');
+      if (!box) return;
+      const index = parseInt(box.dataset.index, 10);
+      if (isNaN(index)) return;
+      if (e.shiftKey && lastClickedRow >= 0 && lastClickedRow !== index) {
+        // Range over what is on screen, not over raw indexes: a filtered-out
+        // row between the two ends is not something the user can see.
+        const order = visibleIndexes();
+        const from = order.indexOf(lastClickedRow);
+        const to = order.indexOf(index);
+        if (from >= 0 && to >= 0) {
+          const [lo, hi] = from < to ? [from, to] : [to, from];
+          const wanted = box.checked;
+          order.slice(lo, hi + 1).forEach(i => {
+            if (isActionable(currentAnimes[i])) currentAnimes[i].enabled = wanted;
+          });
+          renderTable(currentAnimes);
+          updateStatsAndExport();
+        }
+      }
+      lastClickedRow = index;
+      setRowFocus(index);
+    });
+
+    document.addEventListener('keydown', (e) => {
+      if (e.key !== 'ArrowDown' && e.key !== 'ArrowUp' && e.key !== ' ') return;
+      const tag = (e.target.tagName || '').toLowerCase();
+      if (tag === 'input' || tag === 'textarea' || tag === 'select') return;
+      // Space is how a keyboard user activates a focused button or link;
+      // swallowing it here broke every one of them.
+      if (tag === 'button' || tag === 'a' || e.target.isContentEditable) return;
+      if (document.querySelector('.modal-backdrop.show')) return;
+      // Only drive the table once the user is actually in it. Claiming the
+      // arrow keys globally meant the page could no longer be scrolled with
+      // them, before the user had shown any interest in row navigation.
+      const inTable = focusedRow >= 0 || (e.target.closest && e.target.closest('#animeTable'));
+      if (!inTable) return;
+      const order = visibleIndexes();
+      if (!order.length) return;
+      if (e.key === ' ') {
+        if (focusedRow < 0) return;
+        const item = currentAnimes[focusedRow];
+        if (!item || !isActionable(item)) return;
+        e.preventDefault();
+        item.enabled = item.enabled === false;
+        renderTable(currentAnimes);
+        updateStatsAndExport();
+        setRowFocus(focusedRow);
+        return;
+      }
+      e.preventDefault();
+      const at = order.indexOf(focusedRow);
+      const step = e.key === 'ArrowDown' ? 1 : -1;
+      const next = at < 0 ? (step > 0 ? 0 : order.length - 1)
+                          : Math.min(order.length - 1, Math.max(0, at + step));
+      setRowFocus(order[next]);
     });
 
     tableBody.addEventListener('change', (e) => {
@@ -3798,8 +4067,21 @@ HTML_TEMPLATE = """<!DOCTYPE html>
           showToast('Nothing found for that search', 'warning');
           return;
         }
+        // Taking entries[0] silently is the same confidently-wrong failure the
+        // fixer exists to prevent. Hand ambiguity to the fixer, which already
+        // renders the candidates; only apply outright when there is nothing to
+        // choose between.
+        const doubtful = list.length > 1
+          || (found.match_ratio !== undefined && found.match_ratio !== null
+              && found.match_ratio < REVIEW_RATIO_FLOOR);
+        if (doubtful && !digitsOnly) {
+          item.candidates = list;
+          openFixerWith(idx, list, text);
+          return;
+        }
         // Replace identity and metadata; the user's own choices stay put.
-        Object.assign(item, found, { enabled: isActionable(found) });
+        Object.assign(item, found, { enabled: isActionable(found), needs_review: false });
+        delete item.unresolved;      // the placeholder's flag, now untrue
         if (list.length > 1) item.candidates = list;
         renderTable(currentAnimes);
         updateStatsAndExport();
@@ -3918,18 +4200,61 @@ HTML_TEMPLATE = """<!DOCTYPE html>
       });
     });
 
-    selectStatus.addEventListener('change', () => {
-      const newStatus = selectStatus.value;
-      currentAnimes.forEach(item => { item.status = newStatus; });
+    // Which rows a bulk control touches. Selected-and-visible when anything is
+    // selected, otherwise every visible row - so filtering to "Dropped" and
+    // stamping them all still works without ticking each one first. The label
+    // says which of the two is in force, either way.
+    function bulkTargets() {
+      const selected = currentAnimes.filter(i => isActionable(i) && i.enabled !== false
+                                                 && matchesFilters(i));
+      if (selected.length) return { rows: selected, scope: 'selected' };
+      return { rows: currentAnimes.filter(i => matchesFilters(i)), scope: 'visible' };
+    }
+
+    function updateBulkLabels() {
+      const { rows, scope } = bulkTargets();
+      const label = rows.length
+        ? 'Applies to ' + rows.length + ' ' + scope + ' row' + (rows.length === 1 ? '' : 's')
+        : 'No rows to apply to';
+      document.querySelectorAll('.bulk-scope').forEach(el => { el.textContent = label; });
+    }
+
+    function applyBulk(field, value) {
+      const { rows } = bulkTargets();
+      // Previously this stamped currentAnimes outright, overwriting unchecked
+      // rows, rows hidden by the filter, and anything hand-edited.
+      rows.forEach(item => { item[field] = value; });
       renderTable(currentAnimes);
       if (currentAnimes.length > 0) updateStatsAndExport();
+      updateBulkLabels();
+    }
+
+    selectStatus.addEventListener('change', () => applyBulk('status', selectStatus.value));
+
+    // `change` rather than `input`: bound to `input` this re-stamped every row
+    // on every keystroke, so typing "10" wrote a 1 across the list first.
+    inputScore.addEventListener('change', () => {
+      applyBulk('score', parseInt(inputScore.value, 10) || 0);
     });
 
-    inputScore.addEventListener('input', () => {
-      const newScore = parseInt(inputScore.value, 10) || 0;
-      currentAnimes.forEach(item => { item.score = newScore; });
-      if (currentAnimes.length > 0) updateStatsAndExport();
-    });
+    // The resolve run has always had Cancel and Pause. The write, undo and
+    // copy runs register with the same control block and check `cancel`
+    // between batches, but never showed the controls at all - so a long copy
+    // could not be stopped from the page. Pause stays hidden for them: only
+    // the resolve loop actually waits on it, and a button that does nothing is
+    // worse than no button.
+    function showRunCancel(runId) {
+      activeRunId = runId || null;
+      btnCancel.disabled = false;
+      btnPause.style.display = 'none';
+      runControls.classList.add('show');
+    }
+
+    function hideRunCancel() {
+      runControls.classList.remove('show');
+      btnPause.style.display = '';
+      activeRunId = null;
+    }
 
     async function sendRunControl(action) {
       try {
@@ -4000,9 +4325,9 @@ HTML_TEMPLATE = """<!DOCTYPE html>
 
     document.addEventListener('keydown', (e) => {
       if (e.key === 'Escape') {
-        hideModal(previewModal);
-        hideModal(writeModal);
-        hideModal(fixModal);
+        // Every backdrop, rather than a hand-kept list: the last two dialogs
+        // added were both missed by the old one.
+        document.querySelectorAll('.modal-backdrop.show').forEach(hideModal);
       }
       if (e.key === 'Enter' && (e.ctrlKey || e.metaKey) && !isProcessing) {
         e.preventDefault();
@@ -4129,6 +4454,11 @@ HTML_TEMPLATE = """<!DOCTYPE html>
 
     let fixCandidates = [];
 
+    function renderFixResults(entries) {
+      fixResults.innerHTML = (entries || []).map(resultRowHtml).join('')
+        || '<div class="fix-hint">Nothing found.</div>';
+    }
+
     async function runFixSearch() {
       const query = fixQuery.value.trim();
       if (!query) return;
@@ -4146,8 +4476,7 @@ HTML_TEMPLATE = """<!DOCTYPE html>
           return;
         }
         fixCandidates = payload.entries || [];
-        fixResults.innerHTML = fixCandidates.map(resultRowHtml).join('')
-          || '<div class="fix-hint">Nothing found.</div>';
+        renderFixResults(fixCandidates);
       } catch (e) {
         fixResults.innerHTML = '<div class="fix-hint">Could not reach the local server.</div>';
       }
@@ -4159,6 +4488,10 @@ HTML_TEMPLATE = """<!DOCTYPE html>
       if (!item || !entry) return;
       // Identity and metadata change; the user's status, score and progress stay.
       Object.assign(item, entry, { enabled: isActionable(entry) });
+      // The ratio describes the original search and means nothing once a
+      // person has chosen, so choosing clears the flag.
+      item.needs_review = false;
+      delete item.unresolved;        // the placeholder's flag, now untrue
       if (fixCandidates.length > 1) item.candidates = fixCandidates;
       fixFixed += 1;
       fixPos += 1;
@@ -4188,6 +4521,21 @@ HTML_TEMPLATE = """<!DOCTYPE html>
       showToast('No longer skipping ' + n + (n === 1 ? ' title' : ' titles') + '.');
     });
 
+    // Open the fixer on one row with results already in hand, so the inline
+    // Find button can hand over instead of guessing.
+    function openFixerWith(index, entries, queryText) {
+      fixQueue = [index];
+      fixPos = 0;
+      fixFixed = 0;
+      showModal(fixModal);
+      const item = currentAnimes[index];
+      fixOriginal.textContent = (item && (item.original || item.title)) || queryText;
+      fixQuery.value = queryText;
+      fixCounter.textContent = '1 of 1';
+      fixCandidates = entries;
+      renderFixResults(entries);
+    }
+
     btnFixUnmatched.addEventListener('click', () => openFixer(-1));
     btnFixSearch.addEventListener('click', runFixSearch);
     fixIdKind.addEventListener('change', runFixSearch);
@@ -4198,7 +4546,20 @@ HTML_TEMPLATE = """<!DOCTYPE html>
       const pick = e.target.closest('[data-pick]');
       if (pick) applyFix(fixCandidates[parseInt(pick.dataset.pick, 10)]);
     });
+    btnFixBack.addEventListener('click', () => {
+      if (fixPos > 0) { fixPos -= 1; showFixCurrent(); }
+    });
     btnFixSkip.addEventListener('click', () => { fixPos += 1; showFixCurrent(); });
+
+    // Search as you type, so the fixer does not need the button pressed. Long
+    // enough not to fire a request per keystroke on a slow list.
+    let fixSearchTimer = null;
+    fixQuery.addEventListener('input', () => {
+      if (fixSearchTimer) clearTimeout(fixSearchTimer);
+      const text = fixQuery.value.trim();
+      if (text.length < 3) return;
+      fixSearchTimer = setTimeout(() => { runFixSearch(); }, 450);
+    });
     btnFixClose.addEventListener('click', () => {
       hideModal(fixModal);
       if (fixFixed) showToast(`Fixed ${fixFixed} title${fixFixed === 1 ? '' : 's'}`);
@@ -4216,6 +4577,9 @@ HTML_TEMPLATE = """<!DOCTYPE html>
     let lastWritePlan = null;
     let writeOverrides = {};
     let lastWriteSnapshot = null;
+    // A copy writes anime and manga separately, so it leaves two snapshots and
+    // undoing it means replaying both, newest first.
+    let lastWriteSnapshots = [];
     let lastWriteRunId = null;
     let lastWriteFailed = 0;
     let lastWriteCreated = 0;
@@ -4542,12 +4906,21 @@ HTML_TEMPLATE = """<!DOCTYPE html>
           return;
         }
         await streamSse(res, (event) => {
-          if (event.type === 'write_progress') {
+          if (event.type === 'started') {
+            showRunCancel(event.run_id);
+          } else if (event.type === 'write_progress') {
             progressBarFill.style.transform = 'scaleX(' + Math.min(1, event.percent / 100) + ')';
             progressCountLabel.textContent = event.current + ' / ' + event.total;
             progressPercentLabel.textContent = Math.round(event.percent) + '%';
             progressCurrentTitle.textContent = `[${event.current}/${event.total}] ${event.title}`;
             progressCurrentSub.textContent = event.ok ? 'Saved' : 'Failed';
+            if (event.eta_seconds !== undefined) {
+              const mins = Math.floor(event.eta_seconds / 60);
+              const secs = Math.round(event.eta_seconds % 60);
+              etaLabel.textContent = event.eta_seconds > 0
+                ? '~' + (mins > 0 ? mins + 'm ' : '') + secs + 's left'
+                : 'finishing...';
+            }
           } else if (event.type === 'plan') {
             if (event.snapshot) lastWriteSnapshot = event.snapshot;
             progressCurrentSub.textContent = `${event.creates} to add, ${event.updates} to update`;
@@ -4563,6 +4936,7 @@ HTML_TEMPLATE = """<!DOCTYPE html>
             lastWriteFailed = failedCount;
             lastWriteCreated = event.created || 0;
             if (event.snapshot) lastWriteSnapshot = event.snapshot;
+            lastWriteSnapshots = event.snapshot ? [event.snapshot] : [];
             updateWriteAftermath();
             showToast(`AniList updated: ${event.created} added, ${event.updated} updated`
               + (failedCount ? `, ${failedCount} failed` : ''), failedCount ? 'warning' : 'success');
@@ -4575,7 +4949,10 @@ HTML_TEMPLATE = """<!DOCTYPE html>
           } else if (event.type === 'cancelled') {
             if (event.snapshot) lastWriteSnapshot = event.snapshot;
             updateWriteAftermath();
-            showToast('Write cancelled after ' + event.written + ' entries', 'warning');
+            // Rows go out eight to a request, so a cancel lands between
+            // batches: the rest of the batch in flight is already written.
+            showToast('Write cancelled after ' + event.written
+              + ' entries (the batch in progress still finished)', 'warning');
             return false;
           }
         });
@@ -4586,6 +4963,7 @@ HTML_TEMPLATE = """<!DOCTYPE html>
         btnWrite.disabled = false;
         btnUndo.disabled = false;
         btnRetry.disabled = false;
+        hideRunCancel();
         setTimeout(() => { progressCard.style.display = 'none'; }, 1500);
       }
     }
@@ -4619,6 +4997,11 @@ HTML_TEMPLATE = """<!DOCTYPE html>
         return;
       }
       if (!lastWriteSnapshot) return;
+      // A copy writes anime and manga separately and leaves a snapshot for
+      // each, so undoing it means replaying every one - newest first, so the
+      // account walks back the way it came.
+      const pending = (lastWriteSnapshots.length ? lastWriteSnapshots.slice()
+                                                 : [lastWriteSnapshot]).reverse();
       const deleteBox = document.getElementById('undoDeleteCreated');
       hideModal(undoModal);
       isProcessing = true;
@@ -4628,24 +5011,39 @@ HTML_TEMPLATE = """<!DOCTYPE html>
       progressBarFill.style.transform = 'scaleX(0)';
       progressCurrentTitle.textContent = 'Undoing the last write...';
       progressCurrentSub.textContent = '';
+      let restoredAll = 0;
+      let deletedAll = 0;
+      let failedAll = 0;
+      let unrecoverableAll = 0;
+      let stopped = false;
       try {
+        for (const snapshotName of pending) {
         const res = await fetch('/api/anilist-undo', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({
             token: token,
             confirm: true,
-            snapshot: lastWriteSnapshot,
+            snapshot: snapshotName,
             delete_created: !!(deleteBox && deleteBox.checked),
           }),
         });
         if (!res.ok) {
           const err = await res.json().catch(() => ({}));
-          showToast(err.error || 'The undo could not start', 'error');
-          return;
+          // A snapshot whose only rows were creates has nothing to undo while
+          // the delete box is unticked, and answers 400. That is not a failure
+          // of the run as a whole, so the next snapshot still gets its turn.
+          if (res.status !== 400) {
+            showToast(err.error || 'The undo could not start', 'error');
+            stopped = true;
+            break;
+          }
+          continue;
         }
         await streamSse(res, (event) => {
-          if (event.type === 'write_progress') {
+          if (event.type === 'started') {
+            showRunCancel(event.run_id);
+          } else if (event.type === 'write_progress') {
             progressBarFill.style.transform = 'scaleX(' + Math.min(1, event.percent / 100) + ')';
             progressCountLabel.textContent = event.current + ' / ' + event.total;
             progressPercentLabel.textContent = Math.round(event.percent) + '%';
@@ -4654,15 +5052,11 @@ HTML_TEMPLATE = """<!DOCTYPE html>
           } else if (event.type === 'plan') {
             progressCurrentSub.textContent = `${event.restores} to restore, ${event.deletes} to delete`;
           } else if (event.type === 'undo_complete') {
-            const notes = [];
-            if (event.failed_count) notes.push(event.failed_count + ' failed');
-            if ((event.unrecoverable || []).length) {
-              notes.push((event.unrecoverable || []).length + ' could not be undone');
-            }
-            showToast(`Undo done: ${event.restored} restored, ${event.deleted} deleted`
-              + (notes.length ? ' (' + notes.join(', ') + ')' : ''),
-              notes.length ? 'warning' : 'success');
-            if (notes.length) {
+            restoredAll += event.restored;
+            deletedAll += event.deleted;
+            failedAll += event.failed_count;
+            unrecoverableAll += (event.unrecoverable || []).length;
+            if (event.failed_count || (event.unrecoverable || []).length) {
               unresolvedBar.classList.add('show');
               unresolvedText.innerHTML = '<strong>Undo was partial.</strong> '
                 + (event.failed || []).slice(0, 3)
@@ -4673,15 +5067,27 @@ HTML_TEMPLATE = """<!DOCTYPE html>
             return false;
           } else if (event.type === 'cancelled') {
             showToast('Undo cancelled after ' + event.written + ' rows', 'warning');
+            stopped = true;
             return false;
           }
         });
+        if (stopped) break;
+        }
+        if (!stopped) {
+          const notes = [];
+          if (failedAll) notes.push(failedAll + ' failed');
+          if (unrecoverableAll) notes.push(unrecoverableAll + ' could not be undone');
+          showToast(`Undo done: ${restoredAll} restored, ${deletedAll} deleted`
+            + (notes.length ? ' (' + notes.join(', ') + ')' : ''),
+            notes.length ? 'warning' : 'success');
+        }
       } catch (e) {
         showToast('Lost contact with the local server', 'error');
       } finally {
         isProcessing = false;
         btnWrite.disabled = false;
         btnUndo.disabled = false;
+        hideRunCancel();
         setTimeout(() => { progressCard.style.display = 'none'; }, 1500);
       }
     });
@@ -4726,38 +5132,277 @@ HTML_TEMPLATE = """<!DOCTYPE html>
         return;
       }
 
+      mergeImported(payload);
+    });
+
+    // One merge for both importers: a MAL export file and an AniList list
+    // arrive in the same shape, and a second copy of this would drift.
+    function mergeImported(payload) {
       if (payload.media_type !== mediaType()) {
         mediaTypeSelect.value = payload.media_type;
-        updateMediaTypeUI(false);       // keep the rows; only the labels change
+        updateMediaTypeUI();            // keep the rows; only the labels change
       }
 
-      // Imported values win on the fields the file actually carries; the row's
-      // AniList identity and candidate list are kept.
+      // Imported values win on the fields the source actually carries; the
+      // row's AniList identity and candidate list are kept.
       const byId = new Map(currentAnimes.filter(i => Number(i.id) > 0).map(i => [Number(i.id), i]));
+      const byAniList = new Map(currentAnimes.filter(i => Number(i.anilist_id) > 0)
+        .map(i => [Number(i.anilist_id), i]));
       let matched = 0;
       let added = 0;
       payload.entries.forEach(entry => {
-        const existing = byId.get(Number(entry.id));
+        // An AniList row may have no MAL id at all, so fall back to matching on
+        // the AniList id - which a MAL export never carries, so nothing changes
+        // for that path.
+        const existing = byId.get(Number(entry.id))
+          || (Number(entry.anilist_id) > 0 ? byAniList.get(Number(entry.anilist_id)) : null);
         if (existing) {
           const keep = {
-            anilist_id: existing.anilist_id,
+            anilist_id: existing.anilist_id || entry.anilist_id,
             candidates: existing.candidates,
-            cover: existing.cover,
-            year: existing.year,
+            cover: existing.cover || entry.cover,
+            year: existing.year || entry.year,
             original: existing.original,
-            can_write_anilist: existing.can_write_anilist,
+            can_write_anilist: existing.can_write_anilist || entry.can_write_anilist,
           };
           Object.assign(existing, entry, keep);
           existing.enabled = isActionable(existing);
           matched += 1;
         } else if (addUnmatchedImports.checked) {
-          currentAnimes.push({ ...entry, original: entry.title, enabled: enabledFor(entry) });
+          currentAnimes.push({ ...entry, original: entry.original || entry.title,
+                               enabled: enabledFor(entry) });
           added += 1;
         }
       });
       renderTable(currentAnimes);
       updateStatsAndExport();
-      showToast(`Imported: ${matched} matched, ${added} added, ${payload.skipped} skipped`);
+      const extra = payload.anilist_only
+        ? `, ${payload.anilist_only} AniList-only (no MAL id)` : '';
+      showToast(`Imported: ${matched} matched, ${added} added, ${payload.skipped} skipped${extra}`);
+    }
+
+    btnCopyAccount.addEventListener('click', () => {
+      copyPlan.innerHTML = '';
+      btnCopyRun.disabled = true;
+      showModal(copyModal);
+    });
+    btnCopyCancel.addEventListener('click', () => hideModal(copyModal));
+    copyModal.addEventListener('click', (e) => {
+      if (e.target === copyModal) hideModal(copyModal);
+    });
+    copySourceUser.addEventListener('input', () => { btnCopyRun.disabled = true; });
+
+    function copyStageLine(stage) {
+      const label = stage.media_type === 'manga' ? 'Manga' : 'Anime';
+      if (!stage.found) return `<div><strong>${label}</strong>: the source has none.</div>`;
+      const bits = [`<strong>${stage.found}</strong> on the source`,
+                    `<strong>${stage.creates}</strong> to add`,
+                    `<strong>${stage.updates}</strong> to overwrite`];
+      if (stage.unchanged) bits.push(`${stage.unchanged} already identical`);
+      const skipped = stage.skipped.length
+        ? ` ${stage.skipped.length} cannot be written (no AniList id).` : '';
+      const extra = stage.extra_on_destination
+        ? ` <span class="warn">${stage.extra_on_destination} on the destination are not on the
+            source and will be left as they are.</span>` : '';
+      return `<div><strong>${label}</strong>: ${bits.join(', ')}.${skipped}${extra}</div>`;
+    }
+
+    btnCopyCheck.addEventListener('click', async () => {
+      const token = anilistToken.value.trim();
+      const source = copySourceUser.value.trim();
+      if (!token) {
+        copyPlan.innerHTML = '<div class="warn">Paste and check the destination token first.</div>';
+        return;
+      }
+      if (!source) {
+        copyPlan.innerHTML = '<div class="warn">Name the account to copy from.</div>';
+        return;
+      }
+      btnCopyCheck.disabled = true;
+      copyPlan.innerHTML = 'Reading both accounts...';
+      try {
+        const res = await fetch('/api/anilist-copy-preview', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ source_username: source, token: token, policy: 'overwrite' }),
+        });
+        const plan = await res.json().catch(() => ({}));
+        if (!res.ok || !plan.ok) {
+          copyPlan.innerHTML = `<div class="warn">${escapeHtml(plan.error || 'That did not work.')}</div>`;
+          return;
+        }
+        const totalWrites = plan.stages.reduce((n, st) => n + st.total, 0);
+        copyPlan.innerHTML =
+          `<div>From <strong>${escapeHtml(plan.source)}</strong> to
+             <strong>${escapeHtml(plan.destination)}</strong>.</div>`
+          + plan.stages.map(copyStageLine).join('')
+          + (totalWrites ? '' : '<div class="warn">Nothing to write.</div>');
+        btnCopyRun.disabled = totalWrites === 0;
+      } catch (e) {
+        copyPlan.innerHTML = '<div class="warn">Could not reach the local server.</div>';
+      } finally {
+        btnCopyCheck.disabled = false;
+      }
+    });
+
+    // A copy can stop half way - after the anime stage has written and before
+    // the manga stage finishes. Whatever landed has to stay undoable.
+    function rememberCopySnapshots(snapshots) {
+      if (!snapshots.length) return;
+      lastWriteSnapshots = snapshots.slice();
+      lastWriteSnapshot = snapshots[snapshots.length - 1];
+      updateWriteAftermath();
+    }
+
+    btnCopyRun.addEventListener('click', async () => {
+      const token = anilistToken.value.trim();
+      const source = copySourceUser.value.trim();
+      if (!token || !source) return;
+      hideModal(copyModal);
+      isProcessing = true;
+      btnWrite.disabled = true;
+      btnCopyAccount.disabled = true;
+      progressCard.style.display = 'flex';
+      progressBarFill.style.transform = 'scaleX(0)';
+      progressCurrentTitle.textContent = 'Copying ' + source + '...';
+      progressCurrentSub.textContent = '';
+      const snapshots = [];
+      try {
+        const res = await fetch('/api/anilist-copy', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            source_username: source, token: token, confirm: true, policy: 'overwrite',
+          }),
+        });
+        if (!res.ok) {
+          const err = await res.json().catch(() => ({}));
+          showToast(err.error || 'The copy could not start', 'error');
+          return;
+        }
+        await streamSse(res, (event) => {
+          if (event.type === 'started') {
+            showRunCancel(event.run_id);
+          } else if (event.type === 'stage_started') {
+            // Reading a whole list takes several requests and used to show
+            // nothing at all until the first row was written.
+            progressCurrentTitle.textContent =
+              'Reading ' + event.media_type + ' from ' + source + '...';
+            progressCurrentSub.textContent = 'nothing has been written yet';
+          } else if (event.type === 'stage') {
+            if (event.snapshot) snapshots.push(event.snapshot);
+            progressCurrentSub.textContent =
+              `${event.media_type}: ${event.creates} to add, ${event.updates} to overwrite`;
+          } else if (event.type === 'write_progress') {
+            progressBarFill.style.transform = 'scaleX(' + Math.min(1, event.percent / 100) + ')';
+            progressCountLabel.textContent = event.current + ' / ' + event.total;
+            progressPercentLabel.textContent = Math.round(event.percent) + '%';
+            progressCurrentTitle.textContent =
+              `[${event.media_type} ${event.current}/${event.total}] ${event.title}`;
+            if (event.eta_seconds !== undefined) {
+              const mins = Math.floor(event.eta_seconds / 60);
+              const secs = Math.round(event.eta_seconds % 60);
+              etaLabel.textContent = event.eta_seconds > 0
+                ? '~' + (mins > 0 ? mins + 'm ' : '') + secs + 's left'
+                : 'finishing...';
+            }
+          } else if (event.type === 'error') {
+            rememberCopySnapshots(snapshots);
+            showToast(event.error || 'The copy failed', 'error');
+            return false;
+          } else if (event.type === 'cancelled') {
+            rememberCopySnapshots(snapshots);
+            showToast('Copy cancelled after ' + event.written + ' entries', 'warning');
+            return false;
+          } else if (event.type === 'copy_complete') {
+            const stages = event.stages || {};
+            const added = Object.values(stages).reduce((n, st) => n + st.created, 0);
+            const over = Object.values(stages).reduce((n, st) => n + st.updated, 0);
+            const bad = Object.values(stages).reduce((n, st) => n + st.failed_count, 0);
+            // Two media types means two snapshots, and undo takes one at a time.
+            lastWriteSnapshots = event.snapshots || [];
+            lastWriteSnapshot = lastWriteSnapshots[lastWriteSnapshots.length - 1] || null;
+            lastWriteCreated = added;
+            lastWriteFailed = 0;
+            updateWriteAftermath();
+            showToast(`Copied to ${event.destination}: ${added} added, ${over} overwritten`
+              + (bad ? `, ${bad} failed` : ''), bad ? 'warning' : 'success');
+            if (bad) {
+              unresolvedBar.classList.add('show');
+              const lines = [];
+              Object.keys(stages).forEach(mt => {
+                (stages[mt].failed || []).slice(0, 3).forEach(f => {
+                  lines.push(escapeHtml(mt + ': ' + f.title + ' (' + f.error + ')'));
+                });
+              });
+              unresolvedText.innerHTML = `<strong>${bad}</strong> entries failed to copy: `
+                + lines.join('; ');
+            }
+            return false;
+          }
+        });
+      } catch (e) {
+        rememberCopySnapshots(snapshots);
+        showToast('Lost contact with the local server', 'error');
+      } finally {
+        isProcessing = false;
+        btnWrite.disabled = false;
+        btnCopyAccount.disabled = false;
+        hideRunCancel();
+        setTimeout(() => { progressCard.style.display = 'none'; }, 1500);
+      }
+    });
+
+    btnAniListImport.addEventListener('click', () => {
+      listImportStatus.textContent = '';
+      listImportStatus.className = 'token-status';
+      showModal(listImportModal);
+    });
+    btnListImportCancel.addEventListener('click', () => hideModal(listImportModal));
+    listImportModal.addEventListener('click', (e) => {
+      if (e.target === listImportModal) hideModal(listImportModal);
+    });
+
+    btnListImportGo.addEventListener('click', async () => {
+      const username = listImportUser.value.trim();
+      const token = anilistToken.value.trim();
+      if (!username && !token) {
+        listImportStatus.textContent = 'Type a username, or check a token above to read your own list.';
+        listImportStatus.className = 'token-status bad';
+        return;
+      }
+      btnListImportGo.disabled = true;
+      listImportStatus.textContent = 'Reading the list from AniList...';
+      listImportStatus.className = 'token-status';
+      try {
+        const res = await fetch('/api/anilist-import', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            media_type: mediaType(),
+            username: username,
+            token: username ? '' : token,
+          }),
+        });
+        const payload = await res.json().catch(() => ({}));
+        if (!res.ok || !payload.ok) {
+          listImportStatus.textContent = payload.error || 'That list could not be read.';
+          listImportStatus.className = 'token-status bad';
+          return;
+        }
+        if (!payload.entries.length) {
+          listImportStatus.textContent = 'That list has no ' + mediaType() + ' entries.';
+          listImportStatus.className = 'token-status bad';
+          return;
+        }
+        hideModal(listImportModal);
+        mergeImported(payload);
+      } catch (e) {
+        listImportStatus.textContent = 'Could not reach the local server.';
+        listImportStatus.className = 'token-status bad';
+      } finally {
+        btnListImportGo.disabled = false;
+      }
     });
 
     destinationSelect.addEventListener('change', () => setDestination(destinationSelect.value));
@@ -4843,7 +5488,7 @@ HTML_TEMPLATE = """<!DOCTYPE html>
 
     // Initial load: restore the previous session, or start clean.
     if (!restoreState()) {
-      updateMediaTypeUI(false);
+      updateMediaTypeUI();
       loadData();
       setDestination('', false);   // first run: ask rather than assume
     }
@@ -4874,7 +5519,7 @@ class MalGuiHandler(BaseHTTPRequestHandler):
         path = parsed.path
 
         if path == "/" or path == "/index.html":
-            body = HTML_TEMPLATE.encode("utf-8")
+            body = _page_html().encode("utf-8")
             self.send_response(HTTPStatus.OK)
             self.send_header("Content-Type", "text/html; charset=utf-8")
             self.send_header("Content-Length", str(len(body)))
@@ -4951,9 +5596,44 @@ class MalGuiHandler(BaseHTTPRequestHandler):
         else:
             self.send_error(HTTPStatus.NOT_FOUND, "Not found")
 
+    def _same_origin(self) -> bool:
+        """Refuse a POST that another website sent on the user's behalf.
+
+        The server is local and has no login, so any page the user happens to
+        have open can POST here. It cannot write to AniList - the token lives
+        in this page and is never stored - but it can spend the AniList rate
+        limit through /api/process and overwrite the export through
+        /api/update-export. A JSON body with Content-Type: text/plain is a
+        "simple request", so there is no preflight to stop it either.
+
+        An absent Origin is allowed: curl and the test harness send none, and a
+        browser that omits it is not acting for a third-party page.
+        """
+        origin = self.headers.get("Origin")
+        if not origin:
+            return True
+        try:
+            sent = urllib.parse.urlparse(origin)
+        except ValueError:
+            return False
+        if sent.scheme not in ("http", "https"):
+            return False
+        # The app opens 127.0.0.1, but people type localhost - and that is a
+        # different origin to a browser, so both loopback spellings have to
+        # pass or the page breaks for anyone who types the other one.
+        port = sent.port or (443 if sent.scheme == "https" else 80)
+        return (str(sent.hostname or "").lower() in LOOPBACK_HOSTS
+                and port == self.server.server_address[1])
+
     def do_POST(self) -> None:
         parsed = urllib.parse.urlparse(self.path)
         path = parsed.path
+
+        if not self._same_origin():
+            self.send_json({"ok": False,
+                            "error": "This request came from another website and was refused."},
+                           status=403)
+            return
 
         content_length = int(self.headers.get("Content-Length", 0))
         raw_body = self.rfile.read(content_length) if content_length > 0 else b"{}"
@@ -5328,35 +6008,55 @@ class MalGuiHandler(BaseHTTPRequestHandler):
                             "creates": sum(1 for p in payloads if not p["update"]),
                             "snapshot": snapshot_name,
                             "skipped": skipped})
-                for index, payload in enumerate(payloads, start=1):
+                # One request per batch, one event per row: the batch is a
+                # transport detail and the progress bar should not jump 8 at a
+                # time because of it.
+                index = 0
+                cancelled = False
+                for start in range(0, total, WRITE_BATCH_SIZE):
                     if control["cancel"].is_set():
                         send_event({"type": "cancelled", "written": updated + created,
                                     "snapshot": snapshot_name})
+                        cancelled = True
                         break
-                    outcome = anilist_write_entry(token, payload)
-                    if outcome.get("ok"):
-                        if payload["update"]:
-                            updated += 1
+                    batch = payloads[start:start + WRITE_BATCH_SIZE]
+                    outcomes = anilist_write_batch(token, batch)
+                    for payload, outcome in zip(batch, outcomes):
+                        index += 1
+                        if outcome.get("ok"):
+                            if payload["update"]:
+                                updated += 1
+                            else:
+                                created += 1
+                                # A created entry's id exists only in this
+                                # response, and it is the only handle undo has.
+                                if snapshot and snapshot_name:
+                                    record_created_entry(snapshot, payload["anilist_id"],
+                                                         outcome["id"])
+                                    # Saved per create, not per batch: a crash
+                                    # between a batch returning and the file
+                                    # being written would otherwise strand up
+                                    # to eight created entries with no id, and
+                                    # undo cannot delete what it cannot name.
+                                    # The file is small and the write is atomic.
+                                    save_undo_snapshot(snapshot, snapshot_name)
                         else:
-                            created += 1
-                            # A created entry's id exists only in this response,
-                            # and it is the only handle an undo has on the row.
-                            if snapshot and snapshot_name:
-                                record_created_entry(snapshot, payload["anilist_id"], outcome["id"])
-                                save_undo_snapshot(snapshot, snapshot_name)
-                    else:
-                        failed.append({"title": payload["title"], "error": outcome.get("error", "")})
-                        failed_payloads.append(payload)
-                    send_event({
-                        "type": "write_progress",
-                        "current": index,
-                        "total": total,
-                        "title": payload["title"],
-                        "ok": bool(outcome.get("ok")),
-                        "percent": round((index / total) * 100, 1) if total else 100.0,
-                        "interval": current_interval(),
-                    })
-                else:
+                            failed.append({"title": payload["title"],
+                                           "error": outcome.get("error", "")})
+                            failed_payloads.append(payload)
+                        batches_left = max(0, (total - index + WRITE_BATCH_SIZE - 1) // WRITE_BATCH_SIZE)
+                        send_event({
+                            "type": "write_progress",
+                            "current": index,
+                            "total": total,
+                            "title": payload["title"],
+                            "ok": bool(outcome.get("ok")),
+                            "percent": round((index / total) * 100, 1) if total else 100.0,
+                            "interval": current_interval(),
+                            "eta_seconds": round(batches_left * current_interval(), 1),
+                            "batch_size": len(batch),
+                        })
+                if not cancelled:
                     send_event({
                         "type": "write_complete",
                         "run_id": run_id,
@@ -5429,23 +6129,10 @@ class MalGuiHandler(BaseHTTPRequestHandler):
                 total = len(steps)
                 send_event({"type": "plan", "total": total, "restores": len(restores),
                             "deletes": len(deletes), "unrecoverable": unrecoverable})
-                for index, (kind, item) in enumerate(steps, start=1):
-                    if control["cancel"].is_set():
-                        send_event({"type": "cancelled", "written": restored + removed})
-                        break
-                    if kind == "restore":
-                        outcome = anilist_write_entry(token, item)
-                    else:
-                        outcome = anilist_delete_entry(token, item["entry_id"])
-                    if outcome.get("ok"):
-                        if kind != "restore":
-                            removed += 1
-                        elif not item.get("repair"):
-                            restored += 1
-                    else:
-                        # A stale snapshot - the entry was deleted on AniList
-                        # since the write - fails this row and no other.
-                        failed.append({"title": item["title"], "error": outcome.get("error", "")})
+                index = 0
+                cancelled = False
+
+                def report(item, outcome, left):
                     send_event({
                         "type": "write_progress",
                         "current": index,
@@ -5455,8 +6142,55 @@ class MalGuiHandler(BaseHTTPRequestHandler):
                         "ok": bool(outcome.get("ok")),
                         "percent": round((index / total) * 100, 1) if total else 100.0,
                         "interval": current_interval(),
+                        "eta_seconds": round(left * current_interval(), 1),
                     })
-                else:
+
+                # Restores are all SaveMediaListEntry, so they batch exactly
+                # like the write does. Order is preserved inside a document and
+                # across documents, which matters: a repeat repair has to land
+                # after the restore it is repairing.
+                for start in range(0, len(restores), WRITE_BATCH_SIZE):
+                    if control["cancel"].is_set():
+                        send_event({"type": "cancelled", "written": restored + removed})
+                        cancelled = True
+                        break
+                    batch = restores[start:start + WRITE_BATCH_SIZE]
+                    outcomes = anilist_write_batch(token, batch)
+                    for item, outcome in zip(batch, outcomes):
+                        index += 1
+                        if outcome.get("ok"):
+                            # A repair is a second write for a row already
+                            # counted, so it must not count again.
+                            if not item.get("repair"):
+                                restored += 1
+                        else:
+                            # A stale snapshot - the entry was deleted on
+                            # AniList since the write - fails this row alone.
+                            failed.append({"title": item["title"],
+                                           "error": outcome.get("error", "")})
+                        done_rows = index
+                        left = ((len(restores) - done_rows + WRITE_BATCH_SIZE - 1)
+                                // WRITE_BATCH_SIZE) + len(deletes)
+                        report(item, outcome, max(0, left))
+
+                # Deletes are a different mutation, so they cannot share a
+                # document with the restores and go one at a time.
+                if not cancelled:
+                    for position, item in enumerate(deletes):
+                        if control["cancel"].is_set():
+                            send_event({"type": "cancelled", "written": restored + removed})
+                            cancelled = True
+                            break
+                        outcome = anilist_delete_entry(token, item["entry_id"])
+                        index += 1
+                        if outcome.get("ok"):
+                            removed += 1
+                        else:
+                            failed.append({"title": item["title"],
+                                           "error": outcome.get("error", "")})
+                        report(item, outcome, len(deletes) - position - 1)
+
+                if not cancelled:
                     send_event({"type": "undo_complete", "restored": restored,
                                 "deleted": removed, "failed": failed,
                                 "failed_count": len(failed),
@@ -5495,6 +6229,229 @@ class MalGuiHandler(BaseHTTPRequestHandler):
                 self.send_json(parse_mal_xml(raw))
             except ValueError as exc:
                 self.send_json({"ok": False, "error": str(exc)}, status=400)
+            return
+
+        elif path == "/api/anilist-copy-preview":
+            source_username, source_token, token = _copy_request(data)
+            if not token:
+                self.send_json({"ok": False,
+                                "error": "Paste the destination account's token."}, status=400)
+                return
+            if not source_username and not source_token:
+                self.send_json({"ok": False,
+                                "error": "Name the account to copy from."}, status=400)
+                return
+            viewer = anilist_viewer(token)
+            if not viewer.get("ok"):
+                self.send_json(viewer, status=401)
+                return
+            policy = _write_policy(data)
+            stages = []
+            for media_type in COPY_MEDIA_TYPES:
+                stage = _copy_stage(media_type, source_username, source_token,
+                                    token, viewer["id"], policy)
+                if not stage.get("ok"):
+                    self.send_json({"ok": False, "error": stage["error"],
+                                    "media_type": media_type}, status=502)
+                    return
+                payloads = stage["payloads"]
+                # What the destination holds that the source does not. A copy
+                # only ever adds and updates, so these stay behind and the
+                # destination ends up a superset - say so rather than letting
+                # "exact copy" imply they were removed.
+                source_ids = {int(r.get("anilist_id") or 0) for r in stage["rows"]}
+                destination = anilist_list_collection(media_type, token=token,
+                                                      user_id=viewer["id"])
+                extra = sorted(
+                    {int(r.get("anilist_id") or 0) for r in destination.get("entries") or []}
+                    - source_ids) if destination.get("ok") else []
+                stages.append({
+                    "media_type": media_type,
+                    "extra_on_destination": len(extra),
+                    "found": len(stage["rows"]),
+                    "total": len(payloads),
+                    "creates": sum(1 for p in payloads if not p["update"]),
+                    "updates": sum(1 for p in payloads if p["update"]),
+                    "unchanged": sum(1 for p in payloads if not p["diff"]),
+                    "conflicts": sum(1 for p in payloads
+                                     if any(d["blocked"] for d in p["diff"])),
+                    "skipped": stage["skipped"],
+                })
+            self.send_json({"ok": True, "destination": viewer.get("name", ""),
+                            "source": source_username or "(the source token's own account)",
+                            "policy": policy, "stages": stages})
+            return
+
+        elif path == "/api/anilist-copy":
+            source_username, source_token, token = _copy_request(data)
+            if not token:
+                self.send_json({"ok": False,
+                                "error": "Paste the destination account's token."}, status=400)
+                return
+            if not source_username and not source_token:
+                self.send_json({"ok": False, "error": "Name the account to copy from."}, status=400)
+                return
+            if not data.get("confirm"):
+                self.send_json({"ok": False,
+                                "error": "Copying writes to the destination account "
+                                         "and needs confirmation."}, status=400)
+                return
+            if not _run_lock.acquire(blocking=False):
+                self.send_json({"ok": False, "error": "A run is already in progress"}, status=409)
+                return
+            run_id, control = _register_run()
+            viewer = anilist_viewer(token)
+            if not viewer.get("ok"):
+                _unregister_run(run_id)
+                _run_lock.release()
+                self.send_json(viewer, status=401)
+                return
+
+            self.send_response(HTTPStatus.OK)
+            self.send_header("Content-Type", "text/event-stream; charset=utf-8")
+            self.send_header("Cache-Control", "no-cache")
+            self.send_header("Connection", "keep-alive")
+            self.end_headers()
+
+            def send_event(event_dict: Dict[str, Any]) -> None:
+                payload = f"data: {json.dumps(event_dict, ensure_ascii=False)}\n\n".encode("utf-8")
+                self.wfile.write(payload)
+                self.wfile.flush()
+
+            policy = _write_policy(data)
+            summary: Dict[str, Any] = {}
+            snapshots: List[str] = []
+            cancelled = False
+            try:
+                send_event({"type": "started", "run_id": run_id,
+                            "destination": viewer.get("name", ""), "policy": policy})
+                for media_type in COPY_MEDIA_TYPES:
+                    if cancelled:
+                        break
+                    send_event({"type": "stage_started", "media_type": media_type})
+                    stage = _copy_stage(media_type, source_username, source_token,
+                                        token, viewer["id"], policy)
+                    if not stage.get("ok"):
+                        send_event({"type": "error", "media_type": media_type,
+                                    "error": stage["error"]})
+                        self.close_connection = True
+                        return
+                    payloads = stage["payloads"]
+                    total = len(payloads)
+                    # One snapshot per media type: the format records a single
+                    # media type, and an undo has to know which it is.
+                    snapshot = build_undo_snapshot(media_type, viewer.get("id", 0),
+                                                   payloads, stage["existing"])
+                    snapshot_name = save_undo_snapshot(snapshot) if payloads else None
+                    if snapshot_name:
+                        prune_undo_snapshots()
+                        snapshots.append(snapshot_name)
+                    send_event({"type": "stage", "media_type": media_type,
+                                "found": len(stage["rows"]), "total": total,
+                                "creates": sum(1 for p in payloads if not p["update"]),
+                                "updates": sum(1 for p in payloads if p["update"]),
+                                "skipped": stage["skipped"], "snapshot": snapshot_name})
+                    created = updated = 0
+                    failed: List[Dict[str, str]] = []
+                    index = 0
+                    for start in range(0, total, WRITE_BATCH_SIZE):
+                        if control["cancel"].is_set():
+                            send_event({"type": "cancelled",
+                                        "written": created + updated,
+                                        "media_type": media_type})
+                            cancelled = True
+                            break
+                        batch = payloads[start:start + WRITE_BATCH_SIZE]
+                        for payload, outcome in zip(batch, anilist_write_batch(token, batch)):
+                            index += 1
+                            if outcome.get("ok"):
+                                if payload["update"]:
+                                    updated += 1
+                                else:
+                                    created += 1
+                                    if snapshot and snapshot_name:
+                                        record_created_entry(snapshot, payload["anilist_id"],
+                                                             outcome["id"])
+                                        save_undo_snapshot(snapshot, snapshot_name)
+                            else:
+                                failed.append({"title": payload["title"],
+                                               "error": outcome.get("error", "")})
+                            left = (total - index + WRITE_BATCH_SIZE - 1) // WRITE_BATCH_SIZE
+                            send_event({
+                                "type": "write_progress",
+                                "media_type": media_type,
+                                "current": index, "total": total,
+                                "title": payload["title"],
+                                "ok": bool(outcome.get("ok")),
+                                "percent": round((index / total) * 100, 1) if total else 100.0,
+                                "interval": current_interval(),
+                                "eta_seconds": round(max(0, left) * current_interval(), 1),
+                            })
+                    summary[media_type] = {"found": len(stage["rows"]), "total": total,
+                                           "created": created, "updated": updated,
+                                           "failed": failed, "failed_count": len(failed),
+                                           "skipped": stage["skipped"],
+                                           "snapshot": snapshot_name}
+                if not cancelled:
+                    send_event({"type": "copy_complete", "run_id": run_id,
+                                "destination": viewer.get("name", ""),
+                                "snapshots": snapshots, "stages": summary})
+            finally:
+                token = ""
+                source_token = ""
+                _unregister_run(run_id)
+                _run_lock.release()
+            self.close_connection = True
+            return
+
+        elif path == "/api/anilist-import":
+            # Read-only, so a public list needs no token at all. A token is
+            # accepted because it is the only way to read a private list.
+            media_type = "manga" if data.get("media_type") == "manga" else "anime"
+            username = str(data.get("username") or "").strip()
+            token = str(data.get("token") or "").strip()
+            if not username and not token:
+                self.send_json({"ok": False,
+                                "error": "Enter an AniList username, or check a token to read "
+                                         "your own list."}, status=400)
+                return
+            user_id = 0
+            if token and not username:
+                viewer = anilist_viewer(token)
+                if not viewer.get("ok"):
+                    self.send_json(viewer, status=401)
+                    return
+                user_id = viewer["id"]
+            # An import landing rows into currentAnimes while a write iterates
+            # them is a real race, so it takes the same lock the write does.
+            if not _run_lock.acquire(blocking=False):
+                self.send_json({"ok": False, "error": "A run is already in progress"}, status=409)
+                return
+            try:
+                # The token travels even when a username is given: that is
+                # the only way to read your own private list by name, and
+                # visibility is decided by who the request authenticates as.
+                result = anilist_list_collection(
+                    media_type, username=username, token=token, user_id=user_id)
+            except Exception as exc:
+                self.send_json({"ok": False, "error": str(exc)}, status=502)
+                return
+            finally:
+                _run_lock.release()
+            if not result.get("ok"):
+                self.send_json(result, status=502)
+                return
+            rows = result["entries"]
+            # The same shape /api/parse-mal-xml returns, so the page reuses one
+            # merge rather than growing a second.
+            self.send_json({
+                "ok": True,
+                "media_type": result["media_type"],
+                "entries": rows,
+                "skipped": result.get("skipped", 0),
+                "source": "anilist",
+                "anilist_only": sum(1 for r in rows if not r.get("can_export_xml")),
+            })
             return
 
         elif path == "/api/search":

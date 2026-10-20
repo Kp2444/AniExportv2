@@ -9,6 +9,7 @@ import os
 import tempfile
 import threading
 import unittest
+import urllib.error
 import urllib.request
 from http.server import ThreadingHTTPServer
 from pathlib import Path
@@ -316,6 +317,87 @@ class AnimePathTests(GuiContractCase):
         self.assertTrue(self.out.joinpath("a.xml").is_file())
         self.assertFalse(self.out.joinpath("m.xml").is_file(),
                          "an anime run must not write the manga export")
+
+
+class SameOriginTests(unittest.TestCase):
+    """The server is local and has no login, so any page the user has open can
+    POST to it. It cannot write to AniList - the token lives in the page and is
+    never stored - but it could spend the AniList rate limit through
+    /api/process and overwrite the export through /api/update-export. A JSON
+    body sent as text/plain is a "simple request", so CORS never preflights it
+    and nothing stopped it before this guard."""
+
+    def setUp(self):
+        self.server = ThreadingHTTPServer(("127.0.0.1", 0), gui.MalGuiHandler)
+        thread = threading.Thread(target=self.server.serve_forever, daemon=True)
+        thread.start()
+        self.addCleanup(thread.join, 2)
+        self.addCleanup(self.server.server_close)
+        self.addCleanup(self.server.shutdown)
+        self.port = self.server.server_port
+        self.base = "http://127.0.0.1:%d" % self.port
+
+    def post(self, path, body, origin=None, ctype="application/json"):
+        headers = {"Content-Type": ctype}
+        if origin:
+            headers["Origin"] = origin
+        req = urllib.request.Request(self.base + path, data=json.dumps(body).encode(),
+                                     headers=headers, method="POST")
+        try:
+            return urllib.request.urlopen(req, timeout=10).getcode()
+        except urllib.error.HTTPError as exc:
+            return exc.code
+
+    BODY = {"entries": [], "media_type": "anime"}
+
+    def test_a_request_with_no_origin_is_allowed(self):
+        # curl and the harness send none, and so does a non-browser client.
+        self.assertEqual(self.post("/api/update-export", self.BODY), 200)
+
+    def test_the_page_itself_is_allowed(self):
+        self.assertEqual(
+            self.post("/api/update-export", self.BODY,
+                      origin="http://127.0.0.1:%d" % self.port), 200)
+
+    def test_another_website_is_refused(self):
+        self.assertEqual(
+            self.post("/api/update-export", self.BODY, origin="https://evil.example"), 403)
+
+    def test_the_text_plain_bypass_is_refused_too(self):
+        # text/plain avoids a CORS preflight entirely, which is how a simple
+        # cross-origin POST reaches a local server in the first place.
+        self.assertEqual(
+            self.post("/api/update-export", self.BODY,
+                      origin="https://evil.example", ctype="text/plain"), 403)
+
+    def test_every_loopback_spelling_the_page_may_use_is_allowed(self):
+        # The app opens 127.0.0.1 but people type localhost, and to a browser
+        # those are different origins. Blocking either breaks the page.
+        for host in ("127.0.0.1", "localhost", "[::1]"):
+            with self.subTest(host=host):
+                self.assertEqual(
+                    self.post("/api/update-export", self.BODY,
+                              origin="http://%s:%d" % (host, self.port)), 200)
+
+    def test_a_lookalike_hostname_is_not_loopback(self):
+        self.assertEqual(
+            self.post("/api/update-export", self.BODY,
+                      origin="http://127.0.0.1.evil.example:%d" % self.port), 403)
+
+    def test_a_non_http_origin_is_refused(self):
+        self.assertEqual(
+            self.post("/api/update-export", self.BODY, origin="file://"), 403)
+
+    def test_a_different_port_on_localhost_is_still_another_origin(self):
+        self.assertEqual(
+            self.post("/api/update-export", self.BODY,
+                      origin="http://127.0.0.1:%d" % (self.port + 1)), 403)
+
+    def test_the_guard_covers_the_expensive_endpoints(self):
+        for path in ("/api/process", "/api/run-control", "/api/anilist-write"):
+            with self.subTest(path=path):
+                self.assertEqual(self.post(path, {"content": "x"},
+                                           origin="https://evil.example"), 403)
 
 
 if __name__ == "__main__":

@@ -89,6 +89,19 @@ class PayloadTests(unittest.TestCase):
                          "The score may not be greater than 100.")
 
 
+def batch_of(*outcomes, **fixed):
+    """A stand-in for anilist_write_batch: one result per payload in the batch.
+
+    `batch_of(ok=True, id=1)` answers every row the same way; passing explicit
+    outcomes answers them in order and repeats the last one.
+    """
+    def run(token, payloads):
+        if outcomes:
+            return [outcomes[min(i, len(outcomes) - 1)] for i in range(len(payloads))]
+        return [dict(fixed) for _ in payloads]
+    return run
+
+
 def _payload(row, media_type="manga", existing=None, **kwargs):
     payloads, skipped = gen.iter_write_payloads([row], media_type, existing or {}, **kwargs)
     assert not skipped, skipped
@@ -105,7 +118,7 @@ def _diff_for(payload, field):
 class ConflictPolicyTests(unittest.TestCase):
     """The write must never send a value backwards without being told to.
 
-    Each case is the measured data loss from ROADMAP 2.3 turned into a test:
+    Each case is a measured data loss turned into a test (MANGA_SUPPORT_NOTES):
     the account's value, the row's value, and what actually goes over the wire.
     """
 
@@ -289,7 +302,7 @@ class ConflictPolicyTests(unittest.TestCase):
 class AniListSideEffectTests(unittest.TestCase):
     """AniList edits some fields itself on a status change, whatever is sent.
 
-    Measured live, not inferred (ROADMAP 2.3, L7-L8). The diff has to predict
+    Measured live, not inferred (MANGA_SUPPORT_NOTES, L7-L8). The diff has to predict
     the account rather than the payload, or the confirm step promises changes
     the API discards.
     """
@@ -403,7 +416,7 @@ class DuplicateRowTests(unittest.TestCase):
 class UndoRepeatRepairTests(unittest.TestCase):
     """Restoring COMPLETED over an entry the write left REPEATING makes AniList
     increment `repeat`, and its increment beats the value sent alongside the
-    status - measured live (ROADMAP 2.3, L8). A second write carrying only
+    status - measured live (MANGA_SUPPORT_NOTES, L8). A second write carrying only
     `repeat` does stick, so the restore is followed by one."""
 
     def snapshot(self, **prior):
@@ -429,6 +442,168 @@ class UndoRepeatRepairTests(unittest.TestCase):
                 restores, _, _ = gen.iter_undo_payloads(self.snapshot(**prior))
                 self.assertEqual(len(restores), 1)
                 self.assertNotIn("repair", restores[0])
+
+
+class BatchWriteTests(unittest.TestCase):
+    """One document, several aliased saves, one request against the rate limit.
+
+    Aliases execute serially and a failing one does not stop the rest, so the
+    authoritative per-row signal is data["mk"] is None. Errors carry no `path`,
+    only `locations`, so messages are matched back by character offset.
+    """
+
+    def payloads(self):
+        return [
+            {"title": "A", "anilist_id": 1,
+             "variables": {"mediaId": 1, "status": "CURRENT", "progress": 3}},
+            {"title": "B", "anilist_id": 2,
+             "variables": {"id": 99, "mediaId": 2, "status": "COMPLETED", "scoreRaw": 90,
+                           "progress": 12, "notes": "n",
+                           "completedAt": {"year": 2024, "month": 1, "day": 2}}},
+        ]
+
+    def test_only_the_arguments_a_row_carries_are_declared(self):
+        query, variables, _ = gen._write_batch_query(self.payloads())
+        # Sending an explicit null for a field the row left alone would blank it.
+        self.assertNotIn("$notes0", query)
+        self.assertNotIn("$completedAt0", query)
+        self.assertNotIn("notes0", variables)
+        self.assertIn("$notes1: String", query)
+        self.assertIn("$completedAt1: FuzzyDateInput", query)
+        self.assertEqual(variables["completedAt1"], {"year": 2024, "month": 1, "day": 2})
+
+    def test_each_alias_is_numbered_and_self_contained(self):
+        query, variables, spans = gen._write_batch_query(self.payloads())
+        self.assertIn("m0: SaveMediaListEntry(", query)
+        self.assertIn("m1: SaveMediaListEntry(", query)
+        self.assertEqual(variables["mediaId0"], 1)
+        self.assertEqual(variables["id1"], 99)
+        for index, (start, end) in enumerate(spans):
+            self.assertIn("m%d:" % index, query[start:end])
+            self.assertNotIn("m%d:" % (1 - index), query[start:end])
+
+    def test_an_empty_batch_sends_nothing(self):
+        self.assertEqual(gen.anilist_write_batch("t", []), [])
+
+    def test_a_null_alias_is_the_signal_that_a_row_failed(self):
+        # The stalled alias is re-sent on its own and fails there too, which is
+        # what a genuinely unwritable row does.
+        def api(query, variables, token, *a, **k):
+            if query.count("SaveMediaListEntry(") > 1:
+                return {"data": {"m0": {"id": 5, "mediaId": 1, "status": "CURRENT"}, "m1": None},
+                        "errors": []}
+            return {"data": {"m0": None}, "errors": []}
+
+        with patch.object(gen, "_execute_anilist_authenticated", side_effect=api):
+            out = gen.anilist_write_batch("t", self.payloads())
+        self.assertEqual(out[0], {"ok": True, "id": 5, "status": "CURRENT"})
+        self.assertFalse(out[1]["ok"])
+        self.assertTrue(out[1]["error"], "a failed row must carry some message")
+
+    def test_an_error_is_matched_to_its_own_alias_by_location(self):
+        query, _, spans = gen._write_batch_query(self.payloads())
+        # Point the error at the second alias the way AniList does: 1-based
+        # line and column into the document it was sent.
+        target = spans[1][0] + 4
+        line = query[:target].count(chr(10)) + 1
+        column = target - (query.rfind(chr(10), 0, target) + 1) + 1
+        reply = {"data": {"m0": {"id": 5, "mediaId": 1, "status": "CURRENT"}, "m1": None},
+                 "errors": [{"message": "The selected media id is invalid.",
+                             "locations": [{"line": line, "column": column}]}]}
+        single = {"data": {"m0": None},
+                  "errors": [{"message": "The selected media id is invalid."}]}
+
+        def api(q, variables, token, *a, **k):
+            return reply if q.count("SaveMediaListEntry(") > 1 else single
+
+        with patch.object(gen, "_execute_anilist_authenticated", side_effect=api):
+            out = gen.anilist_write_batch("t", self.payloads())
+        self.assertTrue(out[0]["ok"])
+        self.assertIn("media id is invalid", out[1]["error"])
+
+    def test_an_unplaceable_error_is_reported_not_guessed(self):
+        reply = {"data": {"m0": None, "m1": None},
+                 "errors": [{"message": "Something went wrong.", "locations": []}]}
+        single = {"data": {"m0": None},
+                  "errors": [{"message": "Something went wrong.", "locations": []}]}
+
+        def api(query, variables, token, *a, **k):
+            return reply if query.count("SaveMediaListEntry(") > 1 else single
+
+        with patch.object(gen, "_execute_anilist_authenticated", side_effect=api):
+            out = gen.anilist_write_batch("t", self.payloads())
+        for row in out:
+            self.assertFalse(row["ok"])
+            self.assertIn("Something went wrong", row["error"],
+                          "an error that cannot be placed goes to every failed alias")
+
+    def test_one_bad_row_does_not_take_its_whole_batch_down(self):
+        # Measured live: AniList validates the entire document before running
+        # any of it, so an invalid media id nulls every alias in the batch -
+        # the good rows never execute. Without the per-row fallback a single
+        # stale id would lose seven good writes and the retry would re-batch
+        # the same eight for ever.
+        sent = []
+
+        def api(query, variables, token, *a, **k):
+            sent.append(query.count("SaveMediaListEntry("))
+            if sent[-1] > 1:
+                return {"data": {"m0": None, "m1": None},
+                        "errors": [{"message": "validation",
+                                    "locations": [{"line": 3, "column": 3}]}]}
+            # Alone, the good row writes and the bad one does not.
+            good = "mediaId: $mediaId0" in query and variables.get("mediaId0") == 1
+            if good:
+                return {"data": {"m0": {"id": 5, "mediaId": 1, "status": "CURRENT"}}, "errors": []}
+            return {"data": {"m0": None},
+                    "errors": [{"message": "The selected media id is invalid."}]}
+
+        with patch.object(gen, "_execute_anilist_authenticated", side_effect=api):
+            out = gen.anilist_write_batch("t", self.payloads())
+        self.assertEqual(sent, [2, 1, 1], "the batch, then each stalled row on its own")
+        self.assertTrue(out[0]["ok"], "the good row must be rescued by the fallback")
+        self.assertEqual(out[0]["id"], 5)
+        self.assertFalse(out[1]["ok"])
+
+    def test_a_row_that_did_execute_is_never_re_sent(self):
+        calls = []
+
+        def api(query, variables, token, *a, **k):
+            calls.append(query.count("SaveMediaListEntry("))
+            if calls[-1] > 1:
+                return {"data": {"m0": {"id": 5, "mediaId": 1, "status": "CURRENT"}, "m1": None},
+                        "errors": [{"message": "nope"}]}
+            return {"data": {"m0": None}, "errors": [{"message": "nope"}]}
+
+        with patch.object(gen, "_execute_anilist_authenticated", side_effect=api):
+            out = gen.anilist_write_batch("t", self.payloads())
+        self.assertEqual(calls, [2, 1], "only the null alias is retried")
+        self.assertTrue(out[0]["ok"])
+
+    def test_a_single_row_batch_does_not_recurse(self):
+        with patch.object(gen, "_execute_anilist_authenticated",
+                          return_value={"data": {"m0": None}, "errors": []}) as api:
+            out = gen.anilist_write_batch("t", self.payloads()[:1])
+        self.assertEqual(api.call_count, 1)
+        self.assertFalse(out[0]["ok"])
+
+    def test_a_document_level_failure_fails_every_row_in_it(self):
+        with patch.object(gen, "_execute_anilist_authenticated",
+                          return_value={"error": "AniList rejected the token. Paste a fresh one."}):
+            out = gen.anilist_write_batch("t", self.payloads())
+        self.assertEqual(len(out), 2)
+        for row in out:
+            self.assertFalse(row["ok"])
+            self.assertIn("token", row["error"])
+
+    def test_offsets_round_trip_through_line_and_column(self):
+        text = "abc" + chr(10) + "defgh" + chr(10) + "ij"
+        self.assertEqual(gen._offset_of(text, 1, 1), 0)
+        self.assertEqual(gen._offset_of(text, 2, 1), 4)
+        self.assertEqual(gen._offset_of(text, 2, 5), 8)
+        self.assertEqual(gen._offset_of(text, 3, 1), 10)
+        self.assertIsNone(gen._offset_of(text, 0, 1))
+        self.assertIsNone(gen._offset_of(text, None, 1))
 
 
 class ExistingReadFailureTests(unittest.TestCase):
@@ -636,7 +811,7 @@ class WriteEndpointTests(unittest.TestCase):
         secret = "super-secret-token-value"
         with patch.object(gui, "anilist_viewer", return_value={"ok": True, "id": 7, "name": "kevin"}), \
              patch.object(gui, "anilist_existing_entries", return_value={1: {"id": 11, "mediaId": 1}}), \
-             patch.object(gui, "anilist_write_entry", return_value={"ok": True, "id": 123}):
+             patch.object(gui, "anilist_write_batch", side_effect=batch_of(ok=True, id=123)):
             body, code = self.post("/api/anilist-write", {
                 "token": secret, "confirm": True, "media_type": "manga", "entries": entries})
         events = [json.loads(c[6:]) for c in body.split(chr(10) * 2)
@@ -652,8 +827,8 @@ class WriteEndpointTests(unittest.TestCase):
     def test_a_failed_entry_is_reported_not_swallowed(self):
         with patch.object(gui, "anilist_viewer", return_value={"ok": True, "id": 7, "name": "k"}), \
              patch.object(gui, "anilist_existing_entries", return_value={}), \
-             patch.object(gui, "anilist_write_entry",
-                          return_value={"ok": False, "error": "The score may not be greater than 100."}):
+             patch.object(gui, "anilist_write_batch",
+                          side_effect=batch_of(ok=False, error="The score may not be greater than 100.")):
             body, _ = self.post("/api/anilist-write", {
                 "token": "t", "confirm": True, "media_type": "manga",
                 "entries": [{"anilist_id": 1, "title": "A", "status": "Reading"}]})
@@ -716,7 +891,7 @@ class SafeWriteEndpointTests(WriteEndpointTests):
         with patch.object(gui, "anilist_viewer", return_value=self.VIEWER), \
              patch.object(gui, "anilist_existing_entries",
                           side_effect=gui.AniListReadError("AniList returned HTTP 500.")), \
-             patch.object(gui, "anilist_write_entry") as writer:
+             patch.object(gui, "anilist_write_batch") as writer:
             body, _ = self.post("/api/anilist-write", {
                 "token": "t", "confirm": True, "media_type": "manga",
                 "entries": [dict(self.ROW)]})
@@ -729,8 +904,9 @@ class SafeWriteEndpointTests(WriteEndpointTests):
         sent = []
         with patch.object(gui, "anilist_viewer", return_value=self.VIEWER), \
              patch.object(gui, "anilist_existing_entries", return_value=self.ACCOUNT), \
-             patch.object(gui, "anilist_write_entry",
-                          side_effect=lambda token, p: sent.append(p) or {"ok": True, "id": 1}):
+             patch.object(gui, "anilist_write_batch",
+                          side_effect=lambda token, batch: sent.extend(batch)
+                          or [{"ok": True, "id": 1} for _ in batch]):
             self.post("/api/anilist-write", {
                 "token": "t", "confirm": True, "media_type": "manga",
                 "overrides": {"30642": {"progress": "mine"}},
@@ -741,8 +917,9 @@ class SafeWriteEndpointTests(WriteEndpointTests):
         sent = []
         with patch.object(gui, "anilist_viewer", return_value=self.VIEWER), \
              patch.object(gui, "anilist_existing_entries", return_value=self.ACCOUNT), \
-             patch.object(gui, "anilist_write_entry",
-                          side_effect=lambda token, p: sent.append(p) or {"ok": True, "id": 1}):
+             patch.object(gui, "anilist_write_batch",
+                          side_effect=lambda token, batch: sent.extend(batch)
+                          or [{"ok": True, "id": 1} for _ in batch]):
             self.post("/api/anilist-write", {
                 "token": "t", "confirm": True, "media_type": "manga",
                 "overrides": {"30642": {"progress": "theirs", "id": "mine"},
@@ -753,7 +930,7 @@ class SafeWriteEndpointTests(WriteEndpointTests):
     def test_the_write_saves_a_snapshot_the_undo_can_use(self):
         with patch.object(gui, "anilist_viewer", return_value=self.VIEWER), \
              patch.object(gui, "anilist_existing_entries", return_value=self.ACCOUNT), \
-             patch.object(gui, "anilist_write_entry", return_value={"ok": True, "id": 999}):
+             patch.object(gui, "anilist_write_batch", side_effect=batch_of(ok=True, id=999)):
             body, _ = self.post("/api/anilist-write", {
                 "token": "super-secret-token-value", "confirm": True, "media_type": "manga",
                 "entries": [dict(self.ROW)]})
@@ -772,7 +949,7 @@ class SafeWriteEndpointTests(WriteEndpointTests):
                "my_read_chapters": 40}
         with patch.object(gui, "anilist_viewer", return_value=self.VIEWER), \
              patch.object(gui, "anilist_existing_entries", return_value={}), \
-             patch.object(gui, "anilist_write_entry", return_value={"ok": True, "id": 604576747}):
+             patch.object(gui, "anilist_write_batch", side_effect=batch_of(ok=True, id=604576747)):
             body, _ = self.post("/api/anilist-write", {
                 "token": "t", "confirm": True, "media_type": "manga", "entries": [row]})
         snapshot = gen.load_undo_snapshot(self.events(body)[-1]["snapshot"])
@@ -781,15 +958,16 @@ class SafeWriteEndpointTests(WriteEndpointTests):
     def test_undo_restores_prior_values_and_leaves_creates_alone(self):
         with patch.object(gui, "anilist_viewer", return_value=self.VIEWER), \
              patch.object(gui, "anilist_existing_entries", return_value=self.ACCOUNT), \
-             patch.object(gui, "anilist_write_entry", return_value={"ok": True, "id": 999}):
+             patch.object(gui, "anilist_write_batch", side_effect=batch_of(ok=True, id=999)):
             written, _ = self.post("/api/anilist-write", {
                 "token": "t", "confirm": True, "media_type": "manga",
                 "entries": [dict(self.ROW)]})
         name = self.events(written)[-1]["snapshot"]
         sent = []
         with patch.object(gui, "anilist_viewer", return_value=self.VIEWER), \
-             patch.object(gui, "anilist_write_entry",
-                          side_effect=lambda token, p: sent.append(p) or {"ok": True, "id": 999}), \
+             patch.object(gui, "anilist_write_batch",
+                          side_effect=lambda token, batch: sent.extend(batch)
+                          or [{"ok": True, "id": 999} for _ in batch]), \
              patch.object(gui, "anilist_delete_entry") as deleter:
             body, code = self.post("/api/anilist-undo", {
                 "token": "t", "confirm": True, "snapshot": name})
@@ -805,7 +983,7 @@ class SafeWriteEndpointTests(WriteEndpointTests):
                "my_read_chapters": 40}
         with patch.object(gui, "anilist_viewer", return_value=self.VIEWER), \
              patch.object(gui, "anilist_existing_entries", return_value={}), \
-             patch.object(gui, "anilist_write_entry", return_value={"ok": True, "id": 555}):
+             patch.object(gui, "anilist_write_batch", side_effect=batch_of(ok=True, id=555)):
             written, _ = self.post("/api/anilist-write", {
                 "token": "t", "confirm": True, "media_type": "manga", "entries": [row]})
         name = self.events(written)[-1]["snapshot"]
@@ -840,13 +1018,14 @@ class SafeWriteEndpointTests(WriteEndpointTests):
                       "progressVolumes": 0, "score": 0, "repeat": 0}
         with patch.object(gui, "anilist_viewer", return_value=self.VIEWER), \
              patch.object(gui, "anilist_existing_entries", return_value=account), \
-             patch.object(gui, "anilist_write_entry", return_value={"ok": True, "id": 9}):
+             patch.object(gui, "anilist_write_batch", side_effect=batch_of(ok=True, id=9)):
             written, _ = self.post("/api/anilist-write", {
                 "token": "t", "confirm": True, "media_type": "manga", "entries": rows})
         name = self.events(written)[-1]["snapshot"]
         outcomes = [{"ok": False, "error": "Entry does not exist."}, {"ok": True, "id": 1001}]
         with patch.object(gui, "anilist_viewer", return_value=self.VIEWER), \
-             patch.object(gui, "anilist_write_entry", side_effect=outcomes):
+             patch.object(gui, "anilist_write_batch",
+                          side_effect=lambda token, batch: outcomes[:len(batch)]):
             body, _ = self.post("/api/anilist-undo", {
                 "token": "t", "confirm": True, "snapshot": name})
         done = self.events(body)[-1]
@@ -855,8 +1034,8 @@ class SafeWriteEndpointTests(WriteEndpointTests):
     def test_the_failed_rows_can_be_retried_without_rebuilding_them(self):
         with patch.object(gui, "anilist_viewer", return_value=self.VIEWER), \
              patch.object(gui, "anilist_existing_entries", return_value=self.ACCOUNT), \
-             patch.object(gui, "anilist_write_entry",
-                          return_value={"ok": False, "error": "nope"}):
+             patch.object(gui, "anilist_write_batch",
+                          side_effect=batch_of(ok=False, error="nope")):
             body, _ = self.post("/api/anilist-write", {
                 "token": "t", "confirm": True, "media_type": "manga",
                 "entries": [dict(self.ROW)]})
@@ -867,8 +1046,9 @@ class SafeWriteEndpointTests(WriteEndpointTests):
         sent = []
         with patch.object(gui, "anilist_viewer", return_value=self.VIEWER), \
              patch.object(gui, "anilist_existing_entries") as reader, \
-             patch.object(gui, "anilist_write_entry",
-                          side_effect=lambda token, p: sent.append(p) or {"ok": True, "id": 999}):
+             patch.object(gui, "anilist_write_batch",
+                          side_effect=lambda token, batch: sent.extend(batch)
+                          or [{"ok": True, "id": 999} for _ in batch]):
             retried, code = self.post("/api/anilist-write", {
                 "token": "t", "confirm": True, "retry": True, "run_id": run_id,
                 "media_type": "manga"})
@@ -885,7 +1065,7 @@ class SafeWriteEndpointTests(WriteEndpointTests):
     def test_the_snapshot_listing_is_served_without_a_token(self):
         with patch.object(gui, "anilist_viewer", return_value=self.VIEWER), \
              patch.object(gui, "anilist_existing_entries", return_value=self.ACCOUNT), \
-             patch.object(gui, "anilist_write_entry", return_value={"ok": True, "id": 999}):
+             patch.object(gui, "anilist_write_batch", side_effect=batch_of(ok=True, id=999)):
             self.post("/api/anilist-write", {
                 "token": "t", "confirm": True, "media_type": "manga",
                 "entries": [dict(self.ROW)]})
@@ -893,6 +1073,180 @@ class SafeWriteEndpointTests(WriteEndpointTests):
             listed = json.loads(res.read().decode())
         self.assertTrue(listed["ok"])
         self.assertEqual(len(listed["snapshots"]), 1)
+
+
+class BatchWriteEndpointTests(WriteEndpointTests):
+    def test_the_endpoint_sends_one_request_per_batch_not_per_row(self):
+        rows = [{"anilist_id": i, "title": "T%d" % i, "chapters": 10, "status": "Reading",
+                 "my_read_chapters": 5} for i in range(1, 20)]
+        calls = []
+
+        def record(token, batch):
+            calls.append(len(batch))
+            return [{"ok": True, "id": 500 + i} for i in range(len(batch))]
+
+        with patch.object(gui, "anilist_viewer", return_value={"ok": True, "id": 7, "name": "k"}), \
+             patch.object(gui, "anilist_existing_entries", return_value={}), \
+             patch.object(gui, "anilist_write_batch", side_effect=record):
+            body, _ = self.post("/api/anilist-write", {
+                "token": "t", "confirm": True, "media_type": "manga", "entries": rows})
+        self.assertEqual(calls, [8, 8, 3], "19 rows must go out as three requests")
+        events = [json.loads(c[6:]) for c in body.split(chr(10) * 2)
+                  if c.strip().startswith("data: ")]
+        progress = [e for e in events if e["type"] == "write_progress"]
+        self.assertEqual(len(progress), 19,
+                         "one event per row, so the bar does not jump a batch at a time")
+        self.assertEqual([e["current"] for e in progress], list(range(1, 20)))
+        self.assertTrue(all("eta_seconds" in e for e in progress),
+                        "the write phase needs an ETA; only the resolve phase had one")
+        self.assertEqual(progress[-1]["eta_seconds"], 0)
+
+    def test_a_partial_batch_failure_is_reported_per_row(self):
+        rows = [{"anilist_id": i, "title": "T%d" % i, "chapters": 10, "status": "Reading",
+                 "my_read_chapters": 5} for i in range(1, 4)]
+
+        def half(token, batch):
+            return [{"ok": i != 1, "id": 7, "error": "nope"} for i in range(len(batch))]
+
+        with patch.object(gui, "anilist_viewer", return_value={"ok": True, "id": 7, "name": "k"}), \
+             patch.object(gui, "anilist_existing_entries", return_value={}), \
+             patch.object(gui, "anilist_write_batch", side_effect=half):
+            body, _ = self.post("/api/anilist-write", {
+                "token": "t", "confirm": True, "media_type": "manga", "entries": rows})
+        done = [json.loads(c[6:]) for c in body.split(chr(10) * 2)
+                if c.strip().startswith("data: ")][-1]
+        self.assertEqual(done["failed_count"], 1)
+        self.assertEqual(done["failed"][0]["title"], "T2")
+        self.assertEqual(done["created"], 2)
+
+
+class UndoBatchingTests(WriteEndpointTests):
+    """Undo restores are SaveMediaListEntry too, so they batch like the write.
+
+    Deletes are a different mutation and cannot share a document, so they stay
+    one at a time. Order has to survive batching: a repeat repair is a second
+    write for a row and must land after the restore it repairs.
+    """
+
+    VIEWER = {"ok": True, "id": 7, "name": "kevin"}
+
+    def events(self, body):
+        return [json.loads(c[6:]) for c in body.split(chr(10) * 2)
+                if c.strip().startswith("data: ")]
+
+    def snapshot_with(self, rows):
+        snapshot = {"version": 1, "written_at": 1, "media_type": "manga",
+                    "viewer_id": 7, "rows": rows}
+        name = gen.save_undo_snapshot(snapshot)
+        self.assertIsNotNone(name)
+        return name
+
+    def prior_row(self, media_id, repeat=0):
+        return {"anilist_id": media_id, "title": "T%d" % media_id, "was_create": False,
+                "prior": {"id": 500 + media_id, "status": "CURRENT", "progress": 10,
+                          "progressVolumes": 1, "score": 50, "repeat": repeat,
+                          "notes": "", "startedAt": None, "completedAt": None}}
+
+    def test_restores_go_out_in_batches(self):
+        name = self.snapshot_with([self.prior_row(i) for i in range(1, 20)])
+        sizes = []
+
+        def record(token, batch):
+            sizes.append(len(batch))
+            return [{"ok": True, "id": 1} for _ in batch]
+
+        with patch.object(gui, "anilist_viewer", return_value=self.VIEWER), \
+             patch.object(gui, "anilist_write_batch", side_effect=record):
+            body, code = self.post("/api/anilist-undo",
+                                   {"token": "t", "confirm": True, "snapshot": name})
+        self.assertEqual(code, 200)
+        self.assertEqual(sizes, [8, 8, 3], "19 restores must be three requests, not nineteen")
+        done = self.events(body)[-1]
+        self.assertEqual(done["restored"], 19)
+        progress = [e for e in self.events(body) if e["type"] == "write_progress"]
+        self.assertEqual(len(progress), 19, "one event per row, as the write does")
+        self.assertTrue(all("eta_seconds" in e for e in progress))
+
+    def test_a_repair_follows_the_restore_it_repairs(self):
+        # A completed row with a reread count emits a second payload; batching
+        # must not reorder them, or the repair is overwritten by the restore.
+        rows = [dict(self.prior_row(1, repeat=4), prior=dict(self.prior_row(1, repeat=4)["prior"],
+                                                             status="COMPLETED", repeat=4))]
+        name = self.snapshot_with(rows)
+        seen = []
+
+        def record(token, batch):
+            seen.extend((p["anilist_id"], p.get("repair") or "restore") for p in batch)
+            return [{"ok": True, "id": 1} for _ in batch]
+
+        with patch.object(gui, "anilist_viewer", return_value=self.VIEWER), \
+             patch.object(gui, "anilist_write_batch", side_effect=record):
+            body, _ = self.post("/api/anilist-undo",
+                                {"token": "t", "confirm": True, "snapshot": name})
+        self.assertEqual(seen, [(1, "restore"), (1, "repeat")])
+        done = self.events(body)[-1]
+        self.assertEqual(done["restored"], 1, "the repair is not a second restored row")
+
+    def test_deletes_are_not_batched_with_restores(self):
+        rows = [self.prior_row(1),
+                {"anilist_id": 2, "title": "C", "was_create": True, "created_entry_id": 77}]
+        name = self.snapshot_with(rows)
+        with patch.object(gui, "anilist_viewer", return_value=self.VIEWER), \
+             patch.object(gui, "anilist_write_batch",
+                          side_effect=lambda token, batch: [{"ok": True, "id": 1} for _ in batch]) as writer, \
+             patch.object(gui, "anilist_delete_entry", return_value={"ok": True}) as deleter:
+            body, _ = self.post("/api/anilist-undo", {"token": "t", "confirm": True,
+                                                      "snapshot": name, "delete_created": True})
+        self.assertEqual(writer.call_count, 1)
+        self.assertEqual(deleter.call_count, 1)
+        done = self.events(body)[-1]
+        self.assertEqual((done["restored"], done["deleted"]), (1, 1))
+
+    def test_a_cancel_lands_between_batches(self):
+        name = self.snapshot_with([self.prior_row(i) for i in range(1, 20)])
+
+        def cancel_after_first(token, batch):
+            for control in list(gui._active_runs.values()):
+                control["cancel"].set()
+            return [{"ok": True, "id": 1} for _ in batch]
+
+        with patch.object(gui, "anilist_viewer", return_value=self.VIEWER), \
+             patch.object(gui, "anilist_write_batch", side_effect=cancel_after_first):
+            body, _ = self.post("/api/anilist-undo",
+                                {"token": "t", "confirm": True, "snapshot": name})
+        kinds = [e["type"] for e in self.events(body)]
+        self.assertIn("cancelled", kinds)
+        self.assertNotIn("undo_complete", kinds)
+
+
+class SnapshotDurabilityTests(WriteEndpointTests):
+    VIEWER = {"ok": True, "id": 7, "name": "kevin"}
+
+    def test_every_created_id_is_on_disk_before_the_next_row(self):
+        # Saved per create rather than per batch: a crash between a batch
+        # returning and the file being written would otherwise strand up to
+        # eight created entries with no id, and undo cannot delete what it
+        # cannot name.
+        rows = [{"anilist_id": i, "title": "T%d" % i, "chapters": 10, "status": "Reading",
+                 "my_read_chapters": 5} for i in range(1, 6)]
+        saves = []
+        real_save = gen.save_undo_snapshot
+
+        def counting_save(snapshot, name=None):
+            saves.append(sum(1 for r in snapshot["rows"] if r.get("created_entry_id")))
+            return real_save(snapshot, name)
+
+        with patch.object(gui, "anilist_viewer", return_value=self.VIEWER), \
+             patch.object(gui, "anilist_existing_entries", return_value={}), \
+             patch.object(gui, "save_undo_snapshot", side_effect=counting_save), \
+             patch.object(gui, "anilist_write_batch",
+                          side_effect=lambda token, batch: [{"ok": True, "id": 900 + i}
+                                                            for i in range(len(batch))]):
+            self.post("/api/anilist-write", {"token": "t", "confirm": True,
+                                             "media_type": "manga", "entries": rows})
+        # One save before the write, then one per create with a growing count.
+        self.assertEqual(saves, [0, 1, 2, 3, 4, 5],
+                         "each created id must reach disk before the next row is written")
 
 
 class ResolveOneTests(unittest.TestCase):
