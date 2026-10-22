@@ -4,7 +4,7 @@
 
 **What shipped, what was actually verified, and what is known to be broken.**
 
-[![Tests](https://img.shields.io/badge/tests-333%20passing-success)](#-verified)
+[![Tests](https://img.shields.io/badge/tests-430%20passing-success)](#-verified)
 [![Browser](https://img.shields.io/badge/jsdom-16%20suites%20%C2%B7%20360%20assertions-success)](#-verified)
 [![Live write](https://img.shields.io/badge/AniList%20write-guarded%20%2B%20undoable%20%28verified%20live%29-success)](#-not-verified)
 [![Defects](https://img.shields.io/badge/known%20defects-0-success)](#-known-defects)
@@ -695,6 +695,358 @@ is a trap for whatever reads it next. Cleared on both fix paths.
 **Dead code.** Batching the undo removed the last caller of
 `anilist_write_entry`; it was still defined, still imported, and referenced by
 nothing - along with three other unused imports in `gui.py`. Removed.
+
+---
+
+## 🩹 Review findings R1-R22 (2026-10-21)
+
+Eleven items from [REVIEW.md](REVIEW.md), which audited both modules and probed the live API to
+check its own claims. Labels are the review's, so a code comment citing **R3** points at a
+numbered finding with its evidence.
+
+### The input path was corrupting titles (R1, R2)
+
+`sanitize_title_line` stripped `\d+[.\-)]` as list numbering with no requirement for whitespace,
+so a Japanese counter prefix looked like a list marker. Measured over eight titles, six were
+corrupted:
+
+| Pasted | Searched for, before | Now |
+|---|---|---|
+| `3-gatsu no Lion` | `gatsu no Lion` | unchanged |
+| `5-toubun no Hanayome` | `toubun no Hanayome` | unchanged |
+| `07-Ghost` | `Ghost` | unchanged |
+| `4-nin wa Sorezore Uso wo Tsuku` | `nin wa Sorezore...` | unchanged |
+| `3-nen Z-gumi Ginpachi-sensei` | `nen Z-gumi...` | unchanged |
+| `6-gatsu wa Ai no Kisetsu` | `gatsu wa Ai...` | unchanged |
+
+`07-Ghost` is the worst of them: it did not fail, it resolved confidently to a different work.
+The hyphen branch now requires whitespace after it. `1. Berserk`, `1) Berserk`, `1- Berserk`,
+`1.Berserk` and the bullet forms all still work; numbering written `1-Berserk` with no space is
+given up in exchange, which is far rarer than the titles.
+
+**R2:** the row only ever carried the *cleaned* title, so when the clean-up got it wrong the table
+said "from gatsu no Lion" and there was no way to see what had been typed. Rows now carry
+`pasted` as well, and only when the two differ.
+
+### An entry can win because nothing better was offered (R3)
+
+A ranking tier demotes an entry *relative to its siblings*, so a demotion needs something to lose
+to. Measured live - `Gotoubun No Hanayome` returns **exactly one** AniList hit:
+
+```
+title                                     format    mal   pop   ch  ratio  rank key
+Go-toubun no Hanayome: 122 + 1 - Itsu...  ONE_SHOT  None  2944   1  0.430  (0, 0, 1, 121.0)
+```
+
+A 1-chapter one-shot, not the 122-chapter series, and every guard missed it: the one-shot tier had
+nothing to rank it below, the ratio floor passes 0.430, and `runner_up_gap` is `None` because
+there is no runner-up. It then rendered as **AniList only**, which reads as a legitimate state.
+
+Three new flags, all free - the data is already in the node:
+
+| Flag | Reason shown |
+|---|---|
+| the winner is a `ONE_SHOT` | the real series was probably not in the results |
+| the winner is `NOT_YET_RELEASED` | it has not been released yet |
+| a sole candidate with one chapter (manga only) | a fragment rather than the series |
+
+The one-episode case is deliberately *not* flagged for anime: that is an ordinary movie or OVA.
+
+`_carry_candidate_review` also fixes a parity bug found on the way - the batch path carried the
+candidate verdict onto the chosen entry inline, and the single-title path did not carry it at all,
+so the two disagreed about the same search.
+
+### Smaller corrections (R5, R6, R7, R8, R9)
+
+| # | Was | Now |
+|---|---|---|
+| **R5** | the curly-quote retry built its replacement target with `curly.encode().decode("unicode_escape")`, which yields `'â\x80\x99'` - mojibake no title contains, so the rule had never once fired | plain `replace`; verified by `_search_variants("Kaguya-sama’s War")` returning the straight-quote form instead of `[]` |
+| **R6** | scores round-tripped through 0-10, turning an account's **87 into a 90**. Visible in a write's diff, silent in a copy, which shows counts only | `score_raw` carries the exact POINT_100 value; the rounded score wins the moment the two disagree, and the page deletes `score_raw` at both places it writes `score` |
+| **R7** | a cancelled run returned before the cache was written, so stopping at title 250 of 300 threw all 250 away | measured: cancel after one batch of 24 now caches 8 and the re-run costs **0 requests** |
+| **R8** | closing the tab left the run going to the end holding `_run_lock` - `resolve_many_entries` swallows whatever its progress callback raises | `send_event` sets the cancel flag when the socket is gone. Best effort: writes are buffered, so a short run can finish first |
+| **R9** | `last_run_failures` - a module-level mutable global with three writes and **zero readers** anywhere, tests included | deleted |
+
+### The retry pass could not vary hyphenation (R4)
+
+`_search_variants` had three rules - quote folding, strip bracketed text, strip a trailing
+"manga" - and none of them touched hyphens, which AniList and the people pasting titles disagree
+about constantly. Removing a hyphen and replacing it with a space are both deterministic:
+
+```
+07-Ghost               -> ['07 Ghost', '07Ghost']
+Re-Zero kara Hajimeru  -> ['Re Zero kara Hajimeru', 'ReZero kara Hajimeru']
+K-On                   -> ['K On', 'KOn']
+Berserk                -> []
+```
+
+Putting a hyphen *in* is not deterministic, so `Gotoubun No Hanayome` → `Go-toubun no Hanayome`
+stays out of reach; that one is caught by **R3** instead. The three-variant cap is unchanged -
+variants only run for titles that matched nothing, eight to a request, so the cap is a real cost.
+
+### gui.py is 1,529 lines, not 6,662 (R18)
+
+The page was a **5,127-line string literal** inside `gui.py`: 1,849 lines of CSS, 2,596 of
+JavaScript and 682 of markup, against about 1,460 lines of actual Python.
+
+| | Before | After |
+|---|---|---|
+| `gui.py` | 6,662 lines | **1,529** |
+| `static/index.html` | - | 482 |
+| `static/app.css` | - | 1,849 |
+| `static/app.js` | - | 2,822 |
+
+The move is **byte-exact**, and was verified both ways before anything was written: the three
+files reassemble into the exact string that was there, and the imported module's `HTML_TEMPLATE`
+compares equal to the old literal.
+
+`index.html` refers to the other two as ordinary files, so it opens in a browser on its own and an
+editor treats each as what it is. `_build_page()` inlines them, so what is **served is still a
+single response** - one request, one `no-store` header, and no window in which the markup has
+arrived and the script has not. `_page_html()` re-reads per request, so a CSS or JS edit shows on
+refresh rather than needing a restart; if `static/` goes missing the copy built at import still
+serves.
+
+The real prize is not the line count. A Python string consumes backslashes, so **the JavaScript
+could not contain one** - no `\n`, no regex literals - which is why `String.fromCharCode(10)`
+appears eight times in `app.js`, and why a test and two source comments existed purely to police
+it. That test is retired; its constraint is gone. The calls are left alone deliberately, so the
+extraction stays reviewable as a pure move.
+
+What this does **not** do: `app.js` is still 2,822 lines in one IIFE with about 100 module-level
+bindings. The split makes `gui.py` reviewable; it moves the rest rather than reducing it.
+
+### Hardening (R21, R22)
+
+- The request body was read in full before any size check, and a malformed `Content-Length`
+  became a 500. Now bounded first, at `MAX_IMPORT_BYTES + 5MB` so a real MyAnimeList export still
+  fits.
+- The DOCTYPE guard scanned `raw[:4096]`, which a long comment prolog walks straight past. An
+  entity cannot be declared without a DOCTYPE, so the scan now covers the whole document
+  (`re.search`, which does not copy the string).
+
+### The test suite went from 59 s to 9 s (R16)
+
+Every server fixture started its own `serve_forever` on the default **0.5 second** poll interval,
+and `shutdown()` blocks until that loop notices. Instrumented, the slowest module slept **0.0 s**
+and made **0** throttled requests - the wait was entirely teardown.
+
+| | Before | After |
+|---|---|---|
+| whole suite | 59 s | **~8 s** |
+| `test_anilist_write` | 28.1 s | 1.8 s |
+| tests | 333 | **430** |
+
+`tests/__init__.py` now exports `serve(server)`, used by all ten fixtures.
+
+### The whole line is read, not just the title (R23)
+
+The one thing this tool does that an export-file importer cannot is start from a list a person
+wrote. Those lists carry more than titles, and all of it was being thrown away.
+
+```
+Frieren 12/28 9/10 watching    -> Frieren | progress 12 | score 9 | Watching
+Berserk - 374 ch - dropped     -> Berserk | progress 374 | Dropped
+1. Vinland Saga (completed) 8  -> Vinland Saga | score 8 | Completed
+Berserk, 3 vols, on hold       -> Berserk | volumes 3 | Paused   (manga only)
+Solo Leveling [ptw]            -> Solo Leveling | Plan to Watch
+```
+
+Everything is taken off the **end** of the line, and the governing rule is the one **R1** was
+about: a number read wrongly corrupts the search past recovery, and nothing downstream can undo
+it. So a bare trailing number is never the first thing believed. It needs a unit (`374 ch`), a
+denominator (`12/28`), or the company of something else already read off the line.
+
+| Line | Read as |
+|---|---|
+| `86 - Eighty Six`, `91 Days`, `7 Seeds`, `20th Century Boys` | nothing - all titles |
+| `Attack on Titan 139` | nothing; `139` has no unit and nothing else on the line corroborates it |
+| `Vinland Saga (completed) 8` | the `8` **is** a score: the status proved the line's shape first |
+| `Berserk - dropped 374` | nothing. Stripping would leave "Berserk 374", and a half-read line is worse than an unread one, so the whole parse is thrown away |
+| `Dropped`, `Plan to Watch` | titles. A line that is only a status word has no title to leave behind |
+| `Berserk 40/28` | nothing; progress cannot exceed its own total |
+
+`9/10` is a score and any other denominator is progress - nobody writes progress out of exactly
+ten by accident, and everybody writes a score that way. The total itself is discarded: AniList
+knows it and the number in a hand-written list is usually stale.
+
+Two rules protect titles that end in a status word. `complete`, `done`, `plan`, `planned`,
+`hold`, `drop` and `finished` are only read as a status when something separates them from the
+title, so `Monster (Complete Edition)` and `Pure Complete` survive. The cost of that line being
+drawn where it is, recorded in a test rather than left to be found: **`Speed Reading` parses as
+"Speed" plus status Reading**, because `reading` is far more common as a trailing status on a
+manga list than as the last word of a title.
+
+Nothing here is silent. The line's values **beat the list-wide Status and Score controls** - it is
+the only place the user has said anything about that one title - but the row shows status, score
+and progress in editable columns, carries `pasted` (from **R2**) so the original line is visible,
+and the run reports how many lines it read from.
+
+Verified live, end to end:
+
+| Pasted | Resolved to | Read |
+|---|---|---|
+| `Berserk - 374 ch - dropped` | Berserk (MAL 2) | Dropped, 374 ch |
+| `Vinland Saga (completed) 8` | Vinland Saga | Completed, score 8 |
+| `20th Century Boys` | 20th Century Boys | nothing; defaults apply |
+| `1. 3-gatsu no Lion 12/28` | March Comes in Like a Lion | 12 ch |
+
+The last one is R1, R2 and R23 together: numbering stripped, counter prefix kept, progress read.
+
+### Three things the page produced and threw away (R25, R26, R27)
+
+| | Was | Now |
+|---|---|---|
+| **R25** | the write diff - the most carefully built thing in the tool - lived only while its dialog was open | **Save plan** writes it as JSON, *with the per-field overrides*: without those the plan does not describe what would actually have been sent |
+| **R26** | the server kept five undo snapshots and served all five; the page read `[0]` and left four unreachable | a picker, labelled by media type and row count, because a copy writes **two** snapshots and a bare list of timestamps shows one operation as two unrelated rows |
+| **R27** | the rows could only leave as MAL XML | **Download CSV**, built in the browser - no new endpoint, and the server still refuses to be told where to write |
+
+Two details in the CSV that are not obvious: a cell beginning `=`, `+`, `-` or `@` is prefixed with
+an apostrophe, because Excel runs those as formulas and a title is not a formula; and the file
+carries a UTF-8 byte order mark, without which Excel reads it as the system codepage and every
+non-ASCII title arrives mangled.
+
+The undo picker also moves the delete box with the choice. Each snapshot created a different
+number of entries, and offering to delete the wrong count would be the worst kind of wrong.
+
+### The table counter had two different definitions (R17)
+
+`renderTable` wrote "Showing N of M" counting the rows it had **drawn**; `updateStats` wrote the
+same line counting every row that **matched**. Below the 300-row cap they agree. Above it, with
+2,000 rows, the line said *"Showing 300 of 2000"* until anything ticked a checkbox, at which point
+it became *"Showing 2000 of 2000"*. One function now.
+
+The quadratic lookup that prompted the look is also gone - `renderTable` called
+`currentAnimes.indexOf(item)` once per row to find the index every control in that row is
+addressed by. Measured, and worth being honest about:
+
+| rows | `indexOf` per row | one Map |
+|---|---|---|
+| 2,000 | ~0 ms | ~0 ms |
+| 10,000 | 6 ms | 1 ms |
+| 20,000 | 25 ms | 2 ms |
+
+Against ~240 ms of DOM work for 2,000 rows, removing the quadratic term buys nothing today. It is
+free and it is correct, but the counter was the actual defect.
+
+### The script is nine sections, the resolver is four files (R19, R20)
+
+**R19.** `static/app.js` was 3,023 lines. It is now nine numbered sections under `static/app/`,
+joined in name order - zero-padded, because the join has to be deterministic and adding a section
+must not be able to reorder the others.
+
+| | lines | |
+|---|---|---|
+| `01-core.js` | 298 | constants, element handles, media type, toast |
+| `02-resolve.js` | 204 | the resolve run and its event stream |
+| `03-stats.js` | 407 | counters, export state, destination, session storage |
+| `04-table.js` | 697 | sorting, chips, filters, the table and its rows |
+| `05-controls.js` | 158 | run control, CSV export, dialogs |
+| `06-fixer.js` | 223 | the unmatched-title fixer |
+| `07-write.js` | 678 | the write plan, the write itself, undo |
+| `08-transfer.js` | 299 | importing a list and copying an account |
+| `09-boot.js` | 59 | escaping, theme, start-up |
+
+Sections, **not ES modules**, and that was measured rather than preferred. The script has 246
+top-level bindings; `currentAnimes` alone is read 79 times and *reassigned* in several places, and
+an imported binding cannot be reassigned. Real modules therefore mean moving about fifteen mutable
+bindings behind a state object - roughly 200 call sites, on the paths that write irreversibly to
+someone's AniList account, checked by a suite that largely asserts on source text. The split that
+shipped cannot change behaviour: the script has no wrapper function, so every cut lands on a
+top-level statement, each section parses on its own, and the pieces rejoin **byte for byte**.
+That is the same property that made the R18 extraction safe, and it is asserted both ways.
+
+**R20.** `generate_mal_xml.py` was 3,042 lines doing five jobs. The pure clusters moved out:
+
+| | lines | |
+|---|---|---|
+| `generate_mal_xml.py` | 2,412 | queries, HTTP and pacing, cache, resolvers, the write path, CLI |
+| `matching.py` | 424 | normalising, ratio, ranking tiers, candidates, alias and won-by-default |
+| `malxml.py` | 275 | the MAL XML builders, status and date handling |
+| `titles.py` | 259 | reading a pasted line |
+
+Only code that touches no network and is **never patched by a test** moved. That boundary is not
+where it looks: forty tests do `patch.object(gen, "_execute_anilist_batch")`, and a patch on this
+module only reaches a call site that resolves the name *through* this module. Move a resolver out
+and forty tests quietly stop stubbing the network. The imports back into `generate_mal_xml` are
+written out name by name rather than with a star, because the tests reach for private names
+(`gen._title_ratio`, `gen._parse_manga_node`) and `import *` skips anything underscored.
+
+A duplicate `_TRAILING_SEPARATORS`, left behind by the line-parser rewrite, turned up during the
+move and is gone.
+
+### The calibration harness exists again (R14)
+
+`tools/calibrate.py`. It produced the numbers under "Match confidence" once, was never committed,
+and so the next change to matching had nothing to judge it with. Rebuilt with the lesson from that
+gap built in: **the pick diff is the headline**, not the flag rate.
+
+```
+python tools/calibrate.py manga.txt --media-type manga --snapshot before.json
+#   ... change the ranker ...
+python tools/calibrate.py manga.txt --media-type manga --snapshot after.json
+python tools/calibrate.py --compare before.json after.json
+```
+
+`--compare` needs no network and no input file. It reports which titles changed pick (naming what
+they became), flag movement in **both** directions, and how many rows sit at a ratio ≥ 0.95 -
+because a ratio that rises for every candidate at once looks like an improvement and is the
+opposite of one. Resolution goes through the ordinary disk cache, so the first run costs the usual
+rate limit and every run after it is free.
+
+### An exact alias beats a similarity score (R13)
+
+The review's rejected idea had a salvageable half. Folding synonyms into `_title_ratio` was
+measured and thrown out (see below); what survives is the same data as a **boolean**, kept out of
+the ratio entirely: *does AniList list the pasted title as another name for this entry?*
+
+Measured live, "First God Of War":
+
+| | |
+|---|---|
+| `_title_ratio` against `Di Yi Zhan Shen` | **0.129** - below the 0.15 floor, so flagged |
+| AniList's `synonyms` for that entry | `['First God of War']` - verbatim |
+
+The match is correct and the ratio cannot say so. An exact alias now clears a low-ratio flag. It
+deliberately does **not** clear a won-by-default flag: those describe the entry being the wrong
+kind of thing, which an alias says nothing about. It also beats an inversion, because an inversion
+compares two fuzzy scores and this is not one.
+
+Cost of carrying `synonyms` in the batch query, measured rather than assumed - the first draft of
+the review asserted it was free:
+
+| | query | response | rate limit | latency |
+|---|---|---|---|---|
+| without | 2,122 B | 15,572 B | **1** | 0.60 s |
+| with | 2,242 B | 21,831 B (+40%) | **1** | 0.58 s |
+
+Rate-limit cost is identical; about 270 KB extra across a 339-title run.
+
+Verified with the rebuilt harness, on a 16-title slice of the real list around line 190:
+
+```
+resolved 12, unresolved 4, flagged 0
+rows AniList knows the pasted title as an alias of:  8
+  of which the ratio floor alone would have flagged: 1
+```
+
+And against the whole first-16 slice, before and after: **picks changed 0 of 15, flagged 1 → 1,
+rows at ratio ≥ 0.95 unchanged at 7.** Purely additive - which is exactly what folding synonyms
+into the ratio would *not* have been (3 → 10).
+
+### What this deliberately did not do
+
+The review's original headline item - folding AniList `synonyms` into `_title_ratio` - was
+**measured and rejected**. Over 16 titles it changed **0 of 16 picks**, because `_media_rank` is
+lexicographic and the title term only breaks ties inside a tier; it tripled saturation (3 → 10
+candidates at ratio ≥ 0.95) and halved the runner-up gap that is the only signal currently
+earning its place. Correct matches still score 0.43-0.72 with synonyms on, so the review floor
+still cannot be raised. What survives is an exact-alias *boolean*, now shipped as **R13**
+above and judged with the harness rebuilt as **R14**. Recorded in [REVIEW.md](REVIEW.md) under
+R10-R15.
+
+`tests/test_match_confidence.py` carries a regression test for the rejected half: if
+`_title_ratio` ever starts scoring 1.0 for a title that only matches a synonym, the synonyms have
+been folded back in and the measurement needs redoing.
 
 ---
 

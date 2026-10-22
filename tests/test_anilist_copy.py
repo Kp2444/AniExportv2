@@ -18,6 +18,7 @@ from unittest.mock import patch
 
 import generate_mal_xml as gen
 import gui
+from tests import serve
 
 
 def row(anilist_id, media_type="manga", **over):
@@ -148,7 +149,7 @@ class CopyEndpointTests(unittest.TestCase):
         env.start()
         self.addCleanup(env.stop)
         self.server = ThreadingHTTPServer(("127.0.0.1", 0), gui.MalGuiHandler)
-        thread = threading.Thread(target=self.server.serve_forever, daemon=True)
+        thread = threading.Thread(target=serve(self.server), daemon=True)
         thread.start()
         self.addCleanup(thread.join, 2)
         self.addCleanup(self.server.server_close)

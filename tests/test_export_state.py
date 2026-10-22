@@ -10,6 +10,7 @@ from pathlib import Path
 from unittest.mock import patch
 
 import gui
+from tests import serve
 
 
 class ExportStateTests(unittest.TestCase):
@@ -33,7 +34,7 @@ class ExportStateTests(unittest.TestCase):
             p.start()
             self.addCleanup(p.stop)
         server = ThreadingHTTPServer(("127.0.0.1", 0), gui.MalGuiHandler)
-        thread = threading.Thread(target=server.serve_forever, daemon=True)
+        thread = threading.Thread(target=serve(server), daemon=True)
         thread.start()
         self.addCleanup(thread.join, 2)
         self.addCleanup(server.server_close)

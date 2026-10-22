@@ -4,6 +4,7 @@ The write path never relies on undocumented upsert behaviour: it reads the
 user's existing list entries first and supplies the entry id, so a repeated
 write updates in place instead of creating a second row.
 """
+import io
 import json
 import os
 import tempfile
@@ -17,6 +18,7 @@ from unittest.mock import patch
 
 import generate_mal_xml as gen
 import gui
+from tests import serve
 
 
 class PayloadTests(unittest.TestCase):
@@ -758,7 +760,7 @@ class WriteEndpointTests(unittest.TestCase):
             patcher.start()
             self.addCleanup(patcher.stop)
         self.server = ThreadingHTTPServer(("127.0.0.1", 0), gui.MalGuiHandler)
-        thread = threading.Thread(target=self.server.serve_forever, daemon=True)
+        thread = threading.Thread(target=serve(self.server), daemon=True)
         thread.start()
         self.addCleanup(thread.join, 2)
         self.addCleanup(self.server.server_close)
@@ -1312,7 +1314,7 @@ class ResolveOneTests(unittest.TestCase):
             patcher = patch.object(gui, "EXPORT_MANGA_XML_PATH", out / "m.xml")
             patcher.start(); self.addCleanup(patcher.stop)
             server = ThreadingHTTPServer(("127.0.0.1", 0), gui.MalGuiHandler)
-            thread = threading.Thread(target=server.serve_forever, daemon=True)
+            thread = threading.Thread(target=serve(server), daemon=True)
             thread.start()
             try:
                 req = urllib.request.Request(
@@ -1381,6 +1383,113 @@ class ImportTests(unittest.TestCase):
         self.assertEqual(len(parsed["entries"]), 1)
         self.assertEqual(parsed["skipped"], 1)
 
+
+class ScorePrecisionTests(unittest.TestCase):
+    """AniList stores scores out of 100 whatever the account displays. Rounding
+    one to 0-10 and multiplying it back by ten turned an 87 into a 90 - visible
+    in a write's diff, and silent in a copy, which shows counts only."""
+
+    ROW = {"anilist_id": 1, "title": "x", "status": "Completed",
+           "chapters": 10, "score": 9, "score_raw": 87}
+
+    def _sent(self, row):
+        payloads, _ = gen.iter_write_payloads([row], "manga", {})
+        return payloads[0]["variables"]["scoreRaw"]
+
+    def test_an_untouched_score_is_sent_back_exactly(self):
+        self.assertEqual(self._sent(self.ROW), 87)
+
+    def test_an_edited_score_beats_the_value_it_was_read_at(self):
+        """The two disagreeing is the only evidence that a human changed it."""
+        self.assertEqual(self._sent(dict(self.ROW, score=7)), 70)
+
+    def test_a_row_that_never_came_from_an_account_is_unaffected(self):
+        row = {"anilist_id": 1, "title": "x", "status": "Completed",
+               "chapters": 10, "score": 8}
+        self.assertEqual(self._sent(row), 80)
+
+    def test_a_corrupt_raw_value_falls_back_rather_than_raising(self):
+        for junk in ("nonsense", None, [1], {}):
+            with self.subTest(junk=junk):
+                self.assertEqual(self._sent(dict(self.ROW, score_raw=junk)), 90)
+
+    def test_a_raw_value_out_of_range_is_clamped(self):
+        self.assertEqual(self._sent(dict(self.ROW, score=10, score_raw=5000)), 100)
+
+    def test_a_list_read_carries_the_exact_score(self):
+        entry = {"id": 5, "status": "COMPLETED", "score": 87, "progress": 3,
+                 "media": {"id": 9, "idMal": 8, "title": {"english": "T", "romaji": "T"},
+                           "format": "MANGA", "chapters": 10, "volumes": 1,
+                           "startDate": {"year": 2001}, "popularity": 1}}
+        row = gen._row_from_list_entry(entry, "manga")
+        self.assertEqual(row["score_raw"], 87, "the exact value, for writing back")
+        self.assertEqual(row["score"], 9, "and the rounded one, for the interface")
+
+    def test_a_round_trip_through_a_copy_changes_nothing(self):
+        """Read an account, write it straight back: the diff must be empty."""
+        entry = {"id": 5, "status": "COMPLETED", "score": 87, "progress": 10,
+                 "progressVolumes": 1, "repeat": 0, "notes": "",
+                 "media": {"id": 9, "idMal": 8, "title": {"english": "T", "romaji": "T"},
+                           "format": "MANGA", "chapters": 10, "volumes": 1,
+                           "startDate": {"year": 2001}, "popularity": 1}}
+        row = gen._row_from_list_entry(entry, "manga")
+        known = {9: {"id": 5, "mediaId": 9, "status": "COMPLETED", "score": 87,
+                     "progress": 10, "progressVolumes": 1, "repeat": 0, "notes": ""}}
+        payloads, _ = gen.iter_write_payloads([row], "manga", known)
+        self.assertEqual([d["field"] for d in payloads[0]["diff"]], [],
+                         "a copy of an unchanged row must not rewrite its score")
+
+    def test_the_page_invalidates_the_raw_score_whenever_it_writes_one(self):
+        """Without this a score edit on an AniList-read row is a no-op: the
+        stale raw value still agrees with nothing and wins the comparison."""
+        self.assertEqual(gui.HTML_TEMPLATE.count("delete item.score_raw;"), 2,
+                         "the per-row editor and the bulk control")
+
+
+class RequestSizeTests(unittest.TestCase):
+    """The size checks ran on an already-parsed body, so the whole thing was
+    pulled into memory first."""
+
+    def test_the_cap_clears_the_largest_legitimate_body(self):
+        self.assertGreater(gui.MAX_BODY_BYTES, gui.MAX_IMPORT_BYTES,
+                           "a MyAnimeList export has to fit through it")
+
+    def test_an_oversized_body_is_refused_before_it_is_read(self):
+        with io.open("gui.py", encoding="utf-8") as handle:
+            source = handle.read()
+        head = source.split("raw_body = self.rfile.read", 1)[0]
+        self.assertIn("MAX_BODY_BYTES", head.rsplit("def do_POST", 1)[-1],
+                      "the check has to come before the read, not after it")
+
+    def test_a_malformed_length_does_not_become_a_500(self):
+        with io.open("gui.py", encoding="utf-8") as handle:
+            source = handle.read()
+        block = source.rsplit("def do_POST", 1)[-1].split("raw_body =", 1)[0]
+        self.assertIn("except (TypeError, ValueError)", block)
+
+
+class DoctypeScanTests(unittest.TestCase):
+    """An entity cannot be declared without a DOCTYPE, so the DOCTYPE scan is
+    the whole guard - and it used to cover the first 4KB only."""
+
+    def test_a_doctype_behind_a_long_prolog_is_still_caught(self):
+        prolog = "<!-- " + ("x" * 5000) + " -->"
+        with self.assertRaises(ValueError):
+            gui.parse_mal_xml(prolog + "<!DOCTYPE a><myanimelist/>")
+
+    def test_the_check_is_case_insensitive_and_tolerates_spacing(self):
+        for form in ("<!doctype a>", "<!DocType a>", "<! DOCTYPE a>"):
+            with self.subTest(form=form):
+                with self.assertRaises(ValueError):
+                    gui.parse_mal_xml(form + "<myanimelist/>")
+
+    def test_an_ordinary_export_still_parses(self):
+        xml = ('<?xml version="1.0" encoding="UTF-8" ?><myanimelist>'
+               "<myinfo><user_export_type>2</user_export_type></myinfo>"
+               "<manga><manga_mangadb_id>2</manga_mangadb_id>"
+               "<manga_title>T</manga_title><my_status>Reading</my_status>"
+               "</manga></myanimelist>")
+        self.assertEqual(gui.parse_mal_xml(xml)["entries"][0]["id"], 2)
 
 if __name__ == "__main__":
     unittest.main()

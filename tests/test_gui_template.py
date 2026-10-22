@@ -1,40 +1,91 @@
+import io
 import re
 import shutil
 import subprocess
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 import generate_mal_xml
 import gui
 
 SCRIPT_RE = re.compile(r"<script>(.*?)</script>", re.S)
-BACKSLASH = chr(92)
-MARKER = 'HTML_TEMPLATE = ' + '"""'
 
 
 class GuiTemplateTests(unittest.TestCase):
-    """HTML_TEMPLATE is a plain (non-raw) Python string, so a backslash escape
-    written for JavaScript is consumed by Python and can emit a literal newline
-    inside a JS string literal. That is a syntax error which kills the whole
-    <script>, leaving the page rendered but completely inert."""
+    """The page used to be a 5,127-line string literal inside gui.py. A Python
+    string consumes backslashes, so the JavaScript in it could not contain one,
+    and the test that used to live here policed exactly that. The constraint is
+    gone with the literal; what needs guarding now is the assembly."""
 
-    def _template_source(self) -> str:
-        source = Path(gui.__file__).read_text(encoding="utf-8")
-        start = source.index(MARKER) + len(MARKER)
-        return source[start:source.index('"""', start)]
+    def test_the_page_is_assembled_from_the_static_files(self):
+        for name in ("index.html", "app.css"):
+            with self.subTest(name=name):
+                self.assertTrue((gui.STATIC_DIR / name).is_file())
+        css = (gui.STATIC_DIR / "app.css").read_text(encoding="utf-8")
+        self.assertIn(css, gui.HTML_TEMPLATE)
+        self.assertIn(gui._script_source(), gui.HTML_TEMPLATE)
 
-    def test_template_source_has_no_python_consumed_escapes(self):
-        offenders = [
-            line.strip()
-            for line in self._template_source().splitlines()
-            if BACKSLASH in line
-        ]
-        self.assertEqual(
-            offenders, [],
-            "backslash escapes in HTML_TEMPLATE are consumed by Python before the "
-            "browser sees them; use String.fromCharCode(10) for newlines instead",
-        )
+    def test_the_script_is_kept_in_readable_sections(self):
+        """Three thousand lines in one file is not something anyone reads."""
+        sections = sorted(p.name for p in gui.SCRIPT_DIR.glob("*.js"))
+        self.assertGreater(len(sections), 3)
+        self.assertEqual(sections, sorted(sections),
+                         "the join is by name, so the names have to sort")
+        for name in sections:
+            with self.subTest(name=name):
+                self.assertRegex(name, r"^\d\d-", "zero-padded, or 10 sorts before 2")
+
+    def test_the_sections_join_in_a_fixed_order(self):
+        """Adding a section must not be able to reorder the others."""
+        body = io.open("gui.py", encoding="utf-8").read()
+        block = body.split("def _script_source", 1)[1].split("def _build_page", 1)[0]
+        self.assertIn("sorted(", block)
+        self.assertIn("key=lambda p: p.name", block)
+
+    def test_every_section_parses_on_its_own(self):
+        """The script has no wrapper function, so a cut at a top-level
+        statement leaves each piece valid JavaScript. If that stops being true
+        the split has been made at the wrong place."""
+        if not shutil.which("node"):
+            self.skipTest("node not installed")
+        for part in sorted(gui.SCRIPT_DIR.glob("*.js")):
+            with self.subTest(section=part.name):
+                result = subprocess.run(["node", "--check", str(part)],
+                                        capture_output=True, text=True)
+                self.assertEqual(result.returncode, 0, result.stderr)
+
+    def test_the_page_is_one_response_not_three(self):
+        """index.html references the two files so it opens standalone, but what
+        is served inlines them: one request, one no-store header, and no window
+        where the markup has arrived and the script has not."""
+        page = gui._page_html()
+        self.assertNotIn(gui._CSS_LINK, page)
+        self.assertNotIn(gui._JS_TAG, page)
+        self.assertEqual(page.count("<style>"), 1)
+        index = (gui.STATIC_DIR / "index.html").read_text(encoding="utf-8")
+        self.assertIn(gui._CSS_LINK, index, "but the file on disk keeps them")
+        self.assertIn(gui._JS_TAG, index)
+
+    def test_an_edit_shows_without_a_restart(self):
+        """_page_html re-reads; HTML_TEMPLATE is only the copy built at import."""
+        path = gui.STATIC_DIR / "app.css"
+        before = path.read_text(encoding="utf-8")
+        try:
+            path.write_text(before + chr(10) + ".probe-only {}" + chr(10), encoding="utf-8")
+            self.assertIn(".probe-only {}", gui._page_html())
+        finally:
+            path.write_text(before, encoding="utf-8")
+        self.assertNotIn(".probe-only {}", gui._page_html())
+
+    def test_a_missing_static_directory_falls_back_rather_than_500s(self):
+        with patch.object(gui, "STATIC_DIR", Path(tempfile.gettempdir()) / "no-such-dir"):
+            self.assertIn("<style>", gui._page_html())
+
+    def test_the_calibrated_floor_is_still_substituted(self):
+        self.assertNotIn("__REVIEW_RATIO_FLOOR__", gui._page_html())
+        self.assertIn(repr(float(generate_mal_xml.REVIEW_RATIO_FLOOR)), gui._page_html())
 
     @unittest.skipUnless(shutil.which("node"), "node not installed")
     def test_emitted_javascript_parses(self):
@@ -369,9 +420,19 @@ class MatchPickerQueryTests(unittest.TestCase):
 
     def test_the_batch_query_stays_lean(self):
         query = generate_mal_xml._search_batch_query(8, "manga")
-        for field in ("synonyms", "genres", "description", "siteUrl"):
+        for field in ("genres", "description", "siteUrl"):
             self.assertNotIn(field, query,
                              "a 339-title run would carry this for 10 candidates each and show none of it")
+
+    def test_synonyms_are_the_one_field_that_earns_its_weight(self):
+        """The exception to the rule above, and it was measured rather than
+        assumed: 8 aliases x perPage 10 grew from 15,572 to 21,831 bytes, and
+        the rate-limit cost was 1 either way. Unlike genres or description it
+        is *used* - `_alias_hit` reads it, which is what keeps a correct match
+        like "First God Of War" -> "Di Yi Zhan Shen" (ratio 0.129) off the
+        review list."""
+        query = generate_mal_xml._search_batch_query(8, "manga")
+        self.assertIn("synonyms", query)
 
     def test_a_batch_node_carries_no_details_key(self):
         node = {"id": 1, "idMal": 2, "title": {"english": "X"}, "format": "MANGA",
@@ -395,6 +456,86 @@ class MatchPickerQueryTests(unittest.TestCase):
         self.assertEqual(entry["details"]["description"], "Hi there",
                          "AniList ships HTML in the description")
 
+
+class KeepTheWorkTests(unittest.TestCase):
+    """Three things the page produced and then threw away."""
+
+    def script(self):
+        return gui._script_source()
+
+    def markup(self):
+        return (gui.STATIC_DIR / "index.html").read_text(encoding="utf-8")
+
+    # ---- R25 ----------------------------------------------------------
+    def test_the_write_plan_can_be_kept(self):
+        """The diff is the most carefully built thing in the tool and it lived
+        only as long as the dialog was open."""
+        self.assertIn('id="btnWritePlanSave"', self.markup())
+        body = self.script().split("btnWritePlanSave.addEventListener", 1)[1]
+        body = body.split("btnWriteCancel", 1)[0]
+        self.assertIn("overrides: writeOverrides", body,
+                      "without the overrides the plan does not describe what "
+                      "would actually have been sent")
+        self.assertIn("rows: lastWritePlan.rows", body)
+        self.assertIn("saved_at", body)
+
+    # ---- R26 ----------------------------------------------------------
+    def test_every_snapshot_is_reachable_not_just_the_newest(self):
+        script = self.script()
+        self.assertIn('id="undoSnapshot"', self.markup())
+        self.assertIn("function refreshSnapshots", script)
+        self.assertIn("function renderSnapshotPicker", script)
+        self.assertNotIn("(payload.snapshots || [])[0]", script,
+                         "the page used to read index 0 and leave four "
+                         "recoverable snapshots unreachable")
+
+    def test_a_snapshot_is_labelled_with_its_media_type(self):
+        """A copy writes two snapshots, one per media type, so a bare list of
+        timestamps shows one operation as two unrelated rows."""
+        body = self.script().split("function snapshotLabel", 1)[1].split("async function", 1)[0]
+        self.assertIn("media_type", body)
+        self.assertIn("entry.rows", body)
+        self.assertIn("creates", body)
+
+    def test_picking_an_older_snapshot_undoes_only_that_one(self):
+        """The session's own pair belongs together; an older one does not."""
+        body = self.script().split("btnUndoConfirm.addEventListener", 1)[1][:1200]
+        self.assertIn("picked === lastWriteSnapshot && lastWriteSnapshots.length", body)
+
+    def test_the_delete_box_follows_the_chosen_snapshot(self):
+        """Each snapshot created a different number of entries, and offering
+        to delete the wrong count would be the worst kind of wrong."""
+        self.assertIn("undoSnapshot.addEventListener('change'", self.script())
+        body = self.script().split("undoSnapshot.addEventListener('change'", 1)[1][:400]
+        self.assertIn("lastWriteCreated", body)
+        self.assertIn("describeUndo()", body)
+
+    # ---- R27 ----------------------------------------------------------
+    def test_the_rows_can_leave_as_csv(self):
+        self.assertIn('id="btnDownloadCsv"', self.markup())
+        script = self.script()
+        self.assertIn("CSV_COLUMNS", script)
+        for column in ("title", "pasted", "mal_id", "anilist_id", "status",
+                       "score", "progress", "needs_review", "known_alias"):
+            with self.subTest(column=column):
+                self.assertIn("'" + column + "'", script)
+
+    def test_a_csv_cell_cannot_become_a_spreadsheet_formula(self):
+        """Excel runs a cell beginning =, +, - or @. A title is not a formula."""
+        body = self.script().split("function csvCell", 1)[1].split("btnDownloadCsv", 1)[0]
+        self.assertIn("^[=+", body)
+        self.assertIn('replace(/"/g', body, "and RFC 4180 quoting for the rest")
+
+    def test_the_csv_carries_a_byte_order_mark(self):
+        """Without one Excel reads a UTF-8 CSV as the system codepage and every
+        non-ASCII title arrives mangled."""
+        self.assertIn("String.fromCharCode(65279)", self.script())
+
+    def test_the_csv_is_built_in_the_browser(self):
+        """No new endpoint: the server deliberately refuses to be told where to
+        write, and this needs nothing it does not already have."""
+        self.assertNotIn("/api/download/csv", self.script())
+        self.assertIn("function offerDownload", self.script())
 
 if __name__ == "__main__":
     unittest.main()

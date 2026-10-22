@@ -11,6 +11,19 @@ open: several tests start a real HTTP server and talk to it.
 """
 import socket
 
+# BaseServer.shutdown() blocks until serve_forever's poll loop notices, and
+# that loop defaults to a 0.5 second interval. Every per-test fixture starts
+# its own server, so the suite spent roughly 52 of its 59 seconds waiting for
+# sockets it had already finished with. Nothing else was responsible:
+# instrumented, the slowest module slept 0.0s and made 0 throttled requests.
+SHUTDOWN_POLL = 0.01
+
+
+def serve(server):
+    """A thread target for a test server that shuts down promptly."""
+    return lambda: server.serve_forever(poll_interval=SHUTDOWN_POLL)
+
+
 _real_connect = socket.socket.connect
 _LOCAL = {"127.0.0.1", "::1", "localhost", "0.0.0.0"}
 

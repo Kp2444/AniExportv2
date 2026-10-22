@@ -19,6 +19,7 @@ import xml.etree.ElementTree as ET
 
 import generate_mal_xml as gen
 import gui
+from tests import serve
 
 
 def node(mal_id, title, fmt="MANGA"):
@@ -45,7 +46,7 @@ class GuiContractCase(unittest.TestCase):
             self.addCleanup(patcher.stop)
         self.out = out
         self.server = ThreadingHTTPServer(("127.0.0.1", 0), gui.MalGuiHandler)
-        thread = threading.Thread(target=self.server.serve_forever, daemon=True)
+        thread = threading.Thread(target=serve(self.server), daemon=True)
         thread.start()
         self.addCleanup(thread.join, 2)
         self.addCleanup(self.server.server_close)
@@ -329,7 +330,7 @@ class SameOriginTests(unittest.TestCase):
 
     def setUp(self):
         self.server = ThreadingHTTPServer(("127.0.0.1", 0), gui.MalGuiHandler)
-        thread = threading.Thread(target=self.server.serve_forever, daemon=True)
+        thread = threading.Thread(target=serve(self.server), daemon=True)
         thread.start()
         self.addCleanup(thread.join, 2)
         self.addCleanup(self.server.server_close)
@@ -399,6 +400,96 @@ class SameOriginTests(unittest.TestCase):
                 self.assertEqual(self.post(path, {"content": "x"},
                                            origin="https://evil.example"), 403)
 
+
+class PastedLineTests(GuiContractCase):
+    """The row only ever carried the cleaned-up title, so when the clean-up got
+    it wrong there was no way to see what had actually been typed."""
+
+    def test_the_untouched_line_travels_with_the_row(self):
+        with patch.object(gen, "_execute_anilist_batch", side_effect=self.fake_batch):
+            events = self.process("1. Alpha")
+        row = self.complete(events)["entries"][0]
+        self.assertEqual(row["original"], "Alpha", "the searched title")
+        self.assertEqual(row["pasted"], "1. Alpha", "and what the user typed")
+
+    def test_a_line_that_was_not_touched_carries_no_duplicate(self):
+        with patch.object(gen, "_execute_anilist_batch", side_effect=self.fake_batch):
+            events = self.process("Alpha")
+        self.assertNotIn("pasted", self.complete(events)["entries"][0],
+                         "an untouched line would be the same string twice in "
+                         "every row and in the saved session")
+
+    def test_a_counter_prefix_is_searched_whole(self):
+        """End to end: the numbering rule used to eat the counter off titles
+        like 3-gatsu no Lion, and the search went out for "gatsu no Lion"."""
+        searched = []
+
+        def spy(query, variables, max_retries=3):
+            searched.extend(variables.values())
+            return self.fake_batch(query, variables, max_retries)
+
+        with patch.object(gen, "_execute_anilist_batch", side_effect=spy):
+            self.process("3-gatsu no Lion")
+        self.assertEqual(searched, ["3-gatsu no Lion"])
+
+    def test_numbering_is_still_stripped_before_the_search(self):
+        searched = []
+
+        def spy(query, variables, max_retries=3):
+            searched.extend(variables.values())
+            return self.fake_batch(query, variables, max_retries)
+
+        with patch.object(gen, "_execute_anilist_batch", side_effect=spy):
+            self.process("1. Alpha" + chr(10) + "2) Beta")
+        self.assertEqual(searched, ["Alpha", "Beta"])
+
+class LineFieldTests(GuiContractCase):
+    """What a line says about its own title beats the list-wide defaults, and
+    the title that gets searched is the one with all of it taken off."""
+
+    def _rows(self, content, **extra):
+        searched = []
+
+        def spy(query, variables, max_retries=3):
+            searched.extend(variables.values())
+            return self.fake_batch(query, variables, max_retries)
+
+        with patch.object(gen, "_execute_anilist_batch", side_effect=spy):
+            events = self.process(content, **extra)
+        return searched, self.complete(events)
+
+    def test_the_line_beats_the_list_wide_defaults(self):
+        searched, done = self._rows("Berserk - 374 ch - dropped",
+                                    status="Reading", score=0)
+        self.assertEqual(searched, ["Berserk"], "the search gets the title alone")
+        row = done["entries"][0]
+        self.assertEqual(row["status"], "Dropped")
+        self.assertEqual(row["my_read_chapters"], 374)
+        self.assertEqual(row["pasted"], "Berserk - 374 ch - dropped")
+
+    def test_a_plain_line_still_takes_the_defaults(self):
+        _, done = self._rows("Berserk", status="Reading", score=4)
+        row = done["entries"][0]
+        self.assertEqual(row["status"], "Reading")
+        self.assertEqual(row["score"], 4)
+        self.assertNotIn("my_read_chapters", row)
+
+    def test_a_score_on_the_line_is_kept(self):
+        _, done = self._rows("Berserk 9/10", status="Reading", score=0)
+        self.assertEqual(done["entries"][0]["score"], 9)
+
+    def test_volumes_only_land_on_a_manga_list(self):
+        _, done = self._rows("Berserk 3 vols", status="Reading", score=0)
+        self.assertEqual(done["entries"][0].get("my_read_volumes"), 3)
+
+    def test_a_title_that_is_mostly_digits_is_searched_whole(self):
+        searched, _ = self._rows("Attack on Titan 139" + chr(10) + "86 - Eighty Six")
+        self.assertEqual(searched, ["Attack on Titan 139", "86 - Eighty Six"])
+
+    def test_the_run_reports_how_many_lines_it_read(self):
+        _, done = self._rows("Berserk 9/10" + chr(10) + "Vagabond")
+        self.assertEqual(done["from_lines"], 1,
+                         "so the page can say it rather than change rows silently")
 
 if __name__ == "__main__":
     unittest.main()

@@ -299,5 +299,58 @@ class ProgressTests(CacheIsolatedCase):
         self.assertEqual(out["a"][0]["id"], 7)
 
 
+class CancelledRunCacheTests(CacheIsolatedCase):
+    """A cancelled run used to return before the cache was written, so
+    stopping at title 250 of 300 threw all 250 away and the next attempt
+    re-spent the rate limit on every one of them."""
+
+    def _batches(self, calls):
+        def fake_batch(query, variables, max_retries=3):
+            calls.append(list(variables.values()))
+            return {"t%d" % i: {"media": [node(500 + i, name)]}
+                    for i, name in enumerate(variables.values())}
+        return fake_batch
+
+    def test_what_resolved_before_the_cancel_is_kept(self):
+        titles = ["t%02d" % i for i in range(24)]        # three batches of eight
+        calls = []
+        seen = {"n": 0}
+
+        def cancel_after_one():
+            seen["n"] += 1
+            return seen["n"] > 1                          # batch 1 runs, batch 2 does not
+
+        with patch.object(gen, "_execute_anilist_batch", side_effect=self._batches(calls)):
+            out = gen.resolve_many_entries(titles, media_type="manga",
+                                           should_cancel=cancel_after_one)
+        self.assertEqual(len(out), 8, "one batch got through")
+        self.assertEqual(len(calls), 1)
+
+        stored = json.loads(self.cache_file.read_text(encoding="utf-8"))
+        self.assertEqual(len(stored["entries"]), 8,
+                         "the cancelled run must keep what it paid for")
+
+        calls.clear()
+        with patch.object(gen, "_execute_anilist_batch", side_effect=self._batches(calls)):
+            again = gen.resolve_many_entries(list(out), media_type="manga")
+        self.assertEqual(calls, [], "a re-run must not pay for those titles twice")
+        self.assertEqual(len(again), 8)
+
+    def test_a_cancel_never_caches_a_miss(self):
+        """Unresolved placeholders are filled in after the cancel check, and
+        _cacheable rejects them anyway - but a future edit could reorder it."""
+        def nothing(query, variables, max_retries=3):
+            return {"t%d" % i: {"media": []} for i in range(len(variables))}
+
+        with patch.object(gen, "_execute_anilist_batch", side_effect=nothing):
+            gen.resolve_many_entries(["ghost"], media_type="manga",
+                                     should_cancel=lambda: True)
+        # The file itself is written either way - save_cache has always been
+        # called unconditionally, which also compacts expired rows. What must
+        # never appear in it is the miss.
+        stored = json.loads(self.cache_file.read_text(encoding="utf-8"))
+        self.assertEqual(stored["entries"], {},
+                         "nothing resolved, so nothing to remember")
+
 if __name__ == "__main__":
     unittest.main()

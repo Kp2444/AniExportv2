@@ -6,6 +6,7 @@ because translated titles share almost no characters with the English name a
 user pastes; the signal that survived calibration is an inversion - the chosen
 entry matching the searched title worse than one the ranker passed over.
 """
+import io
 import re
 import unittest
 
@@ -200,6 +201,206 @@ class ReviewSurfaceTests(unittest.TestCase):
         self.assertIn("querySelectorAll('.modal-backdrop.show').forEach(hideModal)", script,
                       "the last two dialogs added were both missed by the old list")
 
+
+class WonByDefaultTests(unittest.TestCase):
+    """A ranking tier demotes an entry relative to its siblings, so a demotion
+    needs something to lose to.
+
+    Measured against the live API: "Gotoubun No Hanayome" returns exactly one
+    AniList hit - a 1-chapter ONE_SHOT with no MAL id, not the 122-chapter
+    series. The one-shot tier has nothing to rank it below, the ratio floor
+    passes it at 0.45, and the runner-up gap is None because there is no
+    runner-up. It then renders as "AniList only", which reads as a legitimate
+    state rather than a miss.
+    """
+
+    GOTOUBUN = {"id": 123, "idMal": None, "format": "ONE_SHOT", "status": "FINISHED",
+                "popularity": 2944, "chapters": 1, "volumes": 0,
+                "title": {"english": None,
+                          "romaji": "Go-toubun no Hanayome: 122 + 1 - Itsutsugo-chan"}}
+
+    def test_the_case_that_defeated_every_other_guard(self):
+        entry = gen._parse_manga_node(self.GOTOUBUN, fallback_title="Gotoubun No Hanayome")
+        self.assertGreater(entry["match_ratio"], gen.REVIEW_RATIO_FLOOR,
+                           "the ratio floor cannot see this one")
+        self.assertTrue(entry["needs_review"])
+        self.assertEqual(entry["review_reason"], "one-shot")
+
+    def test_a_single_candidate_has_no_runner_up_to_lose_to(self):
+        candidates = gen._candidates([self.GOTOUBUN], "manga", "Gotoubun No Hanayome")
+        self.assertIsNone(candidates[0]["runner_up_gap"], "no runner-up, so no gap")
+        self.assertTrue(candidates[0]["needs_review"])
+
+    def test_an_unreleased_winner_is_flagged(self):
+        entry = gen._parse_manga_node(node("Soon", status="NOT_YET_RELEASED"),
+                                      fallback_title="Soon")
+        self.assertTrue(entry["needs_review"])
+        self.assertEqual(entry["review_reason"], "not yet released")
+
+    def test_a_lone_one_chapter_manga_is_flagged(self):
+        """Manga only: an anime with one episode is an ordinary movie."""
+        lone = node("Fragment", format="MANGA", chapters=1)
+        self.assertTrue(gen._candidates([lone], "manga", "Fragment")[0]["needs_review"])
+        self.assertNotIn("needs_review",
+                         {k: v for k, v in gen._candidates(
+                             [node("Movie", format="MOVIE", episodes=1)], "anime", "Movie")[0].items()
+                          if k == "needs_review" and v})
+
+    def test_an_ordinary_match_is_left_alone(self):
+        entry = gen._parse_manga_node(node("The Hero Returns", popularity=9000,
+                                           status="RELEASING", chapters=120),
+                                      fallback_title="The Hero Returns")
+        self.assertFalse(entry["needs_review"])
+        self.assertNotIn("review_reason", entry)
+
+    def test_a_row_read_back_from_an_account_is_never_flagged(self):
+        """It was not a guess, so there is nothing to review."""
+        entry = gen._parse_manga_node(self.GOTOUBUN)
+        self.assertNotIn("needs_review", entry)
+        self.assertNotIn("review_reason", entry)
+
+    def test_the_chosen_entry_inherits_the_candidate_verdict(self):
+        """The entry is parsed from its own node, so it knows nothing about
+        ties or sole matches unless they are carried across."""
+        entry = gen._parse_manga_node(node("Pick"), fallback_title="Pick")
+        gen._carry_candidate_review(entry, [{"runner_up_gap": -0.2, "needs_review": True,
+                                             "review_reason": "one-shot"}])
+        self.assertEqual(entry["runner_up_gap"], -0.2)
+        self.assertTrue(entry["needs_review"])
+        self.assertEqual(entry["review_reason"], "one-shot")
+
+    def test_both_resolver_paths_carry_it(self):
+        """The batch path did this inline and the single-title path did not,
+        so the two disagreed about the same search."""
+        with io.open("generate_mal_xml.py", encoding="utf-8") as handle:
+            resolvers = re.sub(r"\s+", " ", handle.read())
+        self.assertEqual(resolvers.count("_carry_candidate_review("), 3,
+                         "three callers: the batch path and both single-title "
+                         "fetchers")
+        with io.open("matching.py", encoding="utf-8") as handle:
+            self.assertIn("def _carry_candidate_review(", handle.read(),
+                          "defined once, beside the ranking it carries")
+
+
+class ReviewReasonCopyTests(unittest.TestCase):
+    def test_every_server_reason_has_a_sentence_in_the_page(self):
+        script = gui.HTML_TEMPLATE
+        for token in ("one-shot", "not yet released", "only match, one chapter"):
+            with self.subTest(token=token):
+                self.assertIn("'" + token + "':", script,
+                              "a token with no sentence renders as no explanation")
+
+    def test_the_reason_wins_over_the_ratio_sentence(self):
+        """|| binds tighter than ?:, so without the parentheses a flagged row
+        would always take the inversion branch."""
+        self.assertIn("REVIEW_REASONS[item.review_reason]" + chr(10), gui.HTML_TEMPLATE)
+        self.assertIn("|| ((gap !== undefined", gui.HTML_TEMPLATE)
+
+    def test_picking_a_match_by_hand_clears_the_reason_too(self):
+        """A stale reason outlives the flag otherwise - the same shape as the
+        `unresolved: true` flag that survived a fix."""
+        self.assertEqual(gui.HTML_TEMPLATE.count("delete item.review_reason;"), 2,
+                         "both fix paths: the inline find and the fixer modal")
+
+class AliasHitTests(unittest.TestCase):
+    """AniList listing the pasted title as another name for an entry is a fact,
+    not a similarity score, and it settles what the ratio was guessing at.
+
+    Measured live: "First God Of War" scores **0.129** against the entry it
+    correctly resolves to, "Di Yi Zhan Shen", which is below the review floor -
+    and AniList carries "First God of War" verbatim in that entry's synonyms.
+    On a 16-title slice of the real list, 8 of 12 resolved rows were exact
+    alias hits and one of them was being flagged purely on its ratio.
+    """
+
+    ALIASED = {"id": 1, "idMal": 2, "format": "MANHUA", "status": "RELEASING",
+               "popularity": 500, "chapters": 100, "volumes": 0,
+               "title": {"english": "Di Yi Zhan Shen", "romaji": "Di Yi Zhan Shen"},
+               "synonyms": ["First God of War"]}
+
+    def test_an_exact_alias_clears_a_low_ratio_flag(self):
+        entry = gen._parse_manga_node(self.ALIASED, fallback_title="First God Of War")
+        self.assertLess(entry["match_ratio"], gen.REVIEW_RATIO_FLOOR)
+        self.assertTrue(entry["alias_hit"])
+        self.assertFalse(entry["needs_review"],
+                         "the ratio was guessing at something the synonym settles")
+
+    def test_the_same_row_without_the_synonym_is_still_flagged(self):
+        entry = gen._parse_manga_node(dict(self.ALIASED, synonyms=[]),
+                                      fallback_title="First God Of War")
+        self.assertTrue(entry["needs_review"])
+        self.assertNotIn("alias_hit", entry)
+
+    def test_an_alias_does_not_rescue_a_won_by_default_match(self):
+        """Different failure: the title is right but the entry is the wrong
+        kind of thing - a one-shot where the series should be."""
+        entry = gen._parse_manga_node(dict(self.ALIASED, format="ONE_SHOT", chapters=1),
+                                      fallback_title="First God Of War")
+        self.assertTrue(entry["alias_hit"])
+        self.assertTrue(entry["needs_review"])
+        self.assertEqual(entry["review_reason"], "one-shot")
+
+    def test_an_alias_beats_an_inversion(self):
+        """An inversion compares two fuzzy scores; an alias is not fuzzy.
+
+        Built as the real shape of the problem: the has-a-MAL-id tier puts the
+        aliased entry first even though a passed-over candidate matches the
+        *typed* name perfectly. That is exactly the inversion the review flag
+        exists for - and exactly the case where it is wrong.
+        """
+        rival = node("First God Of War", id=77, idMal=None, popularity=1)
+        ranked = gen._candidates([self.ALIASED, rival], "manga", "First God Of War")
+        self.assertEqual(len(ranked), 2, "distinct ids, so neither is deduped away")
+        self.assertTrue(ranked[0]["alias_hit"], "the MAL-id tier ranks the alias first")
+        self.assertLess(ranked[0]["runner_up_gap"], 0, "which is an inversion")
+        self.assertFalse(ranked[0]["needs_review"],
+                         "an inversion against an exact alias is a false alarm")
+
+    def test_an_inversion_without_an_alias_is_still_flagged(self):
+        rival = node("Totally Different", id=77, idMal=None, popularity=1)
+        ranked = gen._candidates([dict(self.ALIASED, synonyms=[]), rival],
+                                 "manga", "Totally Different")
+        self.assertLess(ranked[0]["runner_up_gap"], 0)
+        self.assertTrue(ranked[0]["needs_review"])
+
+    def test_matching_is_case_and_punctuation_insensitive(self):
+        for typed in ("first god of war", "FIRST GOD OF WAR", "First God of War!"):
+            with self.subTest(typed=typed):
+                entry = gen._parse_manga_node(self.ALIASED, fallback_title=typed)
+                self.assertTrue(entry.get("alias_hit"), typed)
+
+    def test_a_partial_overlap_is_not_an_alias(self):
+        entry = gen._parse_manga_node(self.ALIASED, fallback_title="God of War")
+        self.assertNotIn("alias_hit", entry, "exact only - this is the whole point")
+
+    def test_a_row_read_back_from_an_account_gets_no_alias_either(self):
+        self.assertNotIn("alias_hit", gen._parse_manga_node(self.ALIASED))
+
+    def test_the_batch_query_carries_synonyms(self):
+        for media_type in ("manga", "anime"):
+            with self.subTest(media_type=media_type):
+                self.assertIn("synonyms", gen._search_batch_query(3, media_type))
+
+    def test_synonyms_stay_out_of_the_similarity_ratio(self):
+        """Measured and rejected (REVIEW.md R10-R12): folding synonyms into
+        _title_ratio changed 0 of 16 picks, tripled the number of candidates
+        sitting above 0.95, and halved the runner-up gap - which is the signal
+        that actually works. The boolean is the part worth having."""
+        ratio = gen._title_ratio(self.ALIASED, "First God Of War")
+        self.assertLess(ratio, 0.2,
+                        "the ratio must still describe the titles only; if this "
+                        "starts passing at 1.0 the synonyms have been folded in")
+
+    def test_the_chosen_entry_inherits_the_alias(self):
+        entry = gen._parse_manga_node(node("Pick"), fallback_title="Pick")
+        gen._carry_candidate_review(entry, [{"alias_hit": True, "runner_up_gap": None}])
+        self.assertTrue(entry["alias_hit"])
+
+    def test_the_page_says_so_rather_than_staying_silent(self):
+        script = gui._script_source()
+        self.assertIn("aliasMarkHtml", script)
+        self.assertIn("known alias", script)
+        self.assertIn("alias-mark", (gui.STATIC_DIR / "app.css").read_text(encoding="utf-8"))
 
 if __name__ == "__main__":
     unittest.main()

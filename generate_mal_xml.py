@@ -33,6 +33,56 @@ if sys.platform == "win32":
         pass
 
 
+from titles import (
+    load_titles_from_txt,
+    parse_title_line,
+    sanitize_title_line,
+    _CHAPTER_UNITS,
+    _EPISODE_UNITS,
+    _LINE_STATUSES,
+    _LINE_STATUS_FOR_MEDIA,
+    _SEPARATORS_CLASS,
+    _TRAILING_SEPARATORS,
+    _VOLUME_UNITS,
+    _WEAK_STATUS_WORDS,
+    _strip_bare_score,
+    _strip_counted,
+    _strip_fraction,
+    _strip_status,
+)
+from matching import (
+    DESCRIPTION_LIMIT,
+    FORMAT_MAP,
+    MANGA_FORMAT_MAP,
+    MEDIA_STATUS_LABELS,
+    REVIEW_RATIO_FLOOR,
+    REVIEW_TIE_GAP,
+    _alias_hit,
+    _candidates,
+    _carry_candidate_review,
+    _media_details,
+    _media_rank,
+    _normalize_title,
+    _parse_manga_node,
+    _parse_media_node,
+    _pick_best_media,
+    _rank_nodes,
+    _search_variants,
+    _title_ratio,
+    _won_by_default,
+)
+from malxml import (
+    build_mal_manga_xml,
+    build_mal_xml,
+    deduplicate_entries,
+    REREAD_STATUSES,
+    _cdata,
+    _clamp_progress,
+    _is_repeat_status,
+    _mal_date,
+    _normalize_status,
+)
+
 ANILIST_API_URL = "https://graphql.anilist.co"
 
 # AniList caps at 30 requests/minute; cap how long one title may wait on 429s.
@@ -248,344 +298,6 @@ query ($idMal: Int, $type: MediaType) {
 }
 """
 
-MANGA_FORMAT_MAP = {
-    "MANGA": "Manga",
-    "NOVEL": "Novel",
-    "ONE_SHOT": "One-shot",
-    "DOUJIN": "Doujinshi",
-    "MANHWA": "Manhwa",
-    "MANHUA": "Manhua",
-    "OEL": "OEL",
-}
-
-FORMAT_MAP = {
-    "TV": "TV",
-    "TV_SHORT": "TV",
-    "MOVIE": "Movie",
-    "SPECIAL": "Special",
-    "OVA": "OVA",
-    "ONA": "ONA",
-    "MUSIC": "Music",
-}
-
-
-def sanitize_title_line(line: str) -> Optional[str]:
-    """
-    Cleans a line from an anime text file:
-    - Removes leading numbering or bullet points (e.g., '1. ', '1) ', '- ')
-    - Removes wrapping quotation marks and extra whitespace
-    - Ignores comment lines starting with '#'
-    """
-    stripped = line.strip()
-    if not stripped or stripped.startswith("#"):
-        return None
-
-    # Remove leading numbers/bullets if any (e.g., '1. ', '1- ', '1) ', '- ')
-    cleaned = re.sub(r"^\s*(?:\d+[\.\-\)]|[-*•])\s*", "", stripped).strip()
-
-    # Remove surrounding double/single quotes if present
-    if (cleaned.startswith('"') and cleaned.endswith('"')) or (cleaned.startswith("'") and cleaned.endswith("'")):
-        cleaned = cleaned[1:-1].strip()
-
-    return cleaned if cleaned else None
-
-
-def load_titles_from_txt(file_path: Path) -> List[str]:
-    """
-    Reads a text file with one anime title per line (no numbering required).
-    """
-    if not file_path.is_file():
-        raise FileNotFoundError(f"Anime list file not found: {file_path}")
-
-    titles: List[str] = []
-    with open(file_path, "r", encoding="utf-8-sig") as f:
-        for line in f:
-            cleaned = sanitize_title_line(line)
-            if cleaned:
-                titles.append(cleaned)
-    return titles
-
-
-MEDIA_STATUS_LABELS = {
-    "FINISHED": "Finished",
-    "RELEASING": "Releasing",
-    "NOT_YET_RELEASED": "Not yet released",
-    "CANCELLED": "Cancelled",
-    "HIATUS": "On hiatus",
-}
-
-DESCRIPTION_LIMIT = 260
-
-
-def _media_details(media: Dict[str, Any]) -> Dict[str, Any]:
-    """The extra context the match picker shows, under one key.
-
-    Nested rather than flattened on purpose: the picker's result is merged into
-    the user's row, and a top-level `status` or `score` here would overwrite the
-    row's own list status and score.
-    """
-    titles = media.get("title") or {}
-    start = media.get("startDate") or {}
-    end = media.get("endDate") or {}
-    text = re.sub(r"<[^>]+>", "", str(media.get("description") or "")).strip()
-    text = re.sub(r"\s+", " ", text)
-    if len(text) > DESCRIPTION_LIMIT:
-        text = text[:DESCRIPTION_LIMIT].rsplit(" ", 1)[0] + "..."
-    raw_status = str(media.get("status") or "")
-    mean = media.get("averageScore")
-    return {
-        "english": titles.get("english") or "",
-        "romaji": titles.get("romaji") or "",
-        "native": titles.get("native") or "",
-        # Synonyms are how a pasted title often differs from the official one,
-        # so they are the most useful field for judging a doubtful match.
-        "synonyms": [str(x) for x in (media.get("synonyms") or [])][:6],
-        "genres": [str(x) for x in (media.get("genres") or [])][:4],
-        "mean_score": int(mean) if isinstance(mean, (int, float)) else None,
-        "popularity": int(media.get("popularity") or 0),
-        "status": MEDIA_STATUS_LABELS.get(raw_status, raw_status.replace("_", " ").title()),
-        "start_year": start.get("year"),
-        "end_year": end.get("year"),
-        "url": media.get("siteUrl") or "",
-        "description": text,
-    }
-
-
-def _parse_media_node(media: Dict[str, Any], fallback_title: str = "") -> Dict[str, Any]:
-    titles = media.get("title") or {}
-    detail = _media_details(media) if "siteUrl" in media else None
-    official_title = titles.get("english") or titles.get("romaji") or fallback_title
-    raw_format = (media.get("format") or "TV").upper()
-    series_type = FORMAT_MAP.get(raw_format, "TV")
-    mal_id = int(media.get("idMal") or 0)
-    anilist_id = int(media.get("id") or 0)
-    eps = int(media.get("episodes") or 0)
-    entry = {
-        "id": mal_id,
-        "anilist_id": anilist_id,
-        "title": official_title,
-        "type": series_type,
-        "episodes": eps,
-        "year": (media.get("startDate") or {}).get("year"),
-        "popularity": int(media.get("popularity") or 0),
-        "cover": (media.get("coverImage") or {}).get("medium"),
-        # Two destinations, two identity requirements. A title with an AniList id
-        # but no MAL id is not unresolved, it simply cannot travel inside MAL XML.
-        "can_export_xml": mal_id > 0,
-        "can_write_anilist": anilist_id > 0,
-    }
-    # How close this was to what the user actually typed. None when nothing was
-    # searched - a row read back from an AniList list was never a guess.
-    if fallback_title:
-        ratio = round(_title_ratio(media, fallback_title), 4)
-        entry["match_ratio"] = ratio
-        entry["needs_review"] = ratio < REVIEW_RATIO_FLOOR
-    if detail:
-        entry["details"] = detail
-    return entry
-
-
-def _candidates(nodes: Sequence[Dict[str, Any]], media_type: str, fallback_title: str,
-                prefer_mal_id: bool = True) -> List[Dict[str, Any]]:
-    """Alternatives for a search, so a wrong auto-pick can be corrected.
-
-    Includes entries without a MAL ID: they are exportable by a direct AniList
-    write even though MAL XML cannot carry them, and hiding them left the user
-    no way to choose the right entry.
-    """
-    parse = _parse_manga_node if media_type == "manga" else _parse_media_node
-    seen: set = set()
-    out: List[Dict[str, Any]] = []
-    for node in _rank_nodes(nodes, fallback_title, prefer_mal_id):
-        if not node:
-            continue
-        # Dedupe on MAL id when there is one, otherwise on the AniList id, so
-        # AniList-only entries stay selectable instead of being filtered out.
-        key = ("mal", node["idMal"]) if node.get("idMal") else ("al", node.get("id"))
-        if key[1] in (None, 0) or key in seen:
-            continue
-        seen.add(key)
-        out.append(parse(node, fallback_title=fallback_title))
-    if out and out[0].get("match_ratio") is not None:
-        # A tie is as suspicious as a poor match: two candidates scoring the
-        # same means the ranker had no real reason to prefer either. With fewer
-        # than two candidates there is no gap, which is not the same as a gap
-        # of zero and must not be read as a tie.
-        gap = None
-        if len(out) > 1 and out[1].get("match_ratio") is not None:
-            gap = round(out[0]["match_ratio"] - out[1]["match_ratio"], 4)
-        out[0]["runner_up_gap"] = gap
-        if gap is not None and gap < REVIEW_TIE_GAP:
-            out[0]["needs_review"] = True
-    return out
-
-
-def _normalize_title(value: Any) -> str:
-    """Fold a title to a comparable form: case, accents and punctuation removed."""
-    text = unicodedata.normalize("NFKD", str(value or "").casefold())
-    text = "".join(ch for ch in text if not unicodedata.combining(ch))
-    text = "".join(ch if ch.isalnum() else " " for ch in text)
-    return " ".join(text.split())
-
-
-# Calibrated against the user's own 339-title list, not guessed. The plan's
-# proposed floor of 0.6 would have flagged **51.5% of resolved rows**, because
-# this list is full of translated titles whose official romaji name shares
-# almost no characters with the English one the user pasted - "First God Of
-# War" resolves correctly to "Di Yi Zhan Shen" at a ratio of 0.129. Title
-# similarity is therefore close to useless as a correctness signal here.
-#
-# What does carry signal is an *inversion*: the entry the ranker chose matched
-# the searched title worse than a candidate it passed over, which means a tier
-# above the title score (usually "has a MAL id") overrode the better name. All
-# five inversions in the calibration look wrong on inspection. A plain tie does
-# not count - "One Punch Man" ties with "One-Punch Man" at 1.0 and is right.
-#
-# Together these flag 3.4% of rows (9 of 268). Numbers and method are recorded
-# in MANGA_SUPPORT_NOTES under "Match confidence".
-REVIEW_RATIO_FLOOR = 0.15      # a floor of last resort; flagged 4 rows, all of them correct
-REVIEW_TIE_GAP = 0.0           # gap < 0 means an inversion, which is the real signal
-
-
-def _title_ratio(node: Dict[str, Any], search_title: str) -> float:
-    """How close a node's titles are to what was searched, 0.0 to 1.0.
-
-    The better of the English and romaji forms, both folded to a comparable
-    shape first. Lives here rather than inside the ranking key because it is
-    wanted twice: to sort, and to tell the user how sure the sort was.
-    """
-    wanted = _normalize_title(search_title)
-    if not wanted:
-        return 0.0
-    titles = node.get("title") or {}
-    english = _normalize_title(titles.get("english"))
-    romaji = _normalize_title(titles.get("romaji"))
-    return max(
-        difflib.SequenceMatcher(None, wanted, english).ratio() if english else 0.0,
-        difflib.SequenceMatcher(None, wanted, romaji).ratio() if romaji else 0.0,
-    )
-
-
-def _media_rank(node: Dict[str, Any], search_title: str = "", prefer_mal_id: bool = True) -> tuple:
-    """Lexicographic ranking key, highest first.
-
-    Tiers rather than additive weights, deliberately. An earlier draft scored
-    `idMal +1000, ONE_SHOT -500, exact title +300, ...` and claimed a full
-    series always beat a one-shot; it did not. A one-shot with a perfect title
-    match scored 1410 against 700 for a not-yet-released full series, which is
-    exactly the Boruto / Gotoubun failure this code exists to prevent. Tiers
-    make that invariant true by construction.
-    """
-    has_mal_id = 1 if node.get("idMal") else 0
-    not_one_shot = 0 if (node.get("format") or "").upper() == "ONE_SHOT" else 1
-    released = 0 if (node.get("status") or "").upper() == "NOT_YET_RELEASED" else 1
-
-    titles = node.get("title") or {}
-    wanted = _normalize_title(search_title)
-    english = _normalize_title(titles.get("english"))
-    romaji = _normalize_title(titles.get("romaji"))
-
-    score = 0.0
-    if wanted:
-        if english and english == wanted:
-            score += 300
-        elif romaji and romaji == wanted:
-            score += 260
-        score += _title_ratio(node, search_title) * 200
-    popularity = int(node.get("popularity") or 0)
-    score += min(50, round(math.log10(popularity + 1) * 10))
-    if not prefer_mal_id:
-        # Writing straight to AniList needs the best AniList entry. Ranking a
-        # MAL-linked duplicate above the canonical one would pick the wrong row.
-        return (not_one_shot, released, score)
-    return (has_mal_id, not_one_shot, released, score)
-
-
-def _rank_nodes(nodes: Sequence[Dict[str, Any]], search_title: str = "",
-                prefer_mal_id: bool = True) -> List[Dict[str, Any]]:
-    """Best first, stable: equal candidates keep AniList's own relevance order."""
-    decorated = [(_media_rank(n, search_title, prefer_mal_id), i, n) for i, n in enumerate(nodes) if n]
-    decorated.sort(key=lambda item: (tuple(-v for v in item[0]), item[1]))
-    return [item[2] for item in decorated]
-
-
-def _pick_best_media(nodes: Sequence[Dict[str, Any]], search_title: str = "",
-                     prefer_mal_id: bool = True) -> Optional[Dict[str, Any]]:
-    """Choose the most importable search hit.
-
-    AniList's top relevance hit is frequently a duplicate entry or a one-shot
-    spin-off with ``idMal: null``, which cannot be imported at all.
-    """
-    if not nodes:
-        return None
-    if prefer_mal_id and not any(n and n.get("idMal") for n in nodes):
-        # No MAL id anywhere: still return the best AniList match rather than
-        # whatever AniList listed first, so the row is usable for a direct write.
-        return _rank_nodes(nodes, search_title, prefer_mal_id=False)[0]
-    return _rank_nodes(nodes, search_title, prefer_mal_id)[0]
-
-
-# Deterministic rewrites tried when a title resolves to nothing. These fix
-# formatting, never spelling: AniList returns zero hits for "Raphsody" or
-# "Aristrocat", so no rule here can recover a typo.
-
-
-def _search_variants(title: str, media_type: str = "manga") -> List[str]:
-    original = " ".join(str(title or "").split())
-    out: List[str] = []
-
-    def add(value: str) -> None:
-        value = " ".join(value.split())
-        if value and value != original and value not in out:
-            out.append(value)
-
-    stage1 = unicodedata.normalize("NFKC", original)
-    for curly, straight in (("\u2019", "'"), ("\u2018", "'"), ("\u201c", '"'), ("\u201d", '"')):
-        stage1 = stage1.replace(curly.encode().decode("unicode_escape"), straight)
-    stage1 = " ".join(stage1.split())
-    add(stage1)
-
-    stage2 = re.sub(r"[\(\[][^\)\]]*[\)\]]", " ", stage1)
-    add(stage2)
-
-    if media_type == "manga":
-        stage3 = re.sub(r"\s+(manga|manhua|manhwa)\s*$", "", stage2 or stage1, flags=re.IGNORECASE)
-        add(stage3)
-
-    return out[:3]
-
-
-def _parse_manga_node(media: Dict[str, Any], fallback_title: str = "") -> Dict[str, Any]:
-    """Convert an AniList manga node into a MAL-compatible export entry."""
-    titles = media.get("title") or {}
-    detail = _media_details(media) if "siteUrl" in media else None
-    official_title = titles.get("english") or titles.get("romaji") or fallback_title
-    raw_format = (media.get("format") or "MANGA").upper()
-    series_type = MANGA_FORMAT_MAP.get(raw_format, "Manga")
-    entry = {
-        "id": int(media.get("idMal") or 0),
-        "anilist_id": int(media.get("id") or 0),
-        "title": official_title,
-        "type": series_type,
-        "chapters": int(media.get("chapters") or 0),
-        "volumes": int(media.get("volumes") or 0),
-        "year": (media.get("startDate") or {}).get("year"),
-        "popularity": int(media.get("popularity") or 0),
-        "cover": (media.get("coverImage") or {}).get("medium"),
-        "can_export_xml": int(media.get("idMal") or 0) > 0,
-        "can_write_anilist": int(media.get("id") or 0) > 0,
-    }
-    # How close this was to what the user actually typed. None when nothing was
-    # searched - a row read back from an AniList list was never a guess.
-    if fallback_title:
-        ratio = round(_title_ratio(media, fallback_title), 4)
-        entry["match_ratio"] = ratio
-        entry["needs_review"] = ratio < REVIEW_RATIO_FLOOR
-    if detail:
-        entry["details"] = detail
-    return entry
-
-
 def _post_graphql(query: str, variables: Dict[str, Any], max_retries: int = 3) -> Optional[Dict[str, Any]]:
     """Send one GraphQL document and return its ``data`` object.
 
@@ -623,6 +335,7 @@ def _search_batch_query(count: int, media_type: str) -> str:
       id
       idMal
       title {{ english romaji }}
+      synonyms
       format
       {count_fields}
       status
@@ -724,6 +437,7 @@ def fetch_anime_info_online(
 
     root_entry = _parse_media_node(root_media, fallback_title=title)
     root_entry["candidates"] = _candidates(nodes, "anime", title)
+    _carry_candidate_review(root_entry, root_entry["candidates"])
     results: List[Dict[str, Any]] = [root_entry]
 
     if not expand_sequels:
@@ -833,6 +547,7 @@ def fetch_manga_info_online(
 
     root_entry = _parse_manga_node(root_media, fallback_title=title)
     root_entry["candidates"] = _candidates(nodes, "manga", title)
+    _carry_candidate_review(root_entry, root_entry["candidates"])
     root_entry.setdefault("can_write_anilist", int(root_entry.get("anilist_id") or 0) > 0)
     results: List[Dict[str, Any]] = [root_entry]
     if not expand_sequels:
@@ -1090,12 +805,9 @@ def search_candidates(query: str, media_type: str, max_retries: int = 3) -> List
 # Disk cache
 # ---------------------------------------------------------------------------
 BATCH_SIZE = 8
-# Batches whose request failed outright in the most recent resolve_many_entries
-# call. Lets a caller tell "AniList was unreachable" from "no such title".
-last_run_failures: List[List[str]] = []
 CACHE_TTL_SECONDS = 7 * 24 * 60 * 60
 CACHE_MAX_ENTRIES = 10000
-CACHE_VERSION = 2          # entries gained match_ratio/needs_review
+CACHE_VERSION = 4          # entries gained alias_hit alongside review_reason
 _cache_lock = threading.Lock()
 
 
@@ -1244,10 +956,7 @@ def resolve_many_entries(
                 # The runner-up gap only exists where the ranked list does, and
                 # the chosen entry is parsed from the node rather than taken
                 # from that list, so it has to be carried across explicitly.
-                if candidates:
-                    entry["runner_up_gap"] = candidates[0].get("runner_up_gap")
-                    if candidates[0].get("needs_review"):
-                        entry["needs_review"] = True
+                _carry_candidate_review(entry, candidates)
                 found[name] = [entry]
             if stage == "resolve":
                 done += 1
@@ -1294,26 +1003,35 @@ def resolve_many_entries(
                 results[title] = entries + _expand_sequels_chain(detailed, media_type, title)
             report("expand")
 
-    if stopped:
-        return {title: [dict(e) for e in results[title]] for title in titles if title in results}
+    def remember(found: Dict[str, List[Dict[str, Any]]]) -> None:
+        """Keep whatever was actually resolved.
 
-    last_run_failures.clear()
-    last_run_failures.extend(failures)
+        A cancelled run used to return before reaching this, so stopping a
+        300-title run at title 250 threw all 250 away and the next attempt
+        re-spent the rate limit on every one of them. Unresolved placeholders
+        are only filled in after the cancel check, and `_cacheable` rejects
+        them in any case, so a miss is never written here.
+        """
+        stamp = time.time()
+        for title, entries in found.items():
+            if not _cacheable(entries):
+                continue
+            key = _cache_key(title, media_type, expand_sequels, prefer_mal_id)
+            session[key] = entries
+            if use_cache:
+                disk[key] = {"ts": stamp, "data": entries}
+        if use_cache:
+            save_cache(disk)
+
+    if stopped:
+        remember(results)
+        return {title: [dict(e) for e in results[title]] for title in titles if title in results}
 
     for title in unique:
         if title not in results:
             results[title] = [_unresolved_entry(title, media_type)]
 
-    if use_cache:
-        stamp = time.time()
-        for title in unique:
-            if _cacheable(results[title]):
-                disk[_cache_key(title, media_type, expand_sequels, prefer_mal_id)] = {
-                    "ts": stamp, "data": results[title]}
-        save_cache(disk)
-    for title in unique:
-        if _cacheable(results[title]):
-            session[_cache_key(title, media_type, expand_sequels, prefer_mal_id)] = results[title]
+    remember(results)
 
     return {title: [dict(e) for e in results[title]] for title in titles if title in results}
 
@@ -1496,8 +1214,10 @@ def _row_from_list_entry(entry: Dict[str, Any], media_type: str) -> Optional[Dic
     if status:
         row["status"] = status
     # Scores come back as POINT_100 by request, so the account's display format
-    # cannot leak in; the rows this app works with are 0-10.
-    row["score"] = int(round(int(entry.get("score") or 0) / 10))
+    # cannot leak in; the rows this app works with are 0-10. The exact value is
+    # kept beside the rounded one - see _score_raw for why.
+    row["score_raw"] = int(entry.get("score") or 0)
+    row["score"] = int(round(row["score_raw"] / 10))
     if media_type == "manga":
         row["my_read_chapters"] = int(entry.get("progress") or 0)
         row["my_read_volumes"] = int(entry.get("progressVolumes") or 0)
@@ -1720,6 +1440,32 @@ def anilist_existing_entries(token: str, user_id: int, media_type: str,
             if row and row.get("mediaId"):
                 found[int(row["mediaId"])] = row
     return found
+
+
+def _score_raw(entry: Dict[str, Any], default_score: int = 0) -> int:
+    """The POINT_100 score to send for a row.
+
+    AniList stores every score out of 100 whatever the account displays, and
+    this app works in 0-10. A row read back from an account therefore carries
+    both: the exact raw value, and the rounded one the interface edits.
+    Sending `score * 10` unconditionally turned an account's 87 into a 90.
+    That is visible in a normal write's diff, and silent in a copy, which
+    shows counts only - so "copy an account" quietly rewrote scores.
+
+    The rounded score wins the moment the two disagree, because disagreement
+    means a human edited it. The page deletes `score_raw` whenever it writes
+    `score` for the same reason; this is the belt to that pair of braces, and
+    it is what protects a hand-built payload that carries a stale raw value.
+    """
+    score = max(0, min(10, int(entry.get("score", default_score) or 0)))
+    raw = entry.get("score_raw")
+    if raw is None:
+        return score * 10
+    try:
+        raw = max(0, min(100, int(raw)))
+    except (TypeError, ValueError):
+        return score * 10
+    return raw if int(round(raw / 10)) == score else score * 10
 
 
 def _fuzzy_date(value: Any) -> Optional[Dict[str, int]]:
@@ -1964,7 +1710,7 @@ def iter_write_payloads(entries: Sequence[Dict[str, Any]], media_type: str,
         variables: Dict[str, Any] = {
             "mediaId": anilist_id,
             "status": status,
-            "scoreRaw": max(0, min(10, int(entry.get("score", default_score) or 0))) * 10,
+            "scoreRaw": _score_raw(entry, default_score),
             "progress": progress,
         }
         if progress_volumes is not None:
@@ -2365,271 +2111,6 @@ def anilist_write_batch(token: str, payloads: Sequence[Dict[str, Any]]) -> List[
         for index in stalled:
             out[index] = anilist_write_batch(token, [payloads[index]])[0]
     return out
-
-
-def deduplicate_entries(entries: Sequence[Dict[str, Any]]) -> List[Dict[str, Any]]:
-    """
-    Deduplicates entries preserving first occurrence order.
-    Deduplicates by ID if non-zero, otherwise by title.
-    """
-    seen = set()
-    unique: List[Dict[str, Any]] = []
-    for item in entries:
-        anime_id = item.get("id", 0)
-        key = anime_id if anime_id != 0 else item.get("title", "").strip().lower()
-        if key not in seen:
-            seen.add(key)
-            unique.append(item)
-    return unique
-
-
-# AniList offers "Paused" and "Rereading"/"Rewatching"; MAL's XML has neither.
-# Paused is MAL's On-Hold, and a reread is MAL's Reading plus the my_rereading flag.
-REREAD_STATUSES = {"rereading", "re-reading", "rewatching", "re-watching"}
-
-
-def _clamp_progress(value: Any, total: Any) -> int:
-    """Never below zero, never above a known total (0 means unknown)."""
-    try:
-        number = int(value or 0)
-    except (TypeError, ValueError):
-        number = 0
-    number = max(0, number)
-    try:
-        ceiling = int(total or 0)
-    except (TypeError, ValueError):
-        ceiling = 0
-    return min(number, ceiling) if ceiling > 0 else number
-
-
-def _mal_date(value: Any) -> str:
-    """Validate an entry date for MAL XML.
-
-    Empty/missing stays MAL's "unset" placeholder, so every existing caller is
-    unaffected. Anything else must be a real YYYY-MM-DD date; a malformed value
-    raises rather than silently exporting a date MAL will reject.
-    """
-    text = str(value or "").strip()
-    if not text or text == "0000-00-00":
-        return "0000-00-00"
-    try:
-        parsed = datetime.strptime(text, "%Y-%m-%d")
-    except ValueError:
-        raise ValueError(f"Invalid date {value!r}: expected YYYY-MM-DD") from None
-    # strptime accepts unpadded input like 2024-3-1; MAL wants it zero-padded, so
-    # round-trip the parse and reject anything that does not come back identical.
-    if parsed.strftime("%Y-%m-%d") != text:
-        raise ValueError(f"Invalid date {value!r}: expected zero-padded YYYY-MM-DD")
-    return text
-
-
-def _is_repeat_status(status: Any) -> bool:
-    """True when the user picked AniList's Rereading/Rewatching state."""
-    return str(status or "").strip().casefold() in REREAD_STATUSES
-
-
-def _normalize_status(status: Any, media_type: str) -> str:
-    value = str(status or "Completed").strip()
-    folded = value.casefold()
-    shared = {"paused": "On-Hold", "on hold": "On-Hold", "onhold": "On-Hold"}
-    if media_type == "manga":
-        aliases = {"watching": "Reading", "plan to watch": "Plan to Read", "plantowatch": "Plan to Read",
-                   "plan to read": "Plan to Read", "plantoread": "Plan to Read",
-                   "rereading": "Reading", "re-reading": "Reading",
-                   "rewatching": "Reading", "re-watching": "Reading", **shared}
-        allowed = ["Reading", "Completed", "Plan to Read", "On-Hold", "Dropped"]
-    else:
-        aliases = {"reading": "Watching", "plan to read": "Plan to Watch", "plantoread": "Plan to Watch",
-                   "plan to watch": "Plan to Watch", "plantowatch": "Plan to Watch",
-                   "rewatching": "Watching", "re-watching": "Watching",
-                   "rereading": "Watching", "re-reading": "Watching", **shared}
-        allowed = ["Watching", "Completed", "Plan to Watch", "On-Hold", "Dropped"]
-    normalized = aliases.get(folded, value)
-    canonical = {item.casefold(): item for item in allowed}
-    if normalized.casefold() not in canonical:
-        raise ValueError(f"Unsupported {media_type} list status: {value!r}")
-    # Emit MAL's canonical status spelling even when CLI input uses different casing.
-    return canonical[normalized.casefold()]
-
-
-def build_mal_xml(
-    entries: Sequence[Dict[str, Any]],
-    default_status: str = "Completed",
-    default_score: int = 0,
-) -> str:
-    """
-    Builds the MAL-compatible anime XML. Entries without a positive MAL ID are omitted.
-    """
-    entries = [dict(e,
-                    status=_normalize_status(e.get("status", default_status), "anime"),
-                    _rewatching=_is_repeat_status(e.get("status", default_status)))
-               for e in entries if int(e.get("id") or 0) > 0]
-    total_anime = len(entries)
-    completed_count = sum(1 for e in entries if e.get("status", default_status).lower() == "completed")
-    watching_count = sum(1 for e in entries if e.get("status", default_status).lower() == "watching")
-    onhold_count = sum(1 for e in entries if e.get("status", default_status).lower() in ("on-hold", "onhold"))
-    dropped_count = sum(1 for e in entries if e.get("status", default_status).lower() == "dropped")
-    plantowatch_count = sum(1 for e in entries if e.get("status", default_status).lower() in ("plan to watch", "plantowatch"))
-
-    lines: List[str] = [
-        '<?xml version="1.0" encoding="UTF-8" ?>',
-        '<!--',
-        '  Created by XML Export Feature',
-        '  Program: MyAnimeList.net',
-        f'  Entry count: {total_anime}',
-        '-->',
-        '<myanimelist>',
-        '  <myinfo>',
-        '    <user_id></user_id>',
-        '    <user_name></user_name>',
-        '    <user_export_type>1</user_export_type>',
-        f'    <user_total_anime>{total_anime}</user_total_anime>',
-        f'    <user_total_watching>{watching_count}</user_total_watching>',
-        f'    <user_total_completed>{completed_count}</user_total_completed>',
-        f'    <user_total_onhold>{onhold_count}</user_total_onhold>',
-        f'    <user_total_dropped>{dropped_count}</user_total_dropped>',
-        f'    <user_total_plantowatch>{plantowatch_count}</user_total_plantowatch>',
-        '  </myinfo>',
-    ]
-
-    for entry in entries:
-        anime_id = entry.get("id", 0)
-        title = entry.get("title", "")
-        series_type = entry.get("type", "TV")
-        eps = entry.get("episodes", 0)
-        # Only a finished (or in-progress rewatch) entry has every episode watched;
-        # Plan to Watch / Dropped must not import as fully watched.
-        fully_watched = str(entry.get("status", default_status)).casefold() == "completed" or entry.get("_rewatching")
-        watched_eps = _clamp_progress(entry.get("my_watched_episodes", eps if fully_watched else 0), eps)
-        status = entry.get("status", default_status)
-        score = max(0, min(10, int(entry.get("score", default_score) or 0)))
-        comments = entry.get("comments", "")
-        tags = entry.get("tags", "")
-
-        lines.extend([
-            '  <anime>',
-            f'    <series_animedb_id>{anime_id}</series_animedb_id>',
-            f'    <series_title>{_cdata(title)}</series_title>',
-            f'    <series_type>{series_type}</series_type>',
-            f'    <series_episodes>{eps}</series_episodes>',
-            f'    <my_watched_episodes>{watched_eps}</my_watched_episodes>',
-            f'    <my_start_date>{_mal_date(entry.get("start_date"))}</my_start_date>',
-            f'    <my_finish_date>{_mal_date(entry.get("finish_date"))}</my_finish_date>',
-            '    <my_rated></my_rated>',
-            f'    <my_score>{score}</my_score>',
-            '    <my_storage></my_storage>',
-            f'    <my_status>{status}</my_status>',
-            f'    <my_comments>{_cdata(comments)}</my_comments>',
-            f'    <my_times_watched>{1 if fully_watched else 0}</my_times_watched>',
-            '    <my_rewatch_value></my_rewatch_value>',
-            '    <my_priority>LOW</my_priority>',
-            f'    <my_tags>{_cdata(tags)}</my_tags>',
-            f'    <my_rewatching>{1 if entry.get("_rewatching") else 0}</my_rewatching>',
-            '    <my_rewatching_ep>0</my_rewatching_ep>',
-            '    <update_on_import>1</update_on_import>',
-            '  </anime>',
-        ])
-
-    lines.append('</myanimelist>')
-    lines.append('')
-    return '\r\n'.join(lines)
-
-
-def _cdata(value: Any) -> str:
-    """Return a CDATA section that remains valid even if the value contains ]]>."""
-    return "<![CDATA[" + str(value or "").replace("]]>", "]]]]><![CDATA[>") + "]]>"
-
-
-def build_mal_manga_xml(
-    entries: Sequence[Dict[str, Any]],
-    default_status: str = "Completed",
-    default_score: int = 0,
-) -> str:
-    """Build a MAL-compatible manga list XML document for AniList import.
-
-    Entries without a positive MAL manga ID are omitted because AniList's MAL
-    import route matches by MAL ID; exporting ID 0 would create a false success.
-    """
-    valid_entries = [
-        dict(e,
-             status=_normalize_status(e.get("status", default_status), "manga"),
-             _rereading=_is_repeat_status(e.get("status", default_status)))
-        for e in entries if int(e.get("id") or 0) > 0
-    ]
-    total = len(valid_entries)
-    status_of = lambda e: str(e.get("status", default_status)).strip().lower()
-    counts = {
-        "reading": sum(status_of(e) == "reading" for e in valid_entries),
-        "completed": sum(status_of(e) == "completed" for e in valid_entries),
-        "onhold": sum(status_of(e) in ("on-hold", "onhold") for e in valid_entries),
-        "dropped": sum(status_of(e) == "dropped" for e in valid_entries),
-        "plantoread": sum(status_of(e) in ("plan to read", "plantoread") for e in valid_entries),
-    }
-    lines = [
-        '<?xml version="1.0" encoding="UTF-8" ?>',
-        '<!--',
-        '  Created by AniExport',
-        '  Program: MyAnimeList.net',
-        f'  Entry count: {total}',
-        '-->',
-        '<myanimelist>',
-        '  <myinfo>',
-        '    <user_id></user_id>',
-        '    <user_name></user_name>',
-        '    <user_export_type>2</user_export_type>',
-        f'    <user_total_manga>{total}</user_total_manga>',
-        f'    <user_total_reading>{counts["reading"]}</user_total_reading>',
-        f'    <user_total_completed>{counts["completed"]}</user_total_completed>',
-        f'    <user_total_onhold>{counts["onhold"]}</user_total_onhold>',
-        f'    <user_total_dropped>{counts["dropped"]}</user_total_dropped>',
-        f'    <user_total_plantoread>{counts["plantoread"]}</user_total_plantoread>',
-        '  </myinfo>',
-    ]
-    for entry in valid_entries:
-        manga_id = int(entry.get("id") or 0)
-        title = entry.get("title", "")
-        chapters = int(entry.get("chapters") or 0)
-        volumes = int(entry.get("volumes") or 0)
-        status = entry.get("status", default_status)
-        fully_read = str(status).casefold() == "completed" or entry.get("_rereading")
-        default_chapters_read = chapters if fully_read else 0
-        default_volumes_read = volumes if fully_read else 0
-        # Clamp here, not only in the browser: a hand-built payload could claim
-        # 999 of 10 chapters, which MAL and AniList both reject.
-        read_chapters = _clamp_progress(entry.get("my_read_chapters", default_chapters_read), chapters)
-        read_volumes = _clamp_progress(entry.get("my_read_volumes", default_volumes_read), volumes)
-        score = max(0, min(10, int(entry.get("score", default_score) or 0)))
-        comments = entry.get("comments", "")
-        tags = entry.get("tags", "")
-        lines.extend([
-            '  <manga>',
-            f'    <manga_mangadb_id>{manga_id}</manga_mangadb_id>',
-            f'    <manga_title>{_cdata(title)}</manga_title>',
-            f'    <manga_volumes>{volumes}</manga_volumes>',
-            f'    <manga_chapters>{chapters}</manga_chapters>',
-            '    <my_id>0</my_id>',
-            '    <my_read_volumes>' + str(read_volumes) + '</my_read_volumes>',
-            '    <my_read_chapters>' + str(read_chapters) + '</my_read_chapters>',
-            f'    <my_start_date>{_mal_date(entry.get("start_date"))}</my_start_date>',
-            f'    <my_finish_date>{_mal_date(entry.get("finish_date"))}</my_finish_date>',
-            '    <my_scanalation_group></my_scanalation_group>',
-            f'    <my_score>{score}</my_score>',
-            '    <my_storage></my_storage>',
-            '    <my_retail_volumes></my_retail_volumes>',
-            f'    <my_status>{status}</my_status>',
-            f'    <my_comments>{_cdata(comments)}</my_comments>',
-            '    <my_times_read>0</my_times_read>',
-            f'    <my_tags>{_cdata(tags)}</my_tags>',
-            '    <my_priority>LOW</my_priority>',
-            '    <my_reread_value></my_reread_value>',
-            f'    <my_rereading>{"YES" if entry.get("_rereading") else "NO"}</my_rereading>',
-            '    <my_discuss>YES</my_discuss>',
-            '    <my_sns>default</my_sns>',
-            '    <update_on_import>1</update_on_import>',
-            '  </manga>',
-        ])
-    lines.extend(['</myanimelist>', ''])
-    return '\r\n'.join(lines)
 
 
 def _report_populations(entries: Sequence[Dict[str, Any]], media_type: str) -> None:

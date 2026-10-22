@@ -10,6 +10,7 @@ from pathlib import Path
 from unittest.mock import patch
 
 import gui
+from tests import serve
 
 
 class MangaGuiEndpointTests(unittest.TestCase):
@@ -29,7 +30,7 @@ class MangaGuiEndpointTests(unittest.TestCase):
                  patch.object(gui, "EXPORT_GZ_PATH", output / "anime.xml.gz"), \
                  patch.object(gui, "resolve_many_entries", return_value={"Test Manga": resolved}):
                 server = ThreadingHTTPServer(("127.0.0.1", 0), gui.MalGuiHandler)
-                thread = threading.Thread(target=server.serve_forever, daemon=True)
+                thread = threading.Thread(target=serve(server), daemon=True)
                 thread.start()
                 try:
                     request = urllib.request.Request(
@@ -73,7 +74,7 @@ class MangaGuiEndpointTests(unittest.TestCase):
                 return out
             with patch.object(gui, "EXPORT_MANGA_XML_PATH", output / "m.xml"),                  patch.object(gui, "EXPORT_MANGA_GZ_PATH", output / "m.xml.gz"),                  patch.object(gui, "resolve_many_entries", side_effect=fake):
                 server = ThreadingHTTPServer(("127.0.0.1", 0), gui.MalGuiHandler)
-                thread = threading.Thread(target=server.serve_forever, daemon=True)
+                thread = threading.Thread(target=serve(server), daemon=True)
                 thread.start()
                 try:
                     request = urllib.request.Request(

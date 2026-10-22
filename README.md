@@ -6,7 +6,7 @@
 
 [![Python](https://img.shields.io/badge/python-3.9%2B-3776AB?logo=python&logoColor=white)](https://www.python.org/)
 [![Dependencies](https://img.shields.io/badge/dependencies-zero-success)](requirements.txt)
-[![Tests](https://img.shields.io/badge/tests-333%20passing-success)](#-tests)
+[![Tests](https://img.shields.io/badge/tests-430%20passing-success)](#-tests)
 [![License](https://img.shields.io/badge/license-MIT-lightgrey)](LICENSE)
 
 </div>
@@ -99,10 +99,40 @@ python gui.py              # opens http://127.0.0.1:5000
 ### Resolving a list
 
 Paste titles (one per line), or drag a `.txt` file onto the box, or press `Ctrl/Cmd+Enter` to
-start. Numbering (`1.`, `2)`), bullets and surrounding quotes are stripped; `#` lines are ignored.
+start. Numbering (`1.`, `2)`, `1- `), bullets and surrounding quotes are stripped; `#` lines are
+ignored.
+
+A number that belongs to the title is left alone: `3-gatsu no Lion`, `5-toubun no Hanayome` and
+`07-Ghost` are searched whole. The rule is that a hyphen only counts as numbering when a space
+follows it, so `1- Berserk` is a list and `07-Ghost` is a title. Where a line *was* tidied up, the
+row shows what you actually typed, not the tidied version.
+
+**The rest of the line is read too.** Most importers need an export file from a tracker you
+already use; this one takes the list as you wrote it, including what you wrote next to each title:
+
+```
+Frieren 12/28 9/10 watching       Frieren, episode 12, scored 9, Watching
+Berserk - 374 ch - dropped        Berserk, chapter 374, Dropped
+Vinland Saga (completed) 8        Vinland Saga, Completed, scored 8
+Berserk, 3 vols, on hold          Berserk, 3 volumes, Paused
+Solo Leveling [ptw]               Solo Leveling, Plan to Watch
+```
+
+These beat the list-wide **Status** and **Score** controls, because they are about one title
+rather than all of them. Every value lands in an editable column, and the row shows the line it
+came from, so nothing changes out of sight.
+
+A bare number is never guessed at. `86`, `91 Days`, `7 Seeds`, `20th Century Boys` and
+`Attack on Titan 139` are searched exactly as written — a number needs a unit (`374 ch`), a
+denominator (`12/28`), or something else on the line to corroborate it before it means anything.
+`9/10` is a score; any other denominator is progress. If reading the line would leave a title
+ending in a stray number, the line is used as typed instead — a half-read line is worse than an
+unread one.
 
 Rows appear **as they resolve**, not at the end. A run can be **paused or cancelled**; a cancelled
-run writes no files and keeps whatever it already resolved.
+run writes no files, keeps whatever it already resolved, and **caches it** - so stopping at title
+250 of 300 does not make the next attempt pay for those 250 again. Closing the tab mid-run stops
+it too, rather than leaving it running against a window that is no longer there.
 
 Titles are resolved in batches of 8 per request. AniList allows 90 requests/minute (currently
 degraded to 30), and the pacing follows the rate-limit headers automatically, so a 339-title list
@@ -130,6 +160,15 @@ elsewhere.
   progress and dates, and moves to the next unmatched title.
 - Per-row **status** and **read/watched progress**, plus an expandable editor (`⋯`) for score,
   start and finish dates, tags and comments.
+- A **Needs review** chip collects the rows worth a second look, and each says why in its own
+  row - a candidate further down the list matched your title better, the title barely resembles
+  what you pasted, or AniList's best offer was a one-shot, an unreleased entry, or a lone
+  one-chapter fragment. The last three catch a match that won *by default*, which no similarity
+  score can see: a search returning a single poor entry has no runner-up to lose to.
+- A row whose title looks nothing like what you typed says **known alias** when AniList lists
+  your wording as another name for that entry. `First God Of War` resolves to `Di Yi Zhan Shen` —
+  the two share almost no characters, and AniList carries the first verbatim as a synonym of the
+  second, so it is right and is marked as right rather than flagged for review.
 - Sortable columns, status chips, text filter, and a 300-row cap with "Show all".
 - The window can be narrowed to a phone width: the table scrolls sideways rather than crushing the
   title column, and the action rows stack instead of running off the edge.
@@ -214,8 +253,12 @@ and both are measured rather than assumed ([measured live](MANGA_SUPPORT_NOTES.m
 Fields in that situation are labelled **"AniList sets this itself on this status change"**, so the
 confirm step never promises a change the API will quietly discard.
 
+**Save plan** keeps the diff as a JSON file before you send anything, overrides included — worth
+doing before a 300-row write.
+
 > [!TIP]
-> **Undo last write…** puts the account back the way it was. Every write first saves what it is
+> **Undo last write…** puts the account back the way it was. The five most recent writes are all
+> offered, labelled by media type and size, not just the last one. Every write first saves what it is
 > about to replace to `.aniexport_undo_<timestamp>.json` beside the cache — notes and dates
 > included, never the token — and the five most recent are kept. Entries the run *created* have no
 > previous state, so undoing those means deleting them: that is listed separately and happens only
@@ -265,6 +308,11 @@ What travels: status, score, progress, volumes, rereads, notes, start and finish
 `private`, `hidden from status lists` and `priority` flags — everything AniList will both hand
 back and accept.
 
+Scores travel **exactly**. AniList stores every score out of 100 whatever your account displays,
+so a score of 87 used to arrive as 90: the interface works in 0–10 and the write multiplied it
+back up. The precise value is now carried through untouched, and only replaced when you actually
+edit the score yourself.
+
 **Check** first. It names both accounts and, per media type, shows what will be added, what will
 be overwritten, and what the destination has that the source does not:
 
@@ -300,6 +348,10 @@ Three things cannot be copied, because AniList will not hand them back in a form
 you turn that off. Imported rows carry no AniList id until you resolve or search for them.
 
 ### Export files
+
+`Download CSV` writes the rows as a spreadsheet — title, both ids, status, score, progress,
+dates, tags, comments, and why anything was flagged — for when you want the data rather than an
+import file.
 
 `Download XML` / `Download .XML.GZ` serve the current selection as a normal browser download, so
 **your browser picks where the file goes** — the copy kept beside the script is a convenience, not
@@ -359,6 +411,11 @@ them), and titles that were not found at all.
   you pasted — `First God Of War` is really `Di Yi Zhan Shen`. What it does catch reliably is a
   match that scored *worse* on your title than one the ranker passed over. Some wrong matches are
   not detectable at all; check the picker on rows that matter.
+
+  What *is* now caught is the other shape of this failure: a match that won because nothing better
+  was offered. `Gotoubun No Hanayome` returns exactly one AniList hit — a one-shot of a single
+  chapter, not the 122-chapter series — and a tier that demotes one-shots has nothing to demote it
+  below. Those rows are flagged whatever they scored.
 - **An overwrite you confirm is still an overwrite.** The policy blocks a value going backwards,
   not a value going forwards: a row at chapter 300 replaces an account at 224 without comment,
   because that is an ordinary edit. The diff shows it either way.
@@ -384,7 +441,7 @@ Known defects, each with the code that causes them, are listed in
 python -m unittest discover -s tests -t .
 ```
 
-**333 tests** covering the XML builders, status and date handling, batched resolution, the disk
+**430 tests** (about eight seconds) covering the XML builders, status and date handling, batched resolution, the disk
 cache, candidate ranking, run control, the GUI event contract, the AniList write payloads, the
 conflict policy (one case per rule, including the blank-progress and score-zero cases that
 motivate it), the per-row diff, the undo snapshot and its restore and delete paths, retrying
@@ -397,6 +454,25 @@ stale claims about unbuilt features).
 
 The browser JavaScript is additionally syntax-checked, and the HTML template is scanned for
 backslash escapes that Python would consume before the browser ever sees them.
+
+## 🗂 Layout
+
+```
+gui.py                 local server and HTTP endpoints
+generate_mal_xml.py    AniList client, pacing, cache, resolvers, writes, CLI
+matching.py            which entry a pasted title meant
+titles.py              reading a pasted line
+malxml.py              the MyAnimeList XML builders
+static/index.html      the page
+static/app.css         its styles
+static/app/*.js        its behaviour, nine numbered sections joined in order
+tools/calibrate.py     tune the review thresholds against a real list
+tests/                 430 tests, no network
+```
+
+`static/index.html` links the stylesheet and script as ordinary files, so it opens in a browser on
+its own; the server inlines both so what you load is a **single response**. Editing the CSS or the
+script and refreshing is enough — no restart.
 
 ## 📚 Project docs
 

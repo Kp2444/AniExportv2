@@ -1,0 +1,487 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>AniExport &mdash; Universal XML Generator for MAL &amp; AniList</title>
+  <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24'%3E%3Crect width='24' height='24' rx='5' fill='%233FA796'/%3E%3Cpath d='M12 4 4 9l8 5 8-5-8-5zm-8 8 8 5 8-5' fill='none' stroke='white' stroke-width='2' stroke-linejoin='round'/%3E%3C/svg%3E">
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Figtree:wght@400;500;600;700&family=Fira+Code:wght@400;500&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="app.css">
+</head>
+<body>
+
+  <!-- Top App Navigation -->
+  <header>
+    <div class="brand">
+      <div class="brand-logo" aria-hidden="true">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round">
+          <polygon points="12 2 2 7 12 12 22 7 12 2"></polygon>
+          <polyline points="2 17 12 22 22 17"></polyline>
+          <polyline points="2 12 12 17 22 12"></polyline>
+        </svg>
+      </div>
+      <div>
+        <h1 class="brand-title">AniExport</h1>
+        <p class="brand-subtitle">Plain title lists &rarr; your AniList account, or a MAL-compatible XML file</p>
+      </div>
+    </div>
+
+    <div class="header-actions">
+      <button id="btnTheme" class="btn btn-secondary btn-xs" title="Switch color theme">Light mode</button>
+      <div class="badge" title="Universal XML format supported natively by MyAnimeList and AniList import">
+        <span class="badge-dot" aria-hidden="true"></span>
+        <span>MAL &amp; AniList Compatible</span>
+      </div>
+    </div>
+  </header>
+
+  <!-- Main View -->
+  <main>
+    <!-- Left Column: Plain text editor and parameters -->
+    <section class="panel">
+      <div class="panel-header">
+        <h2 class="panel-title">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+            <path d="M16 4h2a2 2 0 0 1 2 2v14a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2V6a2 2 0 0 1 2-2h2"></path>
+            <rect x="8" y="2" width="8" height="4" rx="1" ry="1"></rect>
+          </svg>
+          <span id="listPanelTitle">Paste Anime List</span>
+        </h2>
+        <div style="display:flex; gap:0.375rem;">
+          <button id="btnSample" class="btn btn-secondary btn-xs" title="Load sample list">
+            Sample
+          </button>
+          <button id="btnClear" class="btn btn-secondary btn-xs" title="Clear text area">
+            Clear
+          </button>
+        </div>
+      </div>
+
+      <div class="panel-body">
+        <div>
+          <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:0.375rem;">
+            <label for="animeTextInput" style="margin-bottom:0;">Paste your list (one title per line):</label>
+            <button id="btnImport" class="btn btn-secondary btn-xs" title="Load an existing MyAnimeList XML export">Import XML</button>
+          <input type="file" id="importFile" accept=".xml,.gz" style="display:none;">
+          <button id="btnPaste" class="btn btn-secondary btn-xs" title="Paste clipboard content">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="width:12px; height:12px;">
+                <path d="M16 4h2a2 2 0 0 1 2 2v14a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2V6a2 2 0 0 1 2-2h2"></path>
+                <rect x="8" y="2" width="8" height="4" rx="1" ry="1"></rect>
+              </svg>
+              Paste
+            </button>
+          </div>
+          <div class="textarea-wrapper">
+            <textarea id="animeTextInput" spellcheck="false" placeholder="Paste anime titles here (one per line):&#10;&#10;Sousou no Frieren&#10;Attack on Titan&#10;Solo Leveling&#10;Dandadan&#10;Chainsaw Man&#10;..."></textarea>
+            <div class="line-counter">
+              <span id="lineCountLabel">0 titles</span>
+              <span style="font-size:0.6875rem;">Strips numbering and bullets</span>
+            </div>
+          </div>
+        </div>
+
+        <div id="anilistPanel" class="anilist-panel">
+          <label for="anilistToken">AniList access token:</label>
+          <div class="token-row">
+            <input type="password" id="anilistToken" class="token-input" autocomplete="off"
+                   spellcheck="false" placeholder="Paste your token (kept in this tab only)">
+            <button id="btnTokenTest" class="btn btn-secondary btn-xs">Check</button>
+          </div>
+          <span id="tokenStatus" class="token-status">Not connected. The token is held in this
+            browser tab only: never saved to disk, never written to the export files.</span>
+        </div>
+
+        <div id="destinationPrompt" class="destination-prompt">
+          <strong>Where is this list going?</strong>
+          <span>AniList can take titles that MyAnimeList has never heard of. Pick once; change it any time.</span>
+          <div class="destination-choice">
+            <button class="btn btn-primary btn-xs" data-destination="anilist">AniList (direct)</button>
+            <button class="btn btn-secondary btn-xs" data-destination="xml">MAL-compatible XML</button>
+          </div>
+        </div>
+
+        <div id="destinationField">
+          <label for="destination">Importing into:</label>
+          <select id="destination">
+            <option value="">Choose a destination...</option>
+            <option value="anilist">AniList (direct)</option>
+            <option value="xml">MAL-compatible XML file</option>
+          </select>
+        </div>
+
+        <div>
+          <label for="mediaType">Media Type:</label>
+          <select id="mediaType">
+            <option value="anime" selected>Anime</option>
+            <option value="manga">Manga</option>
+          </select>
+        </div>
+
+        <div class="input-grid">
+          <div>
+            <label for="selectStatus">List Status:</label>
+            <select id="selectStatus">
+              <option value="Watching">Watching</option>
+              <option value="Plan to watch">Plan to watch</option>
+              <option value="Completed" selected>Completed</option>
+              <option value="Rewatching">Rewatching</option>
+              <option value="Paused">Paused</option>
+              <option value="Dropped">Dropped</option>
+            </select>
+            <span class="bulk-scope"></span>
+          </div>
+          <div>
+            <label for="inputScore">Score (0-10):</label>
+            <input type="number" id="inputScore" min="0" max="10" value="0" placeholder="0 = Unscored">
+            <span class="bulk-scope"></span>
+          </div>
+        </div>
+
+        <div class="toggle-card">
+          <label class="toggle-control" for="addUnmatchedImports">
+            <input type="checkbox" id="addUnmatchedImports" checked>
+            <span class="toggle-switch" aria-hidden="true"></span>
+            <span class="toggle-info">
+              <span class="toggle-title">Add imported entries not in my list</span>
+              <span class="toggle-desc">Off: an imported XML only updates rows you already have</span>
+            </span>
+          </label>
+        </div>
+
+        <div class="toggle-card">
+          <label class="toggle-control" for="toggleFresh">
+            <input type="checkbox" id="toggleFresh">
+            <span class="toggle-switch" aria-hidden="true"></span>
+            <span class="toggle-info">
+              <span class="toggle-title">Ignore saved results</span>
+              <span class="toggle-desc">Ask AniList again instead of reusing the 7-day cache</span>
+            </span>
+          </label>
+        </div>
+
+        <div class="toggle-card">
+          <label class="toggle-control" for="toggleArchive">
+            <input type="checkbox" id="toggleArchive">
+            <span class="toggle-switch" aria-hidden="true"></span>
+            <span class="toggle-info">
+              <span class="toggle-title">Keep timestamped copies</span>
+              <span class="toggle-desc">Also saves a dated copy on every write</span>
+            </span>
+          </label>
+        </div>
+
+        <div class="toggle-card">
+          <label class="toggle-control" for="toggleSequels">
+            <input type="checkbox" id="toggleSequels">
+            <span class="toggle-switch" aria-hidden="true"></span>
+            <span class="toggle-info">
+              <span class="toggle-title">Auto-expand sequels &amp; movies</span>
+              <span class="toggle-desc">Automatically detects subsequent seasons and sequel movies</span>
+            </span>
+          </label>
+        </div>
+      </div>
+
+      <div class="panel-footer" style="justify-content:flex-end;">
+        <button id="btnProcess" class="btn btn-primary" style="width:100%;">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+            <polygon points="5 3 19 12 5 21 5 3"></polygon>
+          </svg>
+          <span id="btnProcessLabel">Normalize &amp; Generate XML</span>
+        </button>
+      </div>
+    </section>
+
+    <!-- Right Column: Quick Status Banner and Results Preview -->
+    <div style="display:flex; flex-direction:column; gap:1.25rem;">
+      
+      <!-- Top Card: Download Actions & Ready Status -->
+      <section class="export-card">
+        <div class="export-info">
+          <h3 id="exportHeadline">Export Pending</h3>
+          <p id="exportSubline">Paste your anime list on the left to begin.</p>
+          <div style="margin-top:0.375rem; display:flex; gap:0.875rem; font-size:0.75rem;">
+            <a href="https://myanimelist.net/import.php" target="_blank" rel="noopener noreferrer" class="text-link" title="Open MyAnimeList Import page">
+              <span>MyAnimeList Import</span>
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="width:11px; height:11px;"><path d="M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6"></path><polyline points="15 3 21 3 21 9"></polyline><line x1="10" y1="14" x2="21" y2="3"></line></svg>
+            </a>
+            <a href="https://anilist.co/settings/import" target="_blank" rel="noopener noreferrer" class="text-link" title="Open AniList Import page">
+              <span>AniList Import</span>
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="width:11px; height:11px;"><path d="M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6"></path><polyline points="15 3 21 3 21 9"></polyline><line x1="10" y1="14" x2="21" y2="3"></line></svg>
+            </a>
+          </div>
+        </div>
+        <div class="export-buttons">
+          <button id="btnWrite" class="btn btn-primary" title="Write the selected rows to your AniList account">Write to AniList...</button>
+          <button id="btnCopyAccount" class="btn btn-secondary" style="display:none;"
+                  title="Copy another AniList account's anime and manga onto the account whose token is above">Copy an account...</button>
+          <button id="btnAniListImport" class="btn btn-secondary" style="display:none;"
+                  title="Read a list straight from AniList instead of pasting titles">From AniList...</button>
+          <button id="btnUndo" class="btn btn-secondary" style="display:none;"
+                  title="Put your AniList account back the way it was before the last write">Undo last write...</button>
+          <button id="btnRetry" class="btn btn-secondary" style="display:none;"
+                  title="Send the rows that failed again">Retry failed</button>
+          <button id="btnPreview" class="btn btn-secondary" title="Show the generated XML">Preview XML</button>
+          <a id="btnDownloadXml" href="/api/download/xml" class="btn btn-secondary disabled" aria-disabled="true" download="myanimelist_export.xml">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+              <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"></path>
+              <polyline points="7 10 12 15 17 10"></polyline>
+              <line x1="12" y1="15" x2="12" y2="3"></line>
+            </svg>
+            Download XML
+          </a>
+          <button id="btnDownloadCsv" class="btn btn-secondary btn-quiet">Download CSV</button>
+          <a id="btnDownloadGz" href="/api/download/gz" class="btn btn-primary disabled" aria-disabled="true" download="myanimelist_export.xml.gz">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+              <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"></path>
+              <polyline points="7 10 12 15 17 10"></polyline>
+              <line x1="12" y1="15" x2="12" y2="3"></line>
+            </svg>
+            Download .XML.GZ
+          </a>
+        </div>
+      </section>
+
+      <!-- Summary line: four numbers do not need four cards -->
+      <div class="stats-strip">
+        <div class="stat-box">
+          <span class="stat-label">Total Entries</span>
+          <span id="statTotal" class="stat-value">0</span>
+        </div>
+        <div class="stat-box">
+          <span class="stat-label">Included in Export</span>
+          <span id="statNormalized" class="stat-value">0</span>
+        </div>
+        <div class="stat-box">
+          <span class="stat-label">Total Episodes / Chapters</span>
+          <span id="statEpisodes" class="stat-value">0</span>
+        </div>
+        <div class="stat-box">
+          <span class="stat-label">XML Status</span>
+          <span id="statXmlValid" class="stat-value">Not Generated</span>
+        </div>
+      </div>
+
+      <!-- Live Progress Card -->
+      <section id="progressCard" class="progress-card" style="display: none;">
+        <div class="progress-card-header">
+          <div class="progress-card-status">
+            <span class="progress-spinner" aria-hidden="true"></span>
+            <div style="min-width: 0;">
+              <div id="progressCurrentTitle" class="progress-current-title">Starting normalization...</div>
+              <div id="progressCurrentSub" class="progress-current-sub">Connecting to AniList GraphQL...</div>
+            </div>
+          </div>
+          <div class="progress-badge-group">
+            <span id="progressCountLabel" class="progress-count-pill">0 / 0</span>
+            <span id="progressPercentLabel" class="progress-percent-pill">0%</span>
+            <span id="etaLabel" class="progress-count-pill"></span>
+          </div>
+        </div>
+        <div class="progress-track" role="progressbar" aria-valuenow="0" aria-valuemin="0" aria-valuemax="100">
+          <div id="progressBarFill" class="progress-fill"></div>
+        </div>
+        <div id="runControls" class="run-controls">
+          <button id="btnPause" class="btn btn-secondary" style="flex:1;">Pause</button>
+          <button id="btnCancel" class="btn btn-secondary" style="flex:1;">Cancel run</button>
+        </div>
+      </section>
+
+      <div id="fixModal" class="modal-backdrop" role="dialog" aria-modal="true"
+           aria-labelledby="fixModalTitle">
+        <div class="modal-card fix-card">
+          <div class="modal-head">
+            <strong id="fixModalTitle">Fix unmatched titles</strong>
+            <span id="fixCounter" class="fix-counter"></span>
+            <span style="flex:1;"></span>
+            <button id="btnFixBack" class="btn btn-secondary">Back</button>
+            <button id="btnFixSkip" class="btn btn-secondary">Skip</button>
+            <button id="btnFixClose" class="btn btn-secondary">Done</button>
+          </div>
+          <div class="fix-body">
+            <div class="fix-original">You pasted: <strong id="fixOriginal"></strong></div>
+            <div class="fix-search">
+              <input type="text" id="fixQuery" class="token-input"
+                     placeholder="Title, AniList id, MAL id, or a pasted anilist.co / myanimelist.net link"
+                     aria-label="Search for a match">
+              <select id="fixIdKind" aria-label="What a bare number means">
+                <option value="">Number: either id</option>
+                <option value="anilist">Number: AniList id</option>
+                <option value="mal">Number: MAL id</option>
+              </select>
+              <button id="btnFixSearch" class="btn btn-primary">Search</button>
+            </div>
+            <div id="fixResults" class="fix-results"></div>
+          </div>
+        </div>
+      </div>
+
+      <div id="writeModal" class="modal-backdrop" role="dialog" aria-modal="true"
+           aria-labelledby="writeModalTitle">
+        <div class="modal-card write-card">
+          <div class="modal-head">
+            <strong id="writeModalTitle">Write to AniList</strong>
+            <span style="flex:1;"></span>
+            <button id="btnWritePlanSave" class="btn btn-secondary btn-xs">Save plan</button>
+            <button id="btnWriteCancel" class="btn btn-secondary">Cancel</button>
+            <button id="btnWriteConfirm" class="btn btn-primary">Write now</button>
+          </div>
+          <div id="writePlan" class="write-plan"></div>
+        </div>
+      </div>
+
+      <div id="copyModal" class="modal-backdrop" role="dialog" aria-modal="true"
+           aria-labelledby="copyModalTitle">
+        <div class="modal-card write-card">
+          <div class="modal-head">
+            <strong id="copyModalTitle">Copy an AniList account</strong>
+            <span style="flex:1;"></span>
+            <button id="btnCopyCancel" class="btn btn-secondary">Cancel</button>
+            <button id="btnCopyCheck" class="btn btn-secondary">Check</button>
+            <button id="btnCopyRun" class="btn btn-primary" disabled>Copy now</button>
+          </div>
+          <div class="write-plan">
+            <div>Reads <strong>every anime and every manga</strong> from the account below and
+              writes them to the account whose token is in the AniList panel - status, score,
+              progress, volumes, rereads, notes, start and finish dates, and the private,
+              hidden and priority flags.</div>
+            <label for="copySourceUser">Copy from this AniList username</label>
+            <input type="text" id="copySourceUser" class="token-input" placeholder="e.g. Razed2Ground"
+                   autocomplete="off" spellcheck="false">
+            <div class="warn">The destination is whoever the token above belongs to. Check first -
+              it names both accounts before anything is written.</div>
+            <div id="copyPlan" class="write-plan"></div>
+            <div class="warn">Where both accounts already have a title, <strong>the source
+              wins</strong>, including values that go backwards. Entries the destination has and
+              the source does not are left alone: nothing here deletes. Every run is saved so it
+              can be undone.</div>
+          </div>
+        </div>
+      </div>
+
+      <div id="listImportModal" class="modal-backdrop" role="dialog" aria-modal="true"
+           aria-labelledby="listImportTitle">
+        <div class="modal-card write-card">
+          <div class="modal-head">
+            <strong id="listImportTitle">Import from AniList</strong>
+            <span style="flex:1;"></span>
+            <button id="btnListImportCancel" class="btn btn-secondary">Cancel</button>
+            <button id="btnListImportGo" class="btn btn-primary">Read list</button>
+          </div>
+          <div class="write-plan">
+            <div>Reads an existing AniList list and brings the rows in - status, score,
+              progress, notes and dates. Nothing is written to any account.</div>
+            <label for="listImportUser">AniList username</label>
+            <input type="text" id="listImportUser" placeholder="e.g. Razed2Ground"
+                   class="token-input" autocomplete="off" spellcheck="false">
+            <div>Leave it blank to read <strong>your own</strong> list using the token above,
+              which is the only way to read a private list.</div>
+            <div id="listImportStatus" class="token-status"></div>
+          </div>
+        </div>
+      </div>
+
+      <div id="undoModal" class="modal-backdrop" role="dialog" aria-modal="true"
+           aria-labelledby="undoModalTitle">
+        <div class="modal-card write-card">
+          <div class="modal-head">
+            <strong id="undoModalTitle">Undo the last AniList write</strong>
+            <span style="flex:1;"></span>
+            <button id="btnUndoCancel" class="btn btn-secondary">Cancel</button>
+            <button id="btnUndoConfirm" class="btn btn-primary">Undo now</button>
+          </div>
+          <div id="undoPlan" class="write-plan"></div>
+          <label for="undoSnapshot" id="undoSnapshotLabel" style="display:none;">Undo which write</label>
+          <select id="undoSnapshot" style="display:none;"></select>
+        </div>
+      </div>
+
+      <div id="previewModal" class="modal-backdrop" role="dialog" aria-modal="true"
+           aria-labelledby="previewTitle">
+        <div class="modal-card">
+          <div class="modal-head">
+            <strong id="previewTitle">Export preview</strong>
+            <span style="flex:1;"></span>
+            <button id="btnPreviewCopy" class="btn btn-secondary">Copy</button>
+            <button id="btnPreviewClose" class="btn btn-secondary">Close</button>
+          </div>
+          <pre id="previewBody"></pre>
+        </div>
+      </div>
+
+      <!-- Table Panel -->
+      <section class="table-panel">
+        <div class="table-toolbar">
+          <div class="search-input-wrapper">
+            <svg class="search-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+              <circle cx="11" cy="11" r="8"></circle>
+              <line x1="21" y1="21" x2="16.65" y2="16.65"></line>
+            </svg>
+            <input type="text" id="searchInput" aria-label="Filter rows"
+                  placeholder="Filter by title, MAL ID, or AniList ID...">
+          </div>
+          <div id="chipRow" class="chip-row"></div>
+          <div class="toolbar-end">
+            <span id="filterCountLabel" class="filter-count">Showing 0</span>
+            <button id="btnRemember" class="btn btn-secondary btn-xs"
+                    title="Skip the rows you have unchecked in future lists too, not just this one">Always skip unchecked</button>
+            <button id="btnForgetIgnored" class="btn btn-secondary btn-xs" style="display:none;"
+                    title="Stop skipping the remembered titles">Forget 0 skipped</button>
+            <button id="btnReset" class="btn btn-secondary btn-xs" title="Clear the saved session and start from an empty list">Start over</button>
+          </div>
+        </div>
+        <div id="unresolvedBar" class="unresolved-bar">
+          <span id="unresolvedText"></span>
+          <button id="btnFixUnmatched" class="btn btn-primary btn-xs">Fix unmatched</button>
+          <button id="btnCopyUnresolved" class="btn btn-secondary btn-xs">Copy unmatched</button>
+        </div>
+
+        <div class="table-wrapper">
+          <table id="animeTable">
+            <thead>
+              <tr>
+                <th scope="col" style="width: 42px; text-align: center;">
+                  <input type="checkbox" id="selectAllCheckbox" class="table-checkbox" checked
+                         aria-label="Select or deselect every shown row" title="Select/Deselect all">
+                </th>
+                <th scope="col" class="sortable" data-sort="title" tabindex="0" aria-sort="none">Title<span class="sort-mark"></span></th>
+                <th scope="col" style="width: 104px;" class="sortable" data-sort="type"
+                    tabindex="0" aria-sort="none">Type<span class="sort-mark"></span></th>
+                <th scope="col" style="width: 158px;" id="countColumnHeading" class="sortable" data-sort="count"
+                    tabindex="0" aria-sort="none">Episodes<span class="sort-mark"></span></th>
+                <th scope="col" style="width: 132px;" class="sortable" data-sort="status"
+                    tabindex="0" aria-sort="none">Status<span class="sort-mark"></span></th>
+                <th scope="col" style="width: 40px;" aria-label="More fields"></th>
+              </tr>
+            </thead>
+            <tbody id="tableBody">
+              <!-- Dynamically rendered rows -->
+            </tbody>
+          </table>
+
+          <div id="rowCapNotice" style="display:none; padding:0.625rem 1rem; font-size:0.75rem; color:var(--text-muted); border-top:1px solid var(--border);"></div>
+          <div id="emptyTableState" class="empty-state">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
+              <circle cx="12" cy="12" r="10"></circle>
+              <line x1="12" y1="8" x2="12" y2="12"></line>
+              <line x1="12" y1="16" x2="12.01" y2="16"></line>
+            </svg>
+            <h4>No titles processed yet</h4>
+            <p>Paste your list of titles on the left and press <strong id="emptyStateAction">Normalize &amp; Generate XML</strong>.</p>
+          </div>
+        </div>
+      </section>
+
+    </div>
+  </main>
+
+  <!-- Toast -->
+  <div id="toast" class="toast">
+    <span id="toastMessage">Action completed</span>
+  </div>
+
+  <script src="app.js"></script>
+</body>
+</html>
