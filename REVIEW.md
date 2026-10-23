@@ -6,17 +6,19 @@ A read of both modules end to end, the test suite, and the README, plus live pro
 Findings are labelled **R1–R28** so code comments and commits can cite them, the same way the
 engineering notes cite their E/L/M/P evidence labels.
 
-> **Status, 2026-10-21.** Everything here has **shipped** with tests except **R24** (needs a
-> decision from you) and **R28** (needs an API assumption verified). `gui.py` is **1,529 lines,
-> down from 6,662**; `generate_mal_xml.py` is 2,412 from 3,042; the 3,023-line script is nine
-> numbered sections. The suite is 430 tests in about eight seconds, from 333 in fifty-nine. The
-> review's own headline recommendation was **measured and rejected**; the half of it that survived
-> shipped as R13 — see [The matching question](#-the-matching-question).
+> **Status, 2026-10-22.** Every numbered finding has **shipped** with tests except **R24** and
+> **R28**, both of which need a decision only you can make. `gui.py` is **1,610 lines, down from
+> 6,662**; `generate_mal_xml.py` is 2,419 from 3,042; the script is ten numbered sections. The
+> suite is **466 tests** in about nine seconds, from 333 in fifty-nine. The review's own headline
+> recommendation was **measured and rejected**; the half of it that survived shipped as R13 — see
+> [The matching question](#-the-matching-question).
 >
-> **This covers the numbered findings only.** The unnumbered sections below —
-> [UI and UX](#-ui-and-ux), [Positioning](#-positioning) and [Housekeeping](#-housekeeping) — are
-> largely **not done**; each item there now carries its own mark. What is left is listed under
-> [Still to do](#-still-to-do).
+> **The unnumbered sections are now closed too.** [UI and UX](#-ui-and-ux) and
+> [Positioning](#-positioning) are done; [Housekeeping](#-housekeeping) is done except
+> `pyproject.toml`, where the item as written turned out to be **wrong** and the measurement is
+> recorded in place. **R15** is also settled, against the live API, and the documentation it
+> contradicted has been corrected. What is left is listed under [Still to do](#-still-to-do) —
+> three items, each blocked on a decision rather than on work.
 
 Every claim below is marked:
 
@@ -74,10 +76,10 @@ Shape when this review was written, and now:
 
 | File | Was | Now |
 |---|---|---|
-| `gui.py` | 6,660, of which **5,127 were one string literal** | **1,583** |
-| `generate_mal_xml.py` | 2,931, five jobs in one file | **2,412**, plus `matching.py` 424, `malxml.py` 275, `titles.py` 259 |
-| the page | inside that literal | `static/index.html` 486, `static/app.css` 1,857, `static/app/*.js` nine sections |
-| `tests/` | 344 tests, 59 s | **430 tests, ~9 s**, still no outbound network |
+| `gui.py` | 6,660, of which **5,127 were one string literal** | **1,610** |
+| `generate_mal_xml.py` | 2,931, five jobs in one file | **2,419**, plus `matching.py` 424, `malxml.py` 275, `titles.py` 259 |
+| the page | inside that literal | `static/index.html` 578, `static/app.css` 1,021, `static/app/*.js` **ten** sections, 3,599 lines |
+| `tests/` | 344 tests, 59 s | **466 tests, ~9 s**, still no outbound network — plus `tests/js`, run by node through `tests/test_js_behaviour.py` |
 
 ---
 
@@ -327,11 +329,29 @@ from the scratchpad, and `git log --all -- '*calibrate*'` is empty — it was ne
 change in this area needs it rebuilt first, and needs to be judged on a **before/after diff of
 which rows changed pick**, not on an aggregate flag percentage.
 
-**R15 — a documented defect may not be one.** `MANGA_SUPPORT_NOTES.md` and the README's Limitations
-section both cite *"I Am Being Chased To Fall In Love Everyday" → "Forced to Date with BOSS
-Everyday"* as the canonical undetectable wrong match. AniList lists the pasted title verbatim as a
-synonym of that entry. That is strong evidence the match is **correct** and the documented defect
-should be re-checked before it stays in the docs.
+**R15 — a documented defect was not one. Settled 2026-10-22.** `MANGA_SUPPORT_NOTES.md` cited
+*"I Am Being Chased To Fall In Love Everyday" → "Forced to Date with BOSS Everyday"* as the
+canonical undetectable wrong match.
+
+**measured.** A live unauthenticated search for the pasted line returns exactly one candidate,
+AniList id **192823**, whose three synonyms include the pasted line verbatim:
+
+```
+id 192823 | idMal None | ch 86
+  romaji  : Meitian Beipo He Dalao Tanlianai
+  english : Forced to Date with BOSS Everyday
+  synonyms: ['Forced to Fall in Love With the Boss Every Day',
+             'I Am Being Chased to Fall in Love Everyday',
+             '<native title>']
+  exact synonym for the pasted line: True
+```
+
+The match is **correct**, and always was. `matching._alias_hit` returns `True` for it, so the row
+the notes called invisible now carries a **known alias** badge — R13 closed this case without
+anyone noticing it had been filed as a defect. The note in `MANGA_SUPPORT_NOTES.md` has been
+corrected in place rather than deleted, and **no replacement example has been measured**: the
+claim that some wrong matches are undetectable may well still hold, but this row was not evidence
+for it.
 
 ---
 
@@ -534,10 +554,11 @@ a file first. **This depends on an unverified assumption — see below.**
 
 - [x] **no action needed** - the 300-row cap with **Show all** is the right call. Do not add
   virtualisation until someone complains; R17 has since landed if the cap ever rises.
-- [ ] **not done** - **a `?` shortcut sheet.** Shift-click ranges, arrow navigation,
-  space-to-toggle and Ctrl+Enter all exist and none of it is discoverable.
-- [ ] **not done** - **lead the empty state with the destination question.** It is already asked;
-  it still sits below the paste box.
+- [x] **done** (2026-10-22 redesign) - **a `?` shortcut sheet.** `?` or **Keys** above the table
+  opens it; it lists shift-click ranges, arrow navigation, space-to-toggle and Ctrl+Enter.
+- [x] **done** (2026-10-22 redesign) - **lead the empty state with the destination question.** The
+  Source step now asks it above the paste box, and Resolve will not start until it is answered,
+  because the server ranks candidates differently per destination.
 - [x] **no action needed** - accessibility is already strong: focus management, dialog roles,
   scoped headers, `prefers-reduced-motion`. Keep the `CascadeOrderTests` guard; it caught a real
   regression.
@@ -549,14 +570,13 @@ a file first. **This depends on an unverified assumption — see below.**
 The README leads with *Resolves / Reviews / Delivers*, which describes every importer ever written.
 What is actually distinctive, in order:
 
-1. [ ] **not done** - **it starts from a human list.** Most alternatives need an export file from
-   a tracker you already use. That is the category difference, and it belongs in the first line.
-   R23 made it *more* true - the line's status, score and progress are read too - without the
-   lead changing.
-2. [ ] **not done** - **it shows the diff and can undo it.** Telling you *"episodes 224 → 142"*
-   before sending, flagging where AniList will overrule you, and putting the account back after.
-3. [ ] **not done** - **measured, not assumed.** `MANGA_SUPPORT_NOTES.md` is a credibility asset.
-   Link it from the top, not only from Limitations.
+1. [x] **done** (2026-10-22) - **it starts from a human list.** The tagline is now *"Start from
+   the list you already wrote - not an export file from a tracker you already use"*, and the
+   opening paragraph leads with the category difference and R23's line parsing.
+2. [x] **done** (2026-10-22) - **it shows the diff and can undo it.** Second of the three
+   columns, quoting *"episodes 224 → 142"* and the snapshot.
+3. [x] **done** (2026-10-22) - **measured, not assumed.** Third column, linking
+   `MANGA_SUPPORT_NOTES.md` from the top of the README rather than only from Limitations.
 
 Claim 1 was originally written here as "no other importer takes a human list". That is a
 competitive absolute this review cannot substantiate — keep the positioning, drop the absolute.
@@ -565,23 +585,47 @@ competitive absolute this review cannot substantiate — keep the positioning, d
 
 ## 🧹 Housekeeping
 
-- [ ] **not done, and the item with a deadline on it.** **The JavaScript tests live in a temp
-  directory.** Three files (`test_diff.js`, `test_card.js`, `test_skiplist.js`, 41 `assert` lines
-  between them) exist only in a session scratchpad and go when it is cleaned up. Move them to
-  `tests/js/` with a documented `node` entry point. This is real coverage that disappears on its
-  own if nobody acts.
+- [x] **done** (2026-10-22) - **the JavaScript tests are in the repo.** `tests/js/` with
+  `run.js` as the entry point (`node tests/js/run.js`) and `tests/test_js_behaviour.py` wiring it
+  into `python -m unittest`, skipped rather than failed when node is absent. **111 assertions**
+  across the write diff, the candidate card and the skip list.
+
+  They no longer run against hand-made copies: `tests/js/extract.js` pulls the 19 functions out of
+  `static/app/*.js` at run time and **throws** if a name is renamed, moved or deleted, so a rename
+  is a failure rather than a suite that quietly tests nothing. That failure path has its own test.
 - [x] **done** - **`calibrate.py` was already lost** (R14). Rebuilt as `tools/calibrate.py`, with
   `tests/test_calibrate.py` beside it.
-- [ ] **not done** - **no CI.** 430 tests, zero dependencies, ~9 s after R16. A 20-line GitHub
-  Action is worth having. The only Python 3.9 risk found is `tuple[Path, Path, int]`, which
-  `from __future__ import annotations` neutralises - so 3.9 *probably* passes, and "probably" is
-  precisely why the matrix is worth adding. Do not promise it green before it runs.
+- [x] **written, and deliberately not called green** (2026-10-22) -
+  `.github/workflows/tests.yml`, matrixed over Python 3.9 / 3.12 / 3.13 on Ubuntu and Windows,
+  with node for `tests/js`. **It has not run**: that needs a push, so its status is unknown and is
+  not claimed here.
+
+  A static check supports 3.9 without settling it - every module carries
+  `from __future__ import annotations`, there are no `match` statements or other 3.10+ syntax, and
+  every stdlib module used exists in 3.9. That is an argument, which is exactly why the matrix is
+  there.
 - [x] **done** - the README test count is current in both the badge and the Tests section, though
   it is still a hand-maintained number rather than pinned to the command.
-- [ ] **not done** - **no version anywhere**, and the `User-Agent` still reads
-  `MALAnimeExporter/2.0`, a different product name. It is sent on every AniList request.
-- [ ] **not done** - **a 15-line `pyproject.toml`** with a console script gives `pipx install` /
-  `uvx` → `aniexport`. With zero dependencies that is the cheapest distribution win available.
+- [x] **done** (2026-10-22) - `generate_mal_xml.__version__` is the single source, and
+  `USER_AGENT` is built from it as `AniExport/2.0.0 (+<the repo URL>)` - a contactable name for an
+  unauthenticated public API. Both entry points answer `--version`, and `VersionTests` fails if
+  `MALAnimeExporter` reappears in either file.
+- [ ] **not done, and the item as written is wrong** (measured 2026-10-22). A 15-line
+  `pyproject.toml` with `py-modules` **does not work here**: built as a wheel it carries the five
+  modules and **zero** files from `static/`, so the installed `aniexport` would start a server with
+  no page to serve. The page is a directory, not a module, and `py-modules` wheels carry no data.
+
+  Three options, each built rather than reasoned about:
+
+  | Option | Result | Cost |
+  |---|---|---|
+  | `py-modules` only, as the item describes | wheel built, **0** static files | broken install |
+  | plus `packages = ["static", "static.app"]` | **works** - 12 static files, and the installed `aniexport -p 5321` served the real 253,513-byte page | claims the generic top-level name `static` in site-packages: harmless under `pipx`/`uvx`, a real collision hazard under `pip install` into a shared environment |
+  | restructure into an `aniexport/` package with `static/` inside | the correct answer | moves five modules and **21 import lines across 13 test files**, and weakens the README's "two copyable files" framing |
+
+  **Not shipped, because this is a distribution decision rather than a defect.** Clone and
+  `python gui.py` already works with no install step, so the marginal value is modest and the
+  right fix is the restructure, not a wheel that pollutes the namespace.
 
 ---
 
@@ -612,7 +656,7 @@ competitive absolute this review cannot substantiate — keep the positioning, d
 | **R21** | the body is bounded before it is read | `RequestSizeTests` |
 | **R22** | the DOCTYPE scan covers the whole document | `DoctypeScanTests` |
 | **R4** | the retry pass varies hyphenation (`07-Ghost` → `07 Ghost`, `07Ghost`) | `SearchVariantTests`; the insertion direction stays out of reach and is R3's job |
-| **R18** | the template lifted into `static/`, `gui.py` 6,662 → **1,529** lines | reassembly is byte-identical to the old literal, asserted both ways before anything was written |
+| **R18** | the template lifted into `static/`, `gui.py` 6,662 → **1,610** lines | reassembly is byte-identical to the old literal, asserted both ways before anything was written |
 | **R14** | `tools/calibrate.py` rebuilt, with the pick diff as its headline | `tests/test_calibrate.py`, no network |
 | **R13** | the exact-alias boolean, clearing a low-ratio flag but not a won-by-default one | `AliasHitTests`; on the real list 8 of 12 rows are alias hits and 1 was being falsely flagged |
 | **R23** | the whole line is read — status, score, progress, volumes | `LineParsingTests` + `LineFieldTests`; a bare number is never believed on its own, and a half-read line is abandoned whole |
@@ -620,7 +664,7 @@ competitive absolute this review cannot substantiate — keep the positioning, d
 | **R26** | all five undo snapshots, labelled by media type, delete box following the choice | the page read `[0]` and left four unreachable |
 | **R27** | **Download CSV**, built in the browser | formula-injection guard and a UTF-8 BOM, both verified on real bytes |
 | **R17** | one definition of the "Showing N of M" line | it flipped from 300 to 2000 on any toggle above the row cap; the quadratic `indexOf` went too, worth ~0 ms at realistic sizes |
-| **R19** | the script in nine numbered sections, rejoined byte for byte | each section parses alone; ES modules measured and deferred — see below |
+| **R19** | the script in ten numbered sections, rejoined byte for byte | each section parses alone; ES modules measured and deferred — see below |
 | **R20** | `matching.py`, `titles.py`, `malxml.py` split out | only code that touches no network and is never patched; the import list is explicit because `import *` skips underscored names |
 
 Two notes on how these were checked, both of which changed the work:
@@ -663,11 +707,15 @@ Two notes on how these were checked, both of which changed the work:
 
 ## 🚧 Still to do
 
+Everything that could be settled by doing the work, or by measuring, has been. These three cannot:
+each needs a decision from you, not an afternoon.
+
 | # | Item | Blocked on |
 |---|---|---|
 | **R24** | ship a public AniList client id | **your call** — the client would be registered under one account and carry everyone's traffic, and a revocation would break every install at once |
-| **R28** | MAL username import | the API assumption in [Unverified](#-unverified--do-not-plan-on-these-yet) |
-| *(R19, second half)* | real ES modules for the script | ~15 mutable top-level bindings moving behind a state object, ~200 call sites, on the write path. Deliberately not bundled with the file split |
+| **R28** | MAL username import | **your call** — settling the API question needs one request with a real client id, and a client id is tied to a MAL account. See [what was tried](#what-was-tried-for-r28) |
+| *(packaging)* | `pyproject.toml` | **your call** — the three measured options are in [Housekeeping](#-housekeeping); the correct one is a package restructure, not a 15-line file |
+| *(R19, second half)* | real ES modules for the script | ~15 mutable top-level bindings moving behind a state object, ~200 call sites, on the write path. Deliberately not bundled with the file split; best done *inside* a feature that already touches that code rather than as a standalone refactor |
 
 ### What was tried, for R28
 

@@ -1,6 +1,8 @@
     // One merge for both importers: a MAL export file and an AniList list
     // arrive in the same shape, and a second copy of this would drift.
     function mergeImported(payload) {
+      // An import lands rows, so the source folds and the table takes over.
+      sourceOpen = false;
       if (payload.media_type !== mediaType()) {
         mediaTypeSelect.value = payload.media_type;
         updateMediaTypeUI();            // keep the rows; only the labels change
@@ -216,21 +218,14 @@
       }
     });
 
-    btnAniListImport.addEventListener('click', () => {
-      listImportStatus.textContent = '';
-      listImportStatus.className = 'token-status';
-      showModal(listImportModal);
-    });
-    btnListImportCancel.addEventListener('click', () => hideModal(listImportModal));
-    listImportModal.addEventListener('click', (e) => {
-      if (e.target === listImportModal) hideModal(listImportModal);
-    });
+    // Reading an AniList list is a source, not a dialog: it is a tab in step 1
+    // now (09-shell.js handles the tab itself).
 
     btnListImportGo.addEventListener('click', async () => {
       const username = listImportUser.value.trim();
       const token = anilistToken.value.trim();
       if (!username && !token) {
-        listImportStatus.textContent = 'Type a username, or check a token above to read your own list.';
+        listImportStatus.textContent = 'Type a username, or connect your AniList account to read your own list.';
         listImportStatus.className = 'token-status bad';
         return;
       }
@@ -258,7 +253,8 @@
           listImportStatus.className = 'token-status bad';
           return;
         }
-        hideModal(listImportModal);
+        listImportStatus.textContent = '';
+        listImportStatus.className = 'token-status';
         mergeImported(payload);
       } catch (e) {
         listImportStatus.textContent = 'Could not reach the local server.';
@@ -271,7 +267,11 @@
     destinationSelect.addEventListener('change', () => setDestination(destinationSelect.value));
     destinationPrompt.addEventListener('click', (e) => {
       const choice = e.target.closest('[data-destination]');
-      if (choice) setDestination(choice.dataset.destination);
+      if (!choice) return;
+      setDestination(choice.dataset.destination);
+      // The button just answered disappears with the prompt; without this the
+      // keyboard focus fell back to the top of the page.
+      if (sourceTab === 'paste') txtArea.focus();
     });
 
     ['dragenter', 'dragover'].forEach(name => {

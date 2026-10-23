@@ -23,6 +23,7 @@ from datetime import datetime
 
 # Import core normalization and generation logic
 from generate_mal_xml import (
+    __version__,
     AniListReadError,
     anilist_delete_entry,
     anilist_existing_entries,
@@ -444,6 +445,26 @@ class MalGuiHandler(BaseHTTPRequestHandler):
         # Suppress noisy standard request logging to console
         pass
 
+    def end_headers(self) -> None:
+        """Headers every response carries, set in one place.
+
+        The origin check stops another site *posting* here, but it cannot stop
+        one putting this page in an iframe: a frame's own clicks are
+        same-origin, so they pass that check. Measured from a page served on a
+        second local port - it framed this one and `onload` fired. Framing is
+        refused outright; nothing here ever frames itself.
+
+        `nosniff` matters for the download routes, which hand back XML and
+        gzip. No `default-src` is set: the page inlines its own CSS and script
+        and loads cover art from AniList's CDN, so a blanket policy would
+        break it without being asked for.
+        """
+        self.send_header("X-Frame-Options", "DENY")
+        self.send_header("Content-Security-Policy", "frame-ancestors 'none'")
+        self.send_header("X-Content-Type-Options", "nosniff")
+        self.send_header("Referrer-Policy", "no-referrer")
+        super().end_headers()
+
     def send_json(self, data: Any, status: int = 200) -> None:
         payload = json.dumps(data, ensure_ascii=False).encode("utf-8")
         self.send_response(status)
@@ -568,12 +589,6 @@ class MalGuiHandler(BaseHTTPRequestHandler):
         parsed = urllib.parse.urlparse(self.path)
         path = parsed.path
 
-        if not self._same_origin():
-            self.send_json({"ok": False,
-                            "error": "This request came from another website and was refused."},
-                           status=403)
-            return
-
         # Bounded before the read: the size checks further down run on an
         # already-parsed body, so the whole thing had to be pulled into memory
         # first. A malformed header raised ValueError and became a 500.
@@ -588,6 +603,17 @@ class MalGuiHandler(BaseHTTPRequestHandler):
             self.close_connection = True
             return
         raw_body = self.rfile.read(content_length) if content_length > 0 else b"{}"
+
+        # Refused only after the (bounded) body has been read. Answering first
+        # and closing with the body still unread makes Windows reset the
+        # connection, so the client saw "connection aborted" rather than the
+        # 403 - intermittently, which is how it showed up: as a flaky test.
+        # Reading the bytes is harmless; acting on them is what this refuses.
+        if not self._same_origin():
+            self.send_json({"ok": False,
+                            "error": "This request came from another website and was refused."},
+                           status=403)
+            return
 
         try:
             data = json.loads(raw_body.decode("utf-8"))
@@ -1564,6 +1590,7 @@ def main() -> None:
     parser = argparse.ArgumentParser(
         description="Launch the local web GUI for AniExport."
     )
+    parser.add_argument("--version", action="version", version=f"AniExport {__version__}")
     parser.add_argument(
         "-p", "--port",
         type=int,

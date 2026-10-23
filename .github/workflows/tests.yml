@@ -1,0 +1,39 @@
+name: tests
+
+# The suite needs nothing installed and makes no outbound requests, so this is
+# the whole configuration. The matrix exists to settle a question the code
+# could only answer with "probably": every module carries
+# `from __future__ import annotations` and uses no 3.10+ syntax, which is an
+# argument for 3.9 working, not evidence of it.
+#
+# Node is for tests/js (the write diff, the candidate card and the skip list).
+# tests/test_js_behaviour.py skips rather than fails when node is absent, so
+# the suite still passes on a runner without it.
+
+on:
+  push:
+    branches: [main, experimentation]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+        python: ["3.9", "3.12", "3.13"]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python }}
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+      - name: Run the suite
+        run: python -m unittest discover -s tests -t . -v

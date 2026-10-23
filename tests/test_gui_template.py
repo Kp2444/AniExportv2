@@ -1,4 +1,5 @@
 import io
+import json
 import re
 import shutil
 import subprocess
@@ -148,8 +149,10 @@ class AccessibilityTests(unittest.TestCase):
     def test_dialogs_are_announced_as_dialogs(self):
         markup = self._markup()
         backdrops = re.findall(r'<div\s+id="(\w+Modal)"[^>]*>', markup)
+        # Reading an AniList list became a tab in step 1 rather than a dialog;
+        # the keyboard-shortcut sheet is new.
         self.assertEqual(sorted(backdrops),
-                         ["copyModal", "fixModal", "listImportModal", "previewModal",
+                         ["copyModal", "fixModal", "previewModal", "shortcutsModal",
                           "undoModal", "writeModal"])
         for ident in backdrops:
             tag = re.search(r'<div\s+id="' + ident + r'"[^>]*>', markup, re.S).group(0)
@@ -536,6 +539,319 @@ class KeepTheWorkTests(unittest.TestCase):
         write, and this needs nothing it does not already have."""
         self.assertNotIn("/api/download/csv", self.script())
         self.assertIn("function offerDownload", self.script())
+
+class RedesignTests(unittest.TestCase):
+    """The guided-stages redesign. These pin the requirements it introduced or
+    moved, so a later edit cannot quietly undo them; the look itself is checked
+    in a browser, not here."""
+
+    def script(self):
+        return gui._script_source()
+
+    def markup(self):
+        return (gui.STATIC_DIR / "index.html").read_text(encoding="utf-8")
+
+    def css(self):
+        return (gui.STATIC_DIR / "app.css").read_text(encoding="utf-8")
+
+    # ---- flow -----------------------------------------------------------
+    def test_a_destination_is_required_before_resolving(self):
+        """The server ranks candidates by destination (prefer_mal_id), so a
+        resolve with none chosen ranked every row for a MAL file."""
+        handler = self.script().split("btnProcess.addEventListener('click'", 1)[1][:900]
+        gate = handler.index("if (!destination)")
+        self.assertLess(gate, handler.index("isProcessing = true"),
+                        "the gate has to run before the run is marked as started")
+        self.assertIn("nudgeDestination()", handler)
+
+    def test_a_destination_change_after_resolving_is_reported(self):
+        self.assertIn("resolvedFor = destination;", self.script())
+        self.assertIn("resolvedFor !== destination", self.script())
+        self.assertIn('id="btnReresolve"', self.markup())
+
+    def test_the_stage_is_derived_from_the_data(self):
+        body = self.script().split("function updateLayout()", 1)[1].split("\n    function ", 1)[0]
+        self.assertIn("currentAnimes.length > 0", body)
+        self.assertIn("isProcessing", body)
+        self.assertIn("body.dataset.stage", body)
+        stats = self.script().split("function updateStats()", 1)[1].split("\n    function ", 1)[0]
+        self.assertIn("updateLayout()", stats, "every data change must re-derive the stage")
+
+    def test_each_source_is_a_real_tab(self):
+        markup = self.markup()
+        for tab, panel in (("tabPaste", "panelPaste"), ("tabFile", "panelFile"),
+                           ("btnAniListImport", "panelAniList")):
+            with self.subTest(tab=tab):
+                tag = re.search(r'<button[^>]*id="' + tab + r'"[^>]*>', markup, re.S).group(0)
+                self.assertIn('role="tab"', tag)
+                self.assertIn('aria-controls="' + panel + '"', tag)
+                self.assertRegex(markup, r'id="' + panel + r'"[^>]*role="tabpanel"')
+        self.assertIn("'ArrowRight'", self.script(), "a tab list moves with the arrow keys")
+
+    def test_status_and_score_are_split_by_intent(self):
+        """One pair of controls used to be both the default for new rows and
+        the stamp for existing ones."""
+        script = self.script()
+        self.assertNotIn("applyBulk('status', selectStatus.value)", script)
+        self.assertNotIn("applyBulk('score', parseInt(inputScore.value", script)
+        self.assertIn("bulkStatus.addEventListener('change'", script)
+        self.assertIn("bulkScore.addEventListener('change'", script)
+        self.assertNotIn("bulkScore.addEventListener('input'", script)
+
+    def test_unmatched_means_the_same_thing_to_copy_and_to_fix(self):
+        script = self.script()
+        copy = script.split("btnCopyUnresolved.addEventListener('click'", 1)[1][:400]
+        self.assertIn("!isActionable(i)", copy)
+        self.assertNotIn("Number(i.id) <= 0", copy,
+                         "under an AniList write that copied rows that write fine")
+
+    # ---- popovers and the keyboard -----------------------------------------
+    def test_every_popover_trigger_announces_its_state(self):
+        markup = self.markup()
+        for trigger, panel in (("btnAccount", "anilistPanel"), ("btnOptions", "optionsPanel"),
+                               ("btnTools", "toolsMenu")):
+            with self.subTest(trigger=trigger):
+                tag = re.search(r'<button[^>]*id="' + trigger + r'"[^>]*>', markup, re.S).group(0)
+                self.assertIn('aria-expanded="false"', tag)
+                self.assertIn('aria-controls="' + panel + '"', tag)
+                self.assertRegex(markup, r'id="' + panel + r'"[^>]*hidden')
+
+    def test_escape_closes_a_popover_before_a_dialog(self):
+        keydown = self.script().split("if (e.key === 'Escape')", 1)[1].split("inDialog", 1)[0]
+        self.assertLess(keydown.index("popoverIsOpen()"),
+                        keydown.index(".modal-backdrop.show"),
+                        "the account panel opened from inside a dialog must close first")
+
+    def test_hidden_beats_a_display_rule(self):
+        """An author display rule overrides the UA style for [hidden], so
+        without this every popover and tab panel would show while hidden."""
+        self.assertIn("[hidden] { display: none !important; }", self.css())
+
+    def test_every_shortcut_that_exists_is_listed(self):
+        sheet = self.markup().split('id="shortcutsModal"', 1)[1].split("</dl>", 1)[0]
+        for key in ("<kbd>Ctrl</kbd> + <kbd>Enter</kbd>", "&uarr;", "<kbd>Space</kbd>",
+                    "<kbd>Shift</kbd> + click", "on a heading", "in the fixer",
+                    "<kbd>Esc</kbd>", "<kbd>?</kbd>"):
+            with self.subTest(key=key):
+                self.assertIn(key, sheet)
+        self.assertIn("e.key === '?'", self.script())
+
+    # ---- send --------------------------------------------------------------
+    def test_each_destination_shows_only_its_own_actions(self):
+        markup, css = self.markup(), self.css()
+        anilist = markup.split('class="send-group send-anilist"', 1)[1].split("</div>", 1)[0]
+        xml = markup.split('class="send-group send-xml"', 1)[1].split("</div>", 1)[0]
+        for ident in ("btnWrite", "btnUndo", "btnRetry"):
+            self.assertIn('id="' + ident + '"', anilist)
+        for ident in ("btnDownloadXml", "btnDownloadGz", "btnPreview"):
+            self.assertIn('id="' + ident + '"', xml)
+        self.assertIn('body[data-destination="anilist"] .send-anilist { display: flex; }', css)
+        self.assertIn('body[data-destination="xml"] .send-xml { display: flex; }', css)
+
+    def test_the_least_wanted_download_is_not_the_loudest(self):
+        markup = self.markup()
+        gz = re.search(r'<a[^>]*id="btnDownloadGz"[^>]*>', markup, re.S).group(0)
+        xml = re.search(r'<a[^>]*id="btnDownloadXml"[^>]*>', markup, re.S).group(0)
+        self.assertNotIn("btn-primary", gz)
+        self.assertIn("btn-primary", xml)
+
+    def test_the_send_copy_follows_the_destination(self):
+        stats = self.script().split("function updateStats()", 1)[1].split("\n    function ", 1)[0]
+        self.assertIn("ready to write", stats)
+        self.assertIn("in the XML file", stats)
+
+    # ---- the palette -------------------------------------------------------
+    def _tokens(self, selector):
+        css = self.css()
+        block = css.split(selector + " {", 1)[1].split("}", 1)[0]
+        return dict(re.findall(r"--([a-z0-9-]+):\s*(#[0-9A-Fa-f]{6})", block))
+
+    @staticmethod
+    def _ratio(a, b):
+        def lum(h):
+            r, g, bl = (int(h[i:i + 2], 16) / 255 for i in (1, 3, 5))
+            ch = lambda c: c / 12.92 if c <= 0.03928 else ((c + 0.055) / 1.055) ** 2.4
+            return 0.2126 * ch(r) + 0.7152 * ch(g) + 0.0722 * ch(bl)
+        x, y = lum(a), lum(b)
+        return (max(x, y) + 0.05) / (min(x, y) + 0.05)
+
+    def test_the_palette_keeps_its_measured_contrast(self):
+        """A new palette is a claim about legibility, so it is checked, not
+        assumed: text 4.5:1 on every surface, input edges 3:1."""
+        for selector in (":root", "body.light"):
+            t = self._tokens(selector)
+            for surface in ("bg", "surface-1", "surface-2", "surface-3"):
+                for fg in ("text", "text-muted", "text-subtle", "accent-text"):
+                    with self.subTest(theme=selector, fg=fg, bg=surface):
+                        self.assertGreaterEqual(self._ratio(t[fg], t[surface]), 4.5)
+            with self.subTest(theme=selector, pair="button label on coral"):
+                self.assertGreaterEqual(self._ratio(t["on-accent"], t["accent"]), 4.5)
+            with self.subTest(theme=selector, pair="input edge"):
+                self.assertGreaterEqual(self._ratio(t["input-border"], t["surface-1"]), 3.0)
+            for sem in ("success", "warning", "danger", "info", "violet"):
+                with self.subTest(theme=selector, sem=sem):
+                    self.assertGreaterEqual(self._ratio(t[sem], t["surface-1"]), 4.5)
+
+    # ---- the CSV, at the level of the values --------------------------------
+    @unittest.skipUnless(shutil.which("node"), "node not installed")
+    def test_the_csv_exports_the_progress_a_person_set(self):
+        """progressFields() returns [field, unit] pairs, so the old
+        `.read`/`.total` were undefined and every row exported the wrong
+        progress. A test that only checked the column names passed anyway."""
+        script = self.script()
+
+        def grab(start, end):
+            return script.split(start, 1)[1].split(end, 1)[0]
+
+        harness = "\n".join([
+            "let mode = 'manga';",
+            "function mediaType() { return mode; }",
+            "function isRepeatStatus" + grab("function isRepeatStatus", "function derivedProgress"),
+            "function derivedProgress" + grab("function derivedProgress", "const PROGRESS_TOTAL_FIELD"),
+            "const PROGRESS_TOTAL_FIELD" + grab("const PROGRESS_TOTAL_FIELD", "function progressFields"),
+            "function progressFields" + grab("function progressFields", "function mediaType"),
+            "function progressValue" + grab("function progressValue", "function csvCell"),
+            "const CSV_COLUMNS" + grab("const CSV_COLUMNS", "function progressValue"),
+            "const col = n => CSV_COLUMNS.find(c => c[0] === n)[1];",
+            "const out = {};",
+            "out.set = col('progress')({status: 'Reading', chapters: 100, my_read_chapters: 42});",
+            "out.derived = col('progress')({status: 'Completed', chapters: 100});",
+            "out.total = col('total')({status: 'Reading', chapters: 100});",
+            "out.vol = col('volumes_read')({status: 'Reading', volumes: 10, my_read_volumes: 3});",
+            "mode = 'anime';",
+            "out.anime = col('progress')({status: 'Watching', episodes: 24, my_watched_episodes: 7});",
+            "out.animeVol = col('volumes_read')({status: 'Watching', episodes: 24});",
+            "console.log(JSON.stringify(out));",
+        ])
+        with tempfile.TemporaryDirectory() as d:
+            path = Path(d) / "csv.js"
+            path.write_text(harness, encoding="utf-8")
+            result = subprocess.run(["node", str(path)], capture_output=True, text=True)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        got = json.loads(result.stdout)
+        self.assertEqual(got["set"], 42, "the value the person typed")
+        self.assertEqual(got["derived"], 100, "a blank completed row derives its total")
+        self.assertEqual(got["total"], 100)
+        self.assertEqual(got["vol"], 3)
+        self.assertEqual(got["anime"], 7)
+        self.assertEqual(got["animeVol"], "", "volumes mean nothing on an anime list")
+
+    def test_the_bar_controls_get_their_own_row_on_a_phone(self):
+        """Beside the mark they ran 60px past a 430px screen, taking the
+        account chip and the menu with them."""
+        narrow = self.css().split("@media (max-width: 760px)", 1)[1]
+        self.assertIn(".appbar-tools { grid-column: 1 / -1; grid-row: 2;", narrow)
+        self.assertIn(".field-inline { padding-left: 0.2rem; flex: 1 1 0; min-width: 0; }", narrow)
+
+    def test_every_id_the_script_looks_up_is_in_the_page(self):
+        """A redesign that drops an element the script still reaches for fails
+        at runtime with a null, not at load."""
+        import re
+        wanted = set(re.findall(r"(?:getElementById|byId)\('([\w-]+)'\)", self.script()))
+        present = set(re.findall(r'\bid="([\w-]+)"', self.markup()))
+        made = set(re.findall(r'\bid="([\w-]+)"', self.script()))   # built at runtime
+        self.assertGreater(len(wanted), 90)
+        self.assertEqual(sorted(wanted - present - made), [])
+
+    def test_the_generic_label_rules_exempt_the_controls_they_broke(self):
+        """`display: block` on every label in a popover or dialog outranked the
+        component rules: the option switches rendered as a dot stacked above
+        their own text, and "keep mine" dropped onto a line of its own."""
+        css = self.css()
+        self.assertIn(".popover label:not(.toggle-control) { display: block;", css)
+        self.assertIn(".modal-body label:not(.diff-pick):not(.toggle-control) { display: block;", css)
+
+    def test_the_page_scrolls_the_table_and_the_header_sticks_below_the_bar(self):
+        """A scroll box of its own put the last rows behind the send bar, with
+        two scrollbars to choose from."""
+        css = self.css()
+        wrapper = css.split(".table-wrapper {", 1)[1].split("}", 1)[0]
+        self.assertNotIn("max-height", wrapper)
+        self.assertNotIn("overflow", wrapper)
+        self.assertIn("position: sticky; top: var(--appbar-h, 64px);", css)
+        self.assertIn("--appbar-h", self.script(), "the bar publishes its own height")
+        self.assertIn("--sendbar-h", self.script())
+
+    # ---- keyboard and assistive tech ------------------------------------
+    def test_a_dialog_keeps_the_tab_key(self):
+        """Tab walked straight out of an open dialog and went on driving the
+        page behind the scrim - measured: focus reached <body>, then the skip
+        link, while the dialog was still open."""
+        script = self.script()
+        self.assertIn("function trapTab(", script)
+        self.assertIn("if (e.key === 'Tab') trapTab(e);", script)
+
+    def test_the_page_cannot_scroll_behind_a_dialog(self):
+        """<html> is the scrolling element, so the lock has to live there; on
+        <body> it has no effect at all."""
+        self.assertIn("html.modal-open { overflow: hidden; }", self.css())
+        self.assertIn("document.documentElement.classList.toggle('modal-open'", self.script())
+        # the reserved gutter is what stops the lock shifting the layout
+        self.assertIn("scrollbar-gutter: stable", self.css())
+
+    def test_a_disabled_download_link_does_not_follow_its_href(self):
+        """They are <a href>, so the class and aria-disabled only ever changed
+        how they looked and read: the click still went to the endpoint, which
+        404s when no export has been built."""
+        self.assertIn('a[aria-disabled="true"]', self.script())
+
+    def test_the_notice_bar_announces_itself(self):
+        """It appears after a resolve carrying the not-found and stale-match
+        counts; the toast beside it is already a live region."""
+        self.assertIn('id="unresolvedBar" class="notice-bar" role="status" aria-live="polite"',
+                      self.markup())
+
+    def test_every_match_picker_names_its_own_row(self):
+        """One generic title on all of them told a screen reader nothing about
+        which row it had landed on; the Find box beside it already names one."""
+        self.assertIn('aria-label="Match for ${who}"', self.script())
+
+    def test_the_review_screen_has_a_top_level_heading(self):
+        """The <h1> lives in the source body, which is display:none once the
+        source folds - leaving the send bar's <h2> as the only heading."""
+        self.assertIn('<h1 id="sourceSummary" class="summary-text"></h1>', self.markup())
+        self.assertIn('<table id="animeTable" aria-label=', self.markup())
+
+    def test_the_sideways_scrolling_table_is_reachable_by_keyboard(self):
+        """Below ~820px the table scrolls inside its panel. A scroll box only a
+        mouse can reach is unusable from the keyboard - and it must not become
+        a pointless tab stop at widths where nothing overflows."""
+        script = self.script()
+        self.assertIn("wrap.scrollWidth > wrap.clientWidth", script)
+        self.assertIn("wrap.setAttribute('tabindex', '0')", script)
+        self.assertIn("wrap.removeAttribute('tabindex')", script)
+
+    def test_the_controls_and_the_table_are_one_panel(self):
+        """The filters, the Set row and the rows they act on were three
+        separately bordered bands stacked on each other."""
+        css = self.css()
+        toolbar = css.split(".review-toolbar {", 1)[1].split("}", 1)[0]
+        self.assertIn("border-bottom: 0", toolbar)
+        self.assertIn("border-radius: var(--radius-lg) var(--radius-lg) 0 0", toolbar)
+        self.assertIn(".review-toolbar + .table-wrapper {", css)
+
+    def test_a_row_hangs_from_one_line(self):
+        """A row carrying a match picker is half as tall again; centred, its
+        type, progress and status floated below the title."""
+        self.assertIn("padding: 0.75rem 0.85rem; vertical-align: top;", self.css())
+
+    def test_the_count_is_shown_only_where_it_differs(self):
+        """The chips already carry the total. "Showing 12 of 12 (12 selected)"
+        beside an "All 12" chip was the same number twice more."""
+        script = self.script()
+        self.assertIn("if (shown !== currentAnimes.length)", script)
+        self.assertIn("if (selected !== currentAnimes.length)", script)
+        self.assertNotIn("'Showing ' + shown + ' of '", script)
+
+    def test_each_notice_is_its_own_paragraph(self):
+        """Joined with <br>, the not-found note and the stale-matches note ran
+        together as one block of text."""
+        self.assertIn("notes.map(n => '<p>' + n + '</p>').join('')", self.script())
+
+    def test_no_real_account_name_ships_in_the_page(self):
+        self.assertNotIn("Razed2Ground", self.markup())
+        self.assertNotIn("Razed2Ground", self.script())
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -196,10 +196,14 @@ class ReviewSurfaceTests(unittest.TestCase):
         self.assertIn("inTable", body,
                       "claiming the arrow keys globally broke scrolling the page")
 
-    def test_escape_closes_every_dialog_not_a_hand_kept_list(self):
+    def test_escape_finds_the_dialogs_rather_than_keeping_a_list(self):
+        """Queried, so a newly added dialog is covered without being added
+        anywhere - but only the topmost closes, or one Escape could take a
+        write plan out with the sheet sitting over it."""
         script = self._script()
-        self.assertIn("querySelectorAll('.modal-backdrop.show').forEach(hideModal)", script,
-                      "the last two dialogs added were both missed by the old list")
+        self.assertIn("const stack = document.querySelectorAll('.modal-backdrop.show');", script)
+        self.assertIn("if (stack.length) hideModal(stack[stack.length - 1]);", script)
+        self.assertNotIn(".forEach(hideModal)", script)
 
 
 class WonByDefaultTests(unittest.TestCase):

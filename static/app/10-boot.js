@@ -56,4 +56,5 @@
       loadData();
       setDestination('', false);   // first run: ask rather than assume
     }
+    updateAccountChip();
   

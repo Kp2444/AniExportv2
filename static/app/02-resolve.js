@@ -11,7 +11,22 @@
     // Process & Normalize
     btnProcess.addEventListener('click', async () => {
       if (isProcessing) return;
+      // The server ranks candidates differently for each destination
+      // (prefer_mal_id), so resolving before one is chosen ranked every row
+      // for a MAL file and kept that ranking after AniList was picked.
+      if (!destination) {
+        showToast('Choose where this list is going first - it changes which match each title gets', 'warning');
+        nudgeDestination();
+        return;
+      }
+      if (!txtArea.value.trim()) {
+        selectSourceTab('paste');
+        openSource(true);
+        showToast('Paste a list first', 'warning');
+        return;
+      }
       isProcessing = true;
+      sourceOpen = false;
       btnProcess.disabled = true;
 
       try {
@@ -100,8 +115,13 @@
                   // `done` does not advance during retries; say so rather than
                   // letting the bar sit still and look stuck.
                   progressCurrentSub.textContent = 'Retrying titles that did not match on the first pass...';
-                } else if (event.resolved_title) {
+                } else if (event.resolved_title && event.resolved_title !== event.title) {
+                  // Only when AniList landed on a different name. Most titles
+                  // match their own spelling, and "-> Chainsaw Man" under
+                  // "Chainsaw Man" was the same line twice.
                   progressCurrentSub.textContent = '-> ' + event.resolved_title;
+                } else if (event.resolved_title) {
+                  progressCurrentSub.textContent = 'Matched';
                 } else {
                   progressCurrentSub.textContent = 'Resolving metadata via AniList & MAL...';
                 }
@@ -166,14 +186,21 @@
                 renderTable(currentAnimes);
                 updateStatsAndExport();
                 mergedTitles = event.merged || [];
+                resolvedFor = destination;
                 refreshExportState();
                 // Reading a status or a progress number off a pasted line
                 // changes what the row holds, so it is said out loud rather
                 // than left for the user to notice.
                 const fromLines = event.from_lines
-                  ? '; ' + event.from_lines + ' read status, score or progress from the line'
+                  ? ' - ' + event.from_lines + ' read status, score or progress from the line'
                   : '';
-                showToast('XML generated (' + event.entries.length + ' ' + (mediaType() === 'manga' ? 'manga' : 'anime') + ' rows; unresolved rows are excluded' + fromLines + ')');
+                const noun = mediaType() === 'manga' ? 'manga' : 'anime';
+                // The file is built either way, but under AniList the next step
+                // is a write, and announcing "XML generated" named the wrong one.
+                showToast((destination === 'anilist'
+                  ? event.entries.length + ' ' + noun + ' rows resolved. Review them, then write'
+                  : 'XML built from ' + event.entries.length + ' ' + noun + ' rows; unresolved rows are left out')
+                  + fromLines);
                 try { reader.cancel(); } catch(e) {}
                 streamDone = true;
                 break;

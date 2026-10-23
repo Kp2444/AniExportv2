@@ -152,6 +152,21 @@ class ExportStateTests(unittest.TestCase):
             download = urllib.request.urlopen(base + "/api/download/xml?media=anime", timeout=10)
             self.assertEqual(download.headers.get("Cache-Control"), "no-store")
 
+    def test_another_site_cannot_put_this_page_in_a_frame(self):
+        """The origin check refuses a cross-site POST, but it cannot see a
+        frame: a frame's own clicks are same-origin and pass it. Measured from
+        a page served on a second local port - it framed this one and loaded.
+        nosniff covers the download routes, which hand back XML and gzip."""
+        with tempfile.TemporaryDirectory() as directory:
+            out, base = self._serve(directory)
+            for path in ("/", "/api/export-state"):
+                headers = urllib.request.urlopen(base + path, timeout=10).headers
+                self.assertEqual(headers.get("X-Frame-Options"), "DENY", path)
+                self.assertEqual(headers.get("Content-Security-Policy"),
+                                 "frame-ancestors 'none'", path)
+                self.assertEqual(headers.get("X-Content-Type-Options"), "nosniff", path)
+                self.assertEqual(headers.get("Referrer-Policy"), "no-referrer", path)
+
 
 if __name__ == "__main__":
     unittest.main()

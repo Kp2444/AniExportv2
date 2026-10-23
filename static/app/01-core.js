@@ -11,6 +11,12 @@
     let lastMediaType = 'anime';
     let ignoredKeys = new Set();
     let isProcessing = false;
+    // The shell's own state (09-shell.js): which source tab is showing, whether
+    // the folded source has been reopened by hand, and which destination the
+    // last resolve ranked its matches for.
+    let sourceTab = 'paste';
+    let sourceOpen = false;
+    let resolvedFor = '';
 
     // Elements
     const txtArea = document.getElementById('animeTextInput');
@@ -88,11 +94,9 @@
     const btnCopyCheck = document.getElementById('btnCopyCheck');
     const btnCopyRun = document.getElementById('btnCopyRun');
     const btnCopyCancel = document.getElementById('btnCopyCancel');
-    const listImportModal = document.getElementById('listImportModal');
     const listImportUser = document.getElementById('listImportUser');
     const listImportStatus = document.getElementById('listImportStatus');
     const btnListImportGo = document.getElementById('btnListImportGo');
-    const btnListImportCancel = document.getElementById('btnListImportCancel');
     const btnRetry = document.getElementById('btnRetry');
     const btnUndoConfirm = document.getElementById('btnUndoConfirm');
     const btnUndoCancel = document.getElementById('btnUndoCancel');
@@ -192,13 +196,17 @@
       const carried = sameIdx >= 0 ? to[sameIdx] : (to.indexOf(previous) >= 0 ? previous : 'Completed');
       selectStatus.innerHTML = to.map(v => `<option value="${escapeHtml(v)}">${escapeHtml(v)}</option>`).join('');
       selectStatus.value = carried;
-      document.getElementById('listPanelTitle').textContent = isManga ? 'Paste Manga List' : 'Paste Anime List';
-      document.querySelector('label[for="animeTextInput"]').textContent = `Paste your list (one ${isManga ? 'manga' : 'anime'} per line):`;
+      syncBulkStatus();
+      // The source has three tabs now, so its heading names the list rather
+      // than one way of supplying it.
+      document.getElementById('listPanelTitle').textContent = isManga ? 'Your manga list' : 'Your anime list';
+      document.querySelector('label[for="animeTextInput"]').textContent = `One ${isManga ? 'manga' : 'anime'} per line`;
       // One column now holds "read / total", so it carries the label and the
       // trailing control column stays unlabelled.
       countColumnHeading.textContent = isManga ? 'Read / Total' : 'Watched / Total';
-      const statLabels = document.querySelectorAll('.stat-label');
-      if (statLabels[2]) statLabels[2].textContent = isManga ? 'Total Chapters / Volumes' : 'Total Episodes';
+      // By id, not by position: the third .stat-label used to be assumed.
+      const episodesLabel = document.getElementById('statEpisodesLabel');
+      if (episodesLabel) episodesLabel.textContent = isManga ? 'Chapters / volumes' : 'Episodes';
       toggleSequels.closest('.toggle-card').style.display = isManga ? 'none' : '';
       // The String.fromCharCode(10) calls in this file are a leftover: the page
       // used to be a Python string literal inside gui.py, which consumed
@@ -206,8 +214,8 @@
       // .js file now and an ordinary escape would work - they are left alone
       // only to keep the move that extracted this file byte-for-byte reviewable.
       txtArea.placeholder = (isManga
-        ? ['Paste manga titles here (one per line):', '', 'Berserk', 'One Piece', 'Vagabond', 'Fullmetal Alchemist', '...']
-        : ['Paste anime titles here (one per line):', '', 'Sousou no Frieren', 'Attack on Titan', 'Solo Leveling', '...']
+        ? ['Berserk - 374 ch - dropped', 'One Piece', 'Vagabond (completed) 9', 'Fullmetal Alchemist', '...']
+        : ['Sousou no Frieren 12/28 9/10 watching', 'Attack on Titan', 'Solo Leveling [ptw]', '...']
       ).join(String.fromCharCode(10));
       btnDownloadXml.download = isManga ? 'myanimelist_manga_export.xml' : 'myanimelist_export.xml';
       btnDownloadGz.download = isManga ? 'myanimelist_manga_export.xml.gz' : 'myanimelist_export.xml.gz';

@@ -4,6 +4,8 @@ XML Generator
 
 from __future__ import annotations
 
+__version__ = "2.0.0"
+
 import argparse
 import gzip
 import json
@@ -361,7 +363,7 @@ def _request_graphql(query: str, variables: Dict[str, Any], max_retries: int = 3
     headers = {
         "Content-Type": "application/json",
         "Accept": "application/json",
-        "User-Agent": "MALAnimeExporter/2.0",
+        "User-Agent": USER_AGENT,
     }
 
     attempt = 0
@@ -807,6 +809,10 @@ def search_candidates(query: str, media_type: str, max_retries: int = 3) -> List
 BATCH_SIZE = 8
 CACHE_TTL_SECONDS = 7 * 24 * 60 * 60
 CACHE_MAX_ENTRIES = 10000
+# Sent on every AniList request. A contactable project name is the courtesy
+# an unauthenticated public API is owed.
+USER_AGENT = f"AniExport/{__version__} (+https://github.com/Kp2444/AniExportv2)"
+
 CACHE_VERSION = 4          # entries gained alias_hit alongside review_reason
 _cache_lock = threading.Lock()
 
@@ -1327,7 +1333,7 @@ def _execute_anilist_authenticated(query: str, variables: Dict[str, Any], token:
     headers = {
         "Content-Type": "application/json",
         "Accept": "application/json",
-        "User-Agent": "MALAnimeExporter/2.0",
+        "User-Agent": USER_AGENT,
         "Authorization": f"Bearer {token}",
     }
     attempt = 0
@@ -2276,6 +2282,7 @@ def main() -> None:
     parser = argparse.ArgumentParser(
         description="Convert a plain-text anime or manga title list into MAL-compatible XML for AniList import."
     )
+    parser.add_argument("--version", action="version", version=f"AniExport {__version__}")
     parser.add_argument(
         "input",
         nargs="?",

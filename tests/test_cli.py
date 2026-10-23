@@ -208,5 +208,24 @@ class CacheFlagTests(CliCase):
         self.assertFalse((self.dir / "cache.json").exists())
 
 
+class VersionTests(unittest.TestCase):
+    """The User-Agent goes out on every AniList request. It used to name a
+    different product ("MALAnimeExporter/2.0") and carry a version number
+    nothing else in the project knew about."""
+
+    def test_one_version_feeds_the_user_agent_and_both_entry_points(self):
+        import gui
+        self.assertEqual(gui.__version__, gen.__version__,
+                         "the GUI must report the same version as the module it runs on")
+        self.assertIn(gen.__version__, gen.USER_AGENT)
+        self.assertTrue(gen.USER_AGENT.startswith("AniExport/"),
+                        "the agent names this product: " + gen.USER_AGENT)
+
+    def test_no_request_still_sends_the_old_product_name(self):
+        for path in ("generate_mal_xml.py", "gui.py"):
+            body = io.open(path, encoding="utf-8").read()
+            self.assertNotIn("MALAnimeExporter", body, path)
+
+
 if __name__ == "__main__":
     unittest.main()

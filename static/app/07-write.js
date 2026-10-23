@@ -140,7 +140,7 @@
         ? `<div>${plan.skipped.length} row${plan.skipped.length === 1 ? '' : 's'} will be skipped: ${escapeHtml(plan.skipped.slice(0, 3).map(sk => sk.title).join(', '))}${plan.skipped.length > 3 ? '...' : ''}</div>`
         : '';
       const unchangedNote = plan.unchanged
-        ? `<div>${plan.unchanged} already match your account and will not be touched.</div>`
+        ? `<div>${plan.unchanged} ${plan.unchanged === 1 ? 'already matches' : 'already match'} your account and will not be touched.</div>`
         : '';
       const conflictNote = plan.conflicts
         ? `<div class="warn">${plan.conflicts} row${plan.conflicts === 1 ? '' : 's'} would send a value backwards. Those fields keep what AniList has unless you tick "keep mine".</div>`
@@ -236,6 +236,7 @@
       if (!token) {
         tokenStatus.textContent = 'Paste a token first.';
         tokenStatus.className = 'token-status bad';
+        updateAccountChip();
         return;
       }
       tokenStatus.textContent = 'Checking...';
@@ -259,6 +260,8 @@
       } catch (e) {
         tokenStatus.textContent = 'Could not reach the local server.';
         tokenStatus.className = 'token-status bad';
+      } finally {
+        updateAccountChip();
       }
     });
 
@@ -266,7 +269,8 @@
       const token = anilistToken.value.trim();
       const rows = writableRows();
       if (!token) {
-        showToast('Paste and check an AniList token first', 'warning');
+        showToast('Connect your AniList account first', 'warning');
+        openAccount();
         return;
       }
       if (!rows.length) {
@@ -352,7 +356,8 @@
     btnRetry.addEventListener('click', async () => {
       const token = anilistToken.value.trim();
       if (!token) {
-        showToast('Paste and check an AniList token first', 'warning');
+        showToast('Connect your AniList account first', 'warning');
+        openAccount();
         return;
       }
       if (!lastWriteRunId || !lastWriteFailed) return;
@@ -530,7 +535,8 @@
     btnUndoConfirm.addEventListener('click', async () => {
       const token = anilistToken.value.trim();
       if (!token) {
-        showToast('Paste and check an AniList token first', 'warning');
+        showToast('Connect your AniList account first', 'warning');
+        openAccount();
         return;
       }
       if (!lastWriteSnapshot) return;
@@ -635,10 +641,14 @@
 
     btnImport.addEventListener('click', () => importFile.click());
 
-    importFile.addEventListener('change', async () => {
+    importFile.addEventListener('change', () => {
       const file = importFile.files && importFile.files[0];
       importFile.value = '';            // let the same file be picked twice
-      if (!file) return;
+      if (file) importMalFile(file);
+    });
+
+    // One path for a chosen file and a dropped one (09-shell.js).
+    async function importMalFile(file) {
       let text;
       try {
         if (file.name.toLowerCase().endsWith('.gz')) {
@@ -674,4 +684,4 @@
       }
 
       mergeImported(payload);
-    });
+    }

@@ -54,8 +54,14 @@
       ['year', i => i.year || ''],
       ['status', i => i.status || ''],
       ['score', i => (i.score === undefined ? '' : i.score)],
-      ['progress', i => derivedProgress(i, progressFields().read)],
-      ['total', i => i[progressFields().total] || ''],
+      // progressFields() returns [field, unit] pairs, not an object - so the
+      // old `.read` / `.total` were both undefined and every row exported a
+      // progress derived from the wrong field. The value a person actually set
+      // wins; the derived one only fills a blank.
+      ['progress', i => progressValue(i, progressFields()[0][0])],
+      ['total', i => i[PROGRESS_TOTAL_FIELD[progressFields()[0][0]]] || ''],
+      ['volumes_read', i => (mediaType() === 'manga' ? progressValue(i, 'my_read_volumes') : '')],
+      ['volumes', i => (mediaType() === 'manga' ? (i.volumes || '') : '')],
       ['start_date', i => i.start_date || ''],
       ['finish_date', i => i.finish_date || ''],
       ['tags', i => i.tags || ''],
@@ -64,6 +70,11 @@
       ['review_reason', i => i.review_reason || ''],
       ['known_alias', i => (i.alias_hit ? 'yes' : '')],
     ];
+
+    function progressValue(item, field) {
+      const own = item[field];
+      return (own === undefined || own === null || own === '') ? derivedProgress(item, field) : own;
+    }
 
     function csvCell(value) {
       const text = value === null || value === undefined ? '' : String(value);
@@ -120,6 +131,7 @@
         modalReturnFocus = document.activeElement;
       }
       modal.classList.add('show');
+      syncModalLock();
       const first = modal.querySelector('input:not([type=hidden]):not([disabled]), textarea, select, button');
       if (first) first.focus();
     }
@@ -131,17 +143,77 @@
         modalReturnFocus.focus();
         modalReturnFocus = null;
       }
+      syncModalLock();
+    }
+
+    // The scrim stops the mouse reaching the page behind a dialog; nothing
+    // stopped the wheel. Scrolling moved the content under the dialog, which
+    // is disorienting and easy to do by accident on a trackpad. The gutter is
+    // reserved on <html> already, so locking here shifts nothing.
+    function syncModalLock() {
+      // On <html>, not <body>: <html> is the scrolling element, and the
+      // lock has no effect from <body> while that is true.
+      document.documentElement.classList.toggle('modal-open', !!openModal());
+    }
+
+    function openModal() {
+      const stack = document.querySelectorAll('.modal-backdrop.show');
+      return stack.length ? stack[stack.length - 1] : null;
+    }
+
+    function tabbableIn(root) {
+      return [...root.querySelectorAll(
+        'a[href], button:not([disabled]), input:not([disabled]), select:not([disabled]),'
+        + ' textarea:not([disabled]), [tabindex]:not([tabindex="-1"])')]
+        .filter(el => el.offsetParent !== null || el === document.activeElement);
+    }
+
+    // Without this, Tab walked straight out of the dialog and went on driving
+    // the page behind it - which the scrim says you cannot touch.
+    function trapTab(e) {
+      const modal = openModal();
+      if (!modal) return;
+      const items = tabbableIn(modal);
+      if (!items.length) { e.preventDefault(); return; }
+      const first = items[0];
+      const last = items[items.length - 1];
+      const active = document.activeElement;
+      if (!modal.contains(active)) {
+        e.preventDefault();
+        (e.shiftKey ? last : first).focus();
+      } else if (e.shiftKey && active === first) {
+        e.preventDefault(); last.focus();
+      } else if (!e.shiftKey && active === last) {
+        e.preventDefault(); first.focus();
+      }
     }
 
     document.addEventListener('keydown', (e) => {
+      if (e.key === 'Tab') trapTab(e);
       if (e.key === 'Escape') {
-        // Every backdrop, rather than a hand-kept list: the last two dialogs
-        // added were both missed by the old one.
-        document.querySelectorAll('.modal-backdrop.show').forEach(hideModal);
+        // A popover sits above everything, including a dialog it was opened
+        // from, so it closes first and the dialog underneath stays.
+        if (popoverIsOpen()) {
+          closePopovers(true);
+          return;
+        }
+        // Queried, not a hand-kept list: the last two dialogs added were both
+        // missed by the old one. The topmost only - closing every open dialog
+        // meant one Escape could take a write plan with it. Nothing in the UI
+        // opens a second dialog over a first today, so this is a guard.
+        const stack = document.querySelectorAll('.modal-backdrop.show');
+        if (stack.length) hideModal(stack[stack.length - 1]);
       }
-      if (e.key === 'Enter' && (e.ctrlKey || e.metaKey) && !isProcessing) {
+      const inDialog = !!document.querySelector('.modal-backdrop.show');
+      if (e.key === 'Enter' && (e.ctrlKey || e.metaKey) && !isProcessing && !inDialog) {
         e.preventDefault();
         btnProcess.click();
+      }
+      if (e.key === '?' && !e.ctrlKey && !e.metaKey && !e.altKey && !inDialog) {
+        const tag = (e.target.tagName || '').toLowerCase();
+        if (tag === 'input' || tag === 'textarea' || tag === 'select' || e.target.isContentEditable) return;
+        e.preventDefault();
+        openShortcuts();
       }
     });
     btnPreviewCopy.addEventListener('click', async () => {

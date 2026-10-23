@@ -2,20 +2,24 @@
 
 # AniExport
 
-**Turn a plain list of titles into a real AniList or MyAnimeList list.**
+**Start from the list you already wrote — not an export file from a tracker you already use.**
 
 [![Python](https://img.shields.io/badge/python-3.9%2B-3776AB?logo=python&logoColor=white)](https://www.python.org/)
 [![Dependencies](https://img.shields.io/badge/dependencies-zero-success)](requirements.txt)
-[![Tests](https://img.shields.io/badge/tests-430%20passing-success)](#-tests)
+[![Tests](https://img.shields.io/badge/tests-466%20passing-success)](#-tests)
 [![License](https://img.shields.io/badge/license-MIT-lightgrey)](LICENSE)
 
 </div>
 
 ---
 
-Paste a list of anime or manga titles. AniExport resolves each one against AniList's GraphQL API,
-lets you review and correct the matches in a local web page, and then either writes them straight
-to your AniList account or exports a MAL-compatible XML file.
+Most importers need a file exported from somewhere else. This one takes the list as you wrote it —
+in a notes app, a spreadsheet column, a text file — resolves each line against AniList's GraphQL
+API, lets you review and correct the matches in a local web page, and then either writes them
+straight to your AniList account or exports a MAL-compatible XML file.
+
+It reads what you wrote beside each title, too: `Frieren 12/28 9/10 watching` arrives as episode 12,
+scored 9, Watching.
 
 ```bash
 python gui.py          # opens http://127.0.0.1:5000
@@ -27,26 +31,27 @@ No install step, no packages, no account needed to try it.
 <tr>
 <td width="33%" valign="top">
 
-**🔎 Resolves**
+**📝 Starts from your list**
 
-339 titles in about 90 seconds, 8 per request, paced off AniList's own rate-limit headers.
-Cached for 7 days, so a repeat run is near-instant.
-
-</td>
-<td width="33%" valign="top">
-
-**✅ Reviews**
-
-Rows stream in as they resolve. Pick between candidates, fix what matched nothing, edit status,
-progress, score and dates per row.
+A plain list, as you wrote it — status, score and progress read off the line. 339 titles resolve in
+about 90 seconds, cached for 7 days.
 
 </td>
 <td width="33%" valign="top">
 
-**🚀 Delivers**
+**🔍 Shows the diff, then undoes it**
 
-Straight to your AniList account, out as MAL-compatible XML, or copied wholesale from one AniList
-account to another — anime and manga, every field.
+Before a write you see *"episodes 224 → 142"* per field, and where AniList will overrule you. Every
+run saves a snapshot you can restore.
+
+</td>
+<td width="33%" valign="top">
+
+**📐 Measured, not assumed**
+
+The write path was proved against a live account, field by field, and
+[the measurements are written down](MANGA_SUPPORT_NOTES.md) — including what was tried and
+rejected.
 
 </td>
 </tr>
@@ -79,7 +84,9 @@ Plenty of titles exist on AniList with no MyAnimeList id at all. Those rows are 
 **AniList only**: they cannot be written into the XML file, but they can be sent directly to your
 account. A row is only called **Not found** when AniList does not know it either.
 
-You pick the destination on first run; it is remembered after that.
+You pick the destination **before resolving**, because it changes which entry wins for some titles
+(a MAL file prefers the candidate with a MAL id). It is remembered after that, and switching it
+later offers to resolve the list again for the new target.
 
 ## 📦 Install
 
@@ -95,6 +102,24 @@ python gui.py              # opens http://127.0.0.1:5000
 |---|---|
 | `-p/--port` | local port (default 5000, scanning up to 5049) |
 | `--no-browser` | do not open a browser |
+
+### The page
+
+One page in three steps, shown as a stepper in the top bar:
+
+1. **Source** - where the titles come from: **Paste a list** (or drop a `.txt` on the box),
+   **MAL export file** (drop or choose a `.xml`/`.gz`), or **AniList user** (read a list by
+   username). Below it: the status and score new rows start with, **Options** (ignore saved
+   results, add sequels, keep dated XML copies), and **Resolve**. Once there are rows, this
+   folds to a one-line summary; **Add or change titles** opens it again.
+2. **Review** - the table, its filters, and the **Set** controls for changing many rows at once.
+3. **Send** - the bar pinned under the table. It names what happens next for the destination you
+   chose: **Write to AniList…** with **Undo** and **Retry failed**, or **Download XML** with
+   Preview and `.gz`. **CSV** is there for both.
+
+The top bar also holds the **List** (anime/manga) and **Send to** selectors, the AniList account
+(token entry, check, and how to get one), and a `⋯` menu with **Copy an AniList account…**,
+keyboard shortcuts, theme, and **Start over**. Press `?` for the shortcut sheet.
 
 ### Resolving a list
 
@@ -118,7 +143,7 @@ Berserk, 3 vols, on hold          Berserk, 3 volumes, Paused
 Solo Leveling [ptw]               Solo Leveling, Plan to Watch
 ```
 
-These beat the list-wide **Status** and **Score** controls, because they are about one title
+These beat the status and score new rows start with, because they are about one title
 rather than all of them. Every value lands in an editable column, and the row shows the line it
 came from, so nothing changes out of sight.
 
@@ -139,7 +164,7 @@ degraded to 30), and the pacing follows the rate-limit headers automatically, so
 takes roughly a minute and a half rather than twelve.
 
 Results are cached in `.anilist_cache.json` for 7 days, so a repeat run is close to instant. Turn
-on **Ignore saved results** to refetch, `--no-cache` on the CLI, or point `ANIEXPORT_CACHE`
+on **Ignore saved results** (under **Options**) to refetch, `--no-cache` on the CLI, or point `ANIEXPORT_CACHE`
 elsewhere.
 
 ### Reviewing and fixing matches
@@ -210,7 +235,8 @@ bound to the account you expect, so do it before every write.
 
 ### Writing to AniList
 
-With the destination set to AniList, paste an access token and press **Check**. The token is held
+With the destination set to AniList, open **Connect AniList** in the top bar, paste an access
+token and press **Check**. The token is held
 in that browser tab only: it is never saved to disk, never written to the export files, and never
 appears in a server response.
 
@@ -279,7 +305,7 @@ doing before a 300-row write.
 
 ### Reading a list back out of AniList
 
-**From AniList…** pulls an existing list straight in — status, score, progress, notes and dates —
+The **AniList user** source tab pulls an existing list straight in — status, score, progress, notes and dates —
 and merges it with whatever is already on screen. Nothing is written to any account.
 
 - A **public** list needs nothing but the username.
@@ -300,8 +326,8 @@ only travel in one direction.
 
 ### Copying one account onto another
 
-**Copy an account…** reads **every anime and every manga** from one AniList account and writes
-them to the account whose token is in the panel above. Use it to move to a new account, or to
+**Copy an AniList account…** (in the `⋯` menu) reads **every anime and every manga** from one
+AniList account and writes them to the account connected in the top bar. Use it to move to a new account, or to
 mirror one you control.
 
 What travels: status, score, progress, volumes, rereads, notes, start and finish dates, and the
@@ -343,7 +369,7 @@ Three things cannot be copied, because AniList will not hand them back in a form
 
 ### Importing an existing MAL export
 
-**Import XML** reads a MyAnimeList export (`.xml`, or `.gz` in browsers with
+The **MAL export file** source tab reads a MyAnimeList export (`.xml`, or `.gz` in browsers with
 `DecompressionStream`). Matching rows are updated from the file; unknown ids are appended unless
 you turn that off. Imported rows carry no AniList id until you resolve or search for them.
 
@@ -356,12 +382,13 @@ import file.
 `Download XML` / `Download .XML.GZ` serve the current selection as a normal browser download, so
 **your browser picks where the file goes** — the copy kept beside the script is a convenience, not
 the delivery. Anime and manga write to separate files, so one media type can never overwrite or
-impersonate the other. **Preview XML** shows the generated file, and **Keep timestamped copies**
+impersonate the other. **Preview** shows the generated file, and **Keep dated copies of the XML** (under **Options**)
 also writes `..._YYYYmmdd_HHMMSS.xml` on every save.
 
-**List Status** and **Score (0-10)** apply to the rows you have selected, or to every row the
-filter is showing when nothing is selected. Each says which, under the control. They used to stamp
-every row in the list on every keystroke.
+The status and score on the **Source** step are only what *new* rows start with. To change rows
+already in the table, use **Set** above it: it applies to the rows you have selected, or to every
+row the filter is showing when nothing is selected, and says which beside it. The old controls did
+both jobs at once and stamped every row in the list on every keystroke.
 
 There is deliberately no "export to this path" field. The server would have to accept a filesystem
 path from a web page, and any page in your browser can post to a local port.
@@ -441,7 +468,7 @@ Known defects, each with the code that causes them, are listed in
 python -m unittest discover -s tests -t .
 ```
 
-**430 tests** (about eight seconds) covering the XML builders, status and date handling, batched resolution, the disk
+**466 tests** (about nine seconds) covering the XML builders, status and date handling, batched resolution, the disk
 cache, candidate ranking, run control, the GUI event contract, the AniList write payloads, the
 conflict policy (one case per rule, including the blank-progress and score-zero cases that
 motivate it), the per-row diff, the undo snapshot and its restore and delete paths, retrying
@@ -465,9 +492,9 @@ titles.py              reading a pasted line
 malxml.py              the MyAnimeList XML builders
 static/index.html      the page
 static/app.css         its styles
-static/app/*.js        its behaviour, nine numbered sections joined in order
+static/app/*.js        its behaviour, ten numbered sections joined in order
 tools/calibrate.py     tune the review thresholds against a real list
-tests/                 430 tests, no network
+tests/                 466 tests, no network
 ```
 
 `static/index.html` links the stylesheet and script as ordinary files, so it opens in a browser on

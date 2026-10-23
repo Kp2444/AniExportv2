@@ -262,6 +262,9 @@
       if (capped.length === 0) {
         tableBody.innerHTML = '';
         emptyState.style.display = 'block';
+        // Three different empties: nothing yet, nothing yet because a run has
+        // only just started, and rows that the filter is hiding.
+        emptyState.dataset.mode = currentAnimes.length ? 'filter' : (isProcessing ? 'running' : 'none');
         updateSelectAllState();
         return;
       }
@@ -290,7 +293,7 @@
                 <div class="title-stack">
                   <div class="cell-title" title="${escapeHtml(item.title)}">${escapeHtml(item.title)}</div>
                   <div class="title-meta">
-                    ${malUrl ? `<a href="${malUrl}" class="id-link" target="_blank" rel="noopener noreferrer" title="View on MyAnimeList">MAL ${item.id}</a>` : '<span class="id-missing">no MAL ID</span>'}
+                    ${malUrl ? `<a href="${malUrl}" class="id-link" target="_blank" rel="noopener noreferrer" title="View on MyAnimeList">MAL ${item.id}</a>` : `<span class="id-missing">${alUrl ? 'no MAL ID' : 'not found on AniList'}</span>`}
                     ${alUrl ? `<a href="${alUrl}" class="id-link" target="_blank" rel="noopener noreferrer" title="View on AniList">AL ${item.anilist_id}</a>` : ''}
                     ${hasRenamed ? `<span class="cell-original" title="${escapeHtml(pastedText)}">from ${escapeHtml(pastedText)}</span>` : ''}
                     ${reviewMarkHtml(item)}${aliasMarkHtml(item)}
@@ -300,13 +303,13 @@
                 </div>
               </div>
             </td>
-            <td>
+            <td class="cell-type">
               <span class="${rowBadge(item).cls}">${escapeHtml(rowBadge(item).text)}</span>
               ${item.year ? `<span class="tag-year">${item.year}</span>` : ''}
             </td>
-            <td>${progressHtml(item, globalIdx)}</td>
-            <td>${statusCellHtml(item, globalIdx)}</td>
-            <td style="text-align:center;">
+            <td class="cell-count">${progressHtml(item, globalIdx)}</td>
+            <td class="cell-status">${statusCellHtml(item, globalIdx)}</td>
+            <td class="cell-more" style="text-align:center;">
               <button class="btn-detail" data-detail="${globalIdx}"
                 aria-label="More fields for ${escapeHtml(item.title)}"
                 title="Score, dates, tags, comments">${expandedRows.has(globalIdx) ? '&#9662;' : '&#8943;'}</button>
@@ -582,7 +585,9 @@
     });
 
     btnCopyUnresolved.addEventListener('click', async () => {
-      const missed = currentAnimes.filter(i => Number(i.id) <= 0).map(i => i.original || i.title);
+      // The same rows the fixer works through. "No MAL id" was the old test,
+      // which under an AniList write copied rows that write perfectly well.
+      const missed = currentAnimes.filter(i => !isActionable(i)).map(i => i.pasted || i.original || i.title);
       if (!missed.length) return;
       try {
         await navigator.clipboard.writeText(missed.join(String.fromCharCode(10)));
@@ -687,10 +692,13 @@
       updateBulkLabels();
     }
 
-    selectStatus.addEventListener('change', () => applyBulk('status', selectStatus.value));
-
-    // `change` rather than `input`: bound to `input` this re-stamped every row
-    // on every keystroke, so typing "10" wrote a 1 across the list first.
+    // Step 1's defaults: what new rows start as. Setting rows that already
+    // exist is the review toolbar's job (09-shell.js). One pair of controls
+    // used to do both, so changing the default for the next paste re-stamped
+    // the whole list. `change` rather than `input` either way: bound to
+    // `input` the old box acted on every keystroke, so "10" wrote a 1 first.
+    selectStatus.addEventListener('change', saveState);
     inputScore.addEventListener('change', () => {
-      applyBulk('score', parseInt(inputScore.value, 10) || 0);
+      inputScore.value = Math.max(0, Math.min(10, parseInt(inputScore.value, 10) || 0));
+      saveState();
     });

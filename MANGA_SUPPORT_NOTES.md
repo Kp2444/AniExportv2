@@ -491,12 +491,21 @@ whose official romaji name shares almost no characters with the English one that
 `First God Of War` resolves **correctly** to `Di Yi Zhan Shen` at a ratio of 0.129. Median ratio is
 0.677 and a third of all matches are exact, so the low tail is mostly correct, not wrong.
 
-**No floor works.** The known-bad case recorded in the original plan —
-`I Am Being Chased To Fall In Love Everyday` → `Forced to Date with BOSS Everyday` — sits at
-**0.56**, mid-distribution. A floor of 0.55 misses it; 0.6 catches it along with 121 others. It
-resolved to a single candidate, so the runner-up gap cannot catch it either. **That case is not
-detectable by either signal**, and saying so is more honest than shipping a threshold that flags
-half the list to catch one row.
+**No floor works.** Take the case this document used to call known-bad —
+`I Am Being Chased To Fall In Love Everyday` → `Forced to Date with BOSS Everyday`. It sits at
+**0.56**, mid-distribution: a floor of 0.55 misses it, 0.6 catches it along with 121 others, and
+it resolved to a single candidate so the runner-up gap cannot see it either. The conclusion stands
+— no floor is worth shipping to catch a row like this.
+
+> **Correction (2026-10-22, R15).** That row is **not a wrong match.** Re-measured against the
+> live API: AniList entry **192823** lists `I Am Being Chased to Fall in Love Everyday`
+> **verbatim** among its three synonyms, so `Forced to Date with BOSS Everyday` is the right
+> entry and always was. It was recorded here as the canonical undetectable failure on the
+> strength of the two titles looking unrelated, which is exactly the mistake this list of
+> translated titles exists to warn about. `_alias_hit` now returns `True` for it, so the row the
+> document called invisible is labelled **known alias** in the table. A genuinely undetectable
+> wrong match may well exist in the list; this was not one, and no replacement example has been
+> measured.
 
 **What does carry signal is an inversion:** the entry the ranker chose matched the searched title
 *worse* than a candidate it passed over, because a tier above the title score - usually "has a MAL
@@ -785,6 +794,10 @@ variants only run for titles that matched nothing, eight to a request, so the ca
 
 ### gui.py is 1,529 lines, not 6,662 (R18)
 
+> The figures in this section are what R18 measured on the day it landed. Later work moved them:
+> the live numbers are in the "Current shape" table in [REVIEW.md](REVIEW.md). They are left as
+> recorded rather than edited, because this section describes one change, not the present.
+
 The page was a **5,127-line string literal** inside `gui.py`: 1,849 lines of CSS, 2,596 of
 JavaScript and 682 of markup, against about 1,460 lines of actual Python.
 
@@ -930,6 +943,9 @@ free and it is correct, but the counter was the actual defect.
 
 ### The script is nine sections, the resolver is four files (R19, R20)
 
+> Nine when R19 landed; **ten** since the 2026-10-22 redesign split the boot section into
+> `09-shell.js` and `10-boot.js`. Recorded as measured, like the section above.
+
 **R19.** `static/app.js` was 3,023 lines. It is now nine numbered sections under `static/app/`,
 joined in name order - zero-padded, because the join has to be deterministic and adding a section
 must not be able to reorder the others.
@@ -1047,6 +1063,204 @@ R10-R15.
 `tests/test_match_confidence.py` carries a regression test for the rejected half: if
 `_title_ratio` ever starts scoring 1.0 for a title that only matches a synonym, the synonyms have
 been folded back in and the measurement needs redoing.
+
+---
+
+## 🧭 Interface redesign (2026-10-22)
+
+The page was rebuilt as three guided steps - **Source → Review → Send** - with a new palette
+(Manrope / JetBrains Mono, coral accent, dark and light themes). Every endpoint, dialog, keyboard
+shortcut, stored setting and all 104 element ids the script depends on were inventoried first and
+are still present; the template tests pin them.
+
+**Layout.** The top bar carries the stepper, the List and Send-to selectors, the AniList account
+popover and a `⋯` menu (Copy an AniList account, shortcuts, theme, Start over). Source is three
+tabs - Paste, MAL export file, AniList user - plus the new-row defaults, an Options popover and
+Resolve; it folds to one line once rows exist. The send actions live in a bar pinned under the
+table and change with the destination.
+
+**Deliberately removed.** The AniList list-import dialog (`listImportModal`, `btnListImportCancel`):
+it became the AniList user tab. Nothing else was dropped.
+
+**Defects found while doing it, all fixed:**
+
+| Defect | Fix |
+|---|---|
+| Resolve ran before a destination was chosen, yet the server ranks by it (`prefer_mal_id`) | Resolve is gated on a destination; switching afterwards offers **Resolve again for …** |
+| List Status / Score stamped every row and were also the new-row defaults | Split: defaults on Source, **Set** above the table for selected (or visible) rows |
+| CSV wrote blank progress (`progressFields().read` was undefined) | Uses `progressValue`; columns progress/total/volumes_read/volumes |
+| **Copy unmatched** used "no ids", not "cannot go to this destination" | Uses `!isActionable`, the same set the Find button shows for |
+| Fix/Copy shown when the notice bar was only reporting merged lines | Hidden unless a row actually cannot travel |
+| Notice said "no MyAnimeList ID on AniList" for titles AniList never returned | "not found on AniList" |
+| Opening the account panel from a dialog closed it again on the same click, and it sat under the backdrop | One-tick open guard; bar lifted after opening |
+| Same-port-different-origin test flaky (WinError 10053) | Origin check moved after the bounded body read |
+| Full-viewport blur behind dialogs stalled the renderer | Scrim is a flat colour |
+| The mono face drew `->` and `<!--` as ligatures in the XML preview and diff | `font-variant-ligatures: none` |
+| At 430px the bar ran 60px off-screen (account chip and menu unreachable) | Controls get their own row on phones; send bar flattened |
+
+**Verified in Chrome** against the local server: first load, destination gate, popovers and outside
+click, the three source tabs (arrow keys, `.txt` drop, MAL file drop, a public AniList list read),
+a live resolve, fold and stepper, filters and empty states, the Set controls, sorting and row
+keys, destination switch, the fixer with a live search and pick, write-without-token, account panel
+above a dialog, `?` sheet, light theme, XML preview, the write plan and undo picker (with throwaway
+snapshots, removed afterwards), Start over, and 430px for Source and Review in both destinations.
+Contrast is checked from the CSS tokens by a test: text ≥ 4.5:1, borders and focus ring ≥ 3:1.
+
+**Not verified:** a real write or undo through the new UI (the write path itself is unchanged and
+was measured live earlier), real touch devices, and screen-reader output beyond the ARIA attributes
+the tests pin.
+
+---
+
+### Light and dark pass (2026-10-22)
+
+Every surface was then walked in both themes at 1568, 1000 and 390 px: the three source tabs, the
+destination cards, all three popovers, the table with its detail row, review and alias marks, the
+notice bar, the empty-filter state, the progress card, all six dialogs, and both send bars.
+
+| Defect | Fix |
+|---|---|
+| `.popover label { display: block }` outranked `.toggle-control`, so each option switch rendered as a 2px dot stacked above its own label | exempt the toggles; same rule in dialogs was dropping "keep mine" onto its own line |
+| The Options popover opened downward off the bottom of a short window | it opens upward; the button sits at the foot of the card |
+| The table had its own scroll box, so its last rows sat behind the send bar and there were two scrollbars | the page scrolls; the header sticks under the top bar, which publishes its height as `--appbar-h` |
+| A keyboard-selected row could land under either bar | `scroll-padding` on both edges, from the same published heights |
+| The sticky header's focus ring lost its top edge under the top bar | drawn inset |
+| Dialogs and popovers barely separated from the page in dark mode | scrim 0.74 → 0.80, hairline ring 0.06 → 0.12 |
+| `.write-plan .warn` boxed the per-field diff notes inside the line's own tint | plain text |
+| Flex dialog body spaced with `gap` *and* a child margin | margin dropped |
+| Row hover at 3.5% alpha was imperceptible | 6.5% dark, 5% light |
+| The page shifted sideways whenever it became short enough to lose its scrollbar | `scrollbar-gutter: stable` |
+| The stepper moved when the Send-to picker appeared | `1fr auto 1fr` |
+| At 390px the List and Send-to pickers read "Anim" and "MAL:" | the account chip is icon-only there, label kept for screen readers |
+| At 390px the account popover ran off the left edge | bar popovers span the bar, gutter to gutter |
+| The phone diff grid no longer matched the line's columns | regridded |
+| "no MAL ID" on a row AniList never returned at all | "not found on AniList" |
+| An unmatched row's Find box was dimmed with the rest of the row | the box stays at full strength |
+| Both notice-bar messages ran together as one block | one paragraph each, divided |
+| The paste placeholder repeated the label above it | it now shows the line grammar (`Frieren 12/28 9/10 watching`) |
+| The renderer froze whenever a dialog was open: both bars kept blurring the viewport behind the scrim, where the blur buys nothing | suspended while a dialog is open, via `:has()`; without `:has()` support the rule is ignored and the old behaviour stands |
+| One Escape closed *every* open dialog, so dismissing a sheet over a write plan took the plan too | the topmost only, still found by query rather than a hand-kept list |
+
+---
+
+### Polish pass (2026-10-22)
+
+A design pass rather than a defect hunt: what the screens *say* and how they are grouped.
+
+**The number 12 appeared seven times on one Review screen** - in the folded summary, the chips, the
+filter count, the Set scope, and three times in the send bar. The filter count now shows only what
+differs from the obvious ("8 of 12 shown", "3 selected", or nothing at all), the send bar's subline
+no longer opens with the count the headline just gave, and the Included stat hides when it equals
+the row count.
+
+**Three bands became one panel.** The filters, the Set row and the table were three separately
+bordered blocks stacked on each other, each with its own container treatment. The toolbar is now
+the head of the table's own panel - one object, controls and data together - and the folded source
+summary dropped the card chrome it was inheriting from its open form, so it reads as a caption.
+That recovered a table row of vertical space and removed two competing borders.
+
+**Rows hang from one line.** Table cells were `vertical-align: middle`, so on a row carrying a
+match picker - half as tall again - the type, progress and status floated below the title they
+belong to. Cells are top-aligned, with the taller controls offset back to sit level with the
+title. The match picker itself was styled like a primary input and shouted over the title; it is
+now quiet until hovered or focused.
+
+**The Source step fits a laptop screen** once a destination is chosen (745 px against a 911 px
+viewport, where it was 992 px). Both ledes and the two destination card bodies were cut to the
+sentence that carries the information, the paste box grows with the window instead of pushing
+Resolve off the bottom, and the label above it stopped repeating the heading.
+
+**Other fixes:**
+
+| Defect | Fix |
+|---|---|
+| With no destination chosen, the chooser took a grid row of its own and stranded CSV alone on a third row; the bar grew to 190 px | the chooser sits beside the summary, bar back to 98 px |
+| "Choose where they are going to send them." | "Pick a destination to send them." |
+| The resolve progress sub-line read `-> Chainsaw Man` under `[7/16] Chainsaw Man` | shown only when AniList landed on a different name |
+| Row hover, chips and status pills snapped between states | short transitions, still off under `prefers-reduced-motion` |
+| At 390 px the toolbar spent a row on a keyboard-shortcut button | hidden there - a shortcut sheet is no use without a keyboard, and `?` and the tools menu still reach it |
+| At 390 px the summary wrapped to two lines, and wrapped controls parked in the right corner | "in the list" dropped, wrapped controls left-aligned |
+
+**Correction to the previous section:** suspending the bars' backdrop blur under a dialog was
+reported there as the fix for the renderer stalls. It is worth keeping - blurring behind an opaque
+scrim is wasted work - but it is **not** the cause: a stall was later reproduced with the blur
+fully disabled. The stalls are in the screenshot pipeline, not demonstrably in the page.
+
+---
+
+### Keyboard and assistive-tech audit (2026-10-22)
+
+Run in the browser against the live page, not read off the source: duplicate ids, accessible
+names, labels, landmarks, heading order, image alts, focus order, scroll containers. **Landmarks,
+image alts, `lang`, `th scope`, the skip link, the toast and progress live regions, and reduced
+motion were already correct and were left alone.** Eight things were not, each reproduced before
+it was touched and re-measured after.
+
+| Gap | How it was reproduced | Fix |
+|---|---|---|
+| **Tab escaped an open dialog.** With a dialog open, 45 focusable elements were still reachable behind it; two Tab presses from the close button landed on `<body>`, then the skip link | pressed Tab, read `document.activeElement` | the Tab key cycles within the topmost dialog |
+| **The page scrolled behind an open dialog.** The scrim blocks the mouse; nothing blocked the wheel | scrolled with a dialog open, `scrollY` moved | `overflow: hidden` while any dialog is open |
+| **The download links ignored being disabled.** They are `<a href>`, so `.disabled` and `aria-disabled` only changed how they looked and read - the click still went to `/api/download/xml`, which 404s when no export has been built | clicked while dimmed, handler fired | the click is cancelled while `aria-disabled="true"` |
+| **The sideways-scrolling table was mouse-only.** Below ~820px the table scrolls inside its panel (780px of content in a 455px box) with `tabindex="-1"` on the box | measured `scrollWidth` vs `clientWidth` at 500px | it becomes a labelled, focusable region *while it actually scrolls*, and not at widths where nothing overflows |
+| **The notice bar announced nothing.** It appears after a resolve carrying the not-found and stale-match counts | attribute absent; the toast beside it already had one | `role="status" aria-live="polite"` |
+| **Every match picker had the same name.** All of them read "Pick the correct match for this title", so there was no telling which row you were on | read the accessible name of each | `aria-label="Match for <the pasted line>"`, matching the Find box beside it |
+| **No `h1` on the Review screen.** The `h1` is in the source body, which is `display:none` once the source folds, leaving the send bar's `h2` as the only heading on the page | listed visible headings | the folded summary line is the `h1`, so exactly one is present in either state |
+| **The table had no name.** | no `aria-label`, no `<caption>` | `aria-label="Resolved titles"` |
+
+The scroll lock sits on `<html>`, not `<body>`: `<html>` is the scrolling element here, and on `<body>`
+the rule has no effect at all - the first attempt was measured still scrolling. `scrollbar-gutter:
+stable` is what keeps the lock from shifting the layout sideways, and the width was checked either
+side of opening a dialog (1905px both).
+
+**Measurement note:** `window.scrollBy()` still moves a container with `overflow: hidden`, so it
+cannot verify the lock. What is verified here is the computed state while a dialog is open, across
+one dialog, two stacked dialogs, and after the last closes. A real wheel gesture was not tested.
+
+---
+
+### End-to-end verification (2026-10-22)
+
+Logic exercised directly, the server probed over HTTP, the flow driven in the browser. Listed so
+the next pass knows what was actually measured rather than assumed.
+
+**Verified correct, nothing changed:**
+
+| Area | What was run |
+|---|---|
+| Line parsing | all 17 examples in `parse_title_line`'s own docstring, exact - including the titles that must *not* be read (`86 - Eighty Six`, `Attack on Titan 139`, `91 Days`, `7 Seeds`, `20th Century Boys`, `07-Ghost`) |
+| Conflict policy | 12 field cases plus `mine` override, `overwrite` policy, and the create no-op. Progress and volumes refuse to go backwards, `scoreRaw` 0 never lands on a real score, `COMPLETED` only yields to `REPEATING` |
+| `progressVolumes` on anime | the unguarded branch is unreachable: anime sets it to `None` and it is never added to the payload |
+| XML builders | anime and manga round-tripped through a parser - ids, counts, scores, statuses, dates, `&` and `<` in comments, dedup, and the distinct export types (1 and 2) |
+| Cross-layer keys | `start_date`/`finish_date` are the same key in the table, the state writer, the builder and the importer |
+| Origin enforcement | absent, same-origin, another site, and **another port on this host** - only the first two pass |
+| Body limit | 25 MB; over it answers 413 then closes, and the Windows connection reset that follows is already documented |
+| Run lock | two overlapping `/api/process` calls: first streams, second gets 409 |
+| Media separation | anime and manga keep separate lists, separate files and separate export types across switching back and forth; edits survive the round trip |
+| End-to-end integrity | pasted values, a progress edit and a status change typed into the real controls all arrive byte-identical in the XML the server hands back |
+| State restore | a reload returns every row, value, destination and media type exactly |
+| Status map | invertible for both media, including `REPEATING` to Rewatching/Rereading, and cross-medium words mapping to the current medium |
+| Cache | 7-day expiry dropped on load, a version bump discards the whole file, corrupt and missing files degrade to "no cache" without raising, `ANIEXPORT_CACHE` respected |
+
+**One real gap, fixed: the page could be framed by any site.**
+
+The origin check refuses a cross-site POST, but it cannot see a frame - a frame's own clicks are
+same-origin and pass it. Measured: a page served from a second local port (`:5399`) framed the tool
+at `:5310` and the frame loaded. An attacker page cannot read inside the frame, but clickjacking
+does not need to: **Start over** destroys the session and **Write to AniList** is irreversible.
+
+Every response now carries `X-Frame-Options: DENY`, `Content-Security-Policy: frame-ancestors
+'none'`, `X-Content-Type-Options: nosniff` and `Referrer-Policy: no-referrer`, set in one place by
+overriding `end_headers`. Re-measured: headers present on the page and on the API, the frame now
+renders empty, and the app is unaffected at the top level. No `default-src` is set - the page
+inlines its own CSS and script and loads cover art from AniList's CDN, so a blanket policy would
+break it without being asked for.
+
+**Checked and judged not a gap:** there is no client-side size check before the 20 MB import limit.
+Reaching it needs roughly 100,000 entries; a 339-title export is about 60 KB.
+
+**Not re-verified this session:** the live AniList write, undo and account-copy calls. Those need a
+real token and make irreversible changes, so the payload building and conflict policy were tested
+directly instead; the live behaviour was measured in the earlier sessions recorded above.
 
 ---
 
