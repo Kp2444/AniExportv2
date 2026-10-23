@@ -184,6 +184,17 @@
     .btn:disabled, .btn[disabled], .btn.disabled, .btn[aria-disabled="true"] {
       opacity: 0.45; cursor: not-allowed; transform: none;
     }
+    /* Working. Disabling a button says "you cannot press this"; it does not
+       say "because I am busy", and these start requests that take seconds. */
+    .btn.is-busy { position: relative; color: transparent !important; pointer-events: none; }
+    .btn.is-busy::after {
+      content: ""; position: absolute; top: 50%; left: 50%; width: 1em; height: 1em;
+      margin: -0.5em 0 0 -0.5em; border-radius: 50%;
+      border: 2px solid currentColor; border-top-color: transparent;
+      color: var(--text); animation: spin 0.7s linear infinite;
+    }
+    .btn-primary.is-busy::after { color: var(--on-accent); }
+    .btn.is-busy > * { visibility: hidden; }
     .btn-primary {
       color: var(--on-accent); background: var(--accent); border-color: transparent;
       box-shadow: 0 1px 0 rgba(255, 255, 255, 0.18) inset;
@@ -191,8 +202,11 @@
     .btn-primary:hover { background: var(--accent-hover); }
     .btn-primary:active { background: var(--accent-press); }
     .btn-secondary { background: var(--surface-2); }
-    .btn-ghost { background: transparent; border-color: transparent; color: var(--text-muted); }
-    .btn-ghost:hover { background: var(--surface-3); color: var(--text); }
+    /* A hairline at rest, not nothing: with a transparent border these read as
+       captions rather than controls - "Add or change titles" is the only way
+       back to the source step and looked like a label sitting in the corner. */
+    .btn-ghost { background: transparent; border-color: var(--border); color: var(--text-muted); }
+    .btn-ghost:hover { background: var(--surface-3); border-color: var(--border-strong); color: var(--text); }
     .btn-danger { color: var(--danger); border-color: var(--danger); background: var(--danger-tint); }
     .btn-sm, .btn-xs { height: var(--control-sm); padding: 0 0.7rem; font-size: 0.8125rem; }
     .btn-lg { height: var(--control-lg); padding: 0 1.25rem; font-size: 0.9375rem; border-radius: var(--radius-md); }
@@ -304,8 +318,19 @@
       background: var(--surface-2); border: 1px solid var(--border-strong);
     }
     .step.is-current { color: var(--text); background: var(--surface-2); border-color: var(--border-strong); }
-    .step.is-current .step-num { color: var(--on-accent); background: var(--accent); border-color: transparent; }
-    .step.is-done .step-num { color: var(--success); background: var(--success-tint); border-color: transparent; }
+    /* The animation is declared only in the reached states, so it starts when
+       the class lands and never runs on an idle step. A step that goes
+       straight from current to done keeps the same animation property and so
+       does not replay - which is the right call anyway, it has not gone
+       anywhere. */
+    .step.is-current .step-num {
+      color: var(--on-accent); background: var(--accent); border-color: transparent;
+      animation: pop-badge 240ms var(--ease);
+    }
+    .step.is-done .step-num {
+      color: var(--success); background: var(--success-tint); border-color: transparent;
+      animation: pop-badge 240ms var(--ease);
+    }
     /* Send is the bar under the table, never a page, so it is never current;
        it lights up when there is something ready to go. */
     .step.is-ready .step-num { color: var(--accent-text); background: var(--accent-tint); border-color: var(--accent); }
@@ -368,9 +393,11 @@
     .popover-options { left: 0; right: auto; top: auto; bottom: calc(100% + 8px); width: 340px; }
     .popover-title { font-size: 0.8125rem; font-weight: 800; letter-spacing: 0.04em; text-transform: uppercase;
                      color: var(--text-subtle); margin-bottom: 0.6rem; }
-    /* Not the toggles: this outranked .toggle-control and stacked each
-       switch, squashed to a dot, above its own label. */
-    .popover label:not(.toggle-control) { display: block; margin-bottom: 0.35rem; }
+    /* Direct children only, for the same reason as .modal-body > label: as a
+       descendant rule this reached the option toggles and stacked each switch,
+       squashed to a dot, above its own label. The token field's label is a
+       direct child; every toggle sits inside a .toggle-card. */
+    .popover > label { display: block; margin-bottom: 0.35rem; }
     .popover-menu { padding: 0.35rem; min-width: 250px; }
     .menu-item {
       display: flex; align-items: center; justify-content: space-between; gap: 1rem; width: 100%;
@@ -510,6 +537,7 @@
 
     /* ===== Review ======================================================= */
     .stage-review { display: flex; flex-direction: column; gap: 1rem; }
+    .stage-source > .source-body, .stage-review { animation: rise 260ms var(--ease) both; }
     .stage-review > .review-toolbar + .table-wrapper { margin-top: -1rem; }
 
     .progress-card {
@@ -533,12 +561,22 @@
     }
     .progress-pill:empty { display: none; }
     .progress-pill-strong { color: var(--on-accent); background: var(--accent); }
-    .progress-track { height: 6px; border-radius: 999px; overflow: hidden; background: var(--surface-3); }
+    .progress-track { position: relative; height: 6px; border-radius: 999px; overflow: hidden; background: var(--surface-3); }
     .progress-fill {
       height: 100%; width: 100%; transform: scaleX(0); transform-origin: left center;
       background: linear-gradient(90deg, var(--accent), var(--accent-hover));
       transition: transform 260ms var(--ease);
     }
+    /* A run that is waiting on the rate limit can sit on the same percentage
+       for half a minute. The sheen keeps saying "still going" when the bar
+       cannot. It rides the track, not the fill, so it reads at 0% too. */
+    .progress-track::after {
+      content: ""; position: absolute; inset: 0; width: 28%;
+      background: linear-gradient(90deg, transparent,
+                  color-mix(in srgb, var(--accent) 45%, transparent), transparent);
+      animation: sheen 1.8s ease-in-out infinite;
+    }
+    body:not([data-running="true"]) .progress-track::after { display: none; }
     .run-controls { display: none; gap: 0.5rem; }
     .run-controls.show { display: flex; }
 
@@ -549,7 +587,7 @@
       border-color: color-mix(in srgb, var(--warning) 35%, transparent);
       border-radius: var(--radius-md);
     }
-    .notice-bar.show { display: flex; }
+    .notice-bar.show { display: flex; animation: rise 240ms var(--ease) both; }
     .notice-bar > svg { margin-top: 2px; font-size: 1.1rem; color: var(--warning); }
     .notice-text { flex: 1; min-width: 0; }
     .notice-text strong { color: var(--text); }
@@ -731,7 +769,14 @@
     .row-cap { padding: 0.75rem 1rem; font-size: 0.8125rem; color: var(--text-muted); border-top: 1px solid var(--border); }
     .row-cap .btn { margin-left: 0.5rem; }
 
-    .empty-state { padding: 3rem 1.5rem; text-align: center; color: var(--text-muted); }
+    /* Centred in whatever height the panel keeps, rather than parked near the
+       top of it: the wrapper holds a 220px minimum so the table does not jump
+       when the last row is filtered away. */
+    .empty-state {
+      display: flex; flex-direction: column; align-items: center; justify-content: center;
+      gap: 0.6rem; min-height: 180px; padding: 2rem 1.5rem;
+      text-align: center; color: var(--text-muted);
+    }
     .empty-state p { display: none; }
     .empty-state[data-mode="none"] .empty-none,
     .empty-state[data-mode="running"] .empty-running,
@@ -765,7 +810,20 @@
     .send-anilist, .send-xml { display: none; }
     body[data-destination="anilist"] .send-anilist { display: flex; }
     body[data-destination="xml"] .send-xml { display: flex; }
-    .send-account { font-size: 0.8125rem; color: var(--text-muted); margin-right: 0.25rem; }
+    /* Status, not an action: sitting bare between two buttons it read as a gap
+       in the row. A dot and a little air put it in the same family as the
+       account chip in the top bar, which says the same thing. */
+    .send-account {
+      display: inline-flex; align-items: center; gap: 0.4rem;
+      margin-right: 0.6rem; font-size: 0.8125rem; color: var(--text-muted);
+    }
+    .send-account::before {
+      content: ""; width: 7px; height: 7px; border-radius: 50%; flex: none;
+      background: var(--text-subtle);
+    }
+    body.has-anilist .send-account::before {
+      background: var(--success); box-shadow: 0 0 0 3px var(--success-tint);
+    }
     .send-account strong { color: var(--text); }
     .import-links { font-size: 0.8125rem; color: var(--text-subtle); margin-right: 0.25rem; }
 
@@ -805,9 +863,12 @@
     .modal-body > * + * { margin-top: 0.75rem; }
     /* A flex body spaces with gap; the margin above doubled it. */
     .modal-body.write-plan > * + * { margin-top: 0; }
-    /* Not the inline pickers: this outranked .diff-pick and dropped "keep
-       mine" onto a line of its own under the field it belongs to. */
-    .modal-body label:not(.diff-pick):not(.toggle-control) { display: block; margin-bottom: 0.35rem; }
+    /* Direct children only. As a descendant rule this kept reaching labels it
+       was never meant for - the diff pickers, the option toggles, the undo
+       delete box - and turning each into a block, which dropped the control
+       onto its own line or killed its flex gap. Every real field label in a
+       dialog is a direct child; nothing else should be caught. */
+    .modal-body > label { display: block; margin-bottom: 0.35rem; }
     .modal-body .input { width: 100%; }
 
     /* the write plan and everything rendered into it */
@@ -820,7 +881,34 @@
       color: var(--text); background: var(--warning-tint);
       border-left: 3px solid var(--warning);
     }
-    span.warn { padding: 0; background: none; border: 0; color: var(--warning); }
+    /* Anywhere, including inside .write-plan, whose `.warn` rule would
+       otherwise outrank this one and box an inline run of text. A boxed span
+       wraps with the background covering only the first line. */
+    span.warn, .write-plan span.warn {
+      display: inline; padding: 0; background: none; border: 0; color: var(--warning);
+    }
+    /* The Check result: one block per media type, figures rather than a
+       sentence. Five numbers in prose read as a paragraph. */
+    .copy-stage { padding: 0.6rem 0.75rem; border-radius: var(--radius-sm); background: var(--surface-2);
+                  animation: rise 220ms var(--ease) both; }
+    .copy-stage + .copy-stage { margin-top: 0.4rem; animation-delay: 60ms; }
+    .copy-stage-head {
+      margin: 0 0 0.4rem; font: 800 0.6875rem/1 var(--font-sans);
+      letter-spacing: 0.08em; text-transform: uppercase; color: var(--text-muted);
+    }
+    .copy-stage-empty { color: var(--text-subtle); }
+    .copy-figs { display: flex; flex-wrap: wrap; gap: 0.4rem 1.1rem; margin: 0; }
+    .copy-fig { display: flex; align-items: baseline; gap: 0.35rem; }
+    .copy-fig dt {
+      font: 800 0.6875rem/1 var(--font-sans); letter-spacing: 0.06em;
+      text-transform: uppercase; color: var(--text-subtle);
+    }
+    .copy-fig dd { margin: 0; font: 600 0.8125rem/1 var(--font-mono); color: var(--text-muted);
+                   font-variant-numeric: tabular-nums; }
+    /* The two that actually change the destination account. */
+    .copy-fig.is-live dd { color: var(--accent-text); }
+    .copy-fig.is-warn dt, .copy-fig.is-warn dd { color: var(--warning); }
+
     .diff-list {
       display: flex; flex-direction: column; gap: 0.5rem; max-height: 46vh; overflow: auto;
       padding: 0.5rem; border: 1px solid var(--border); border-radius: var(--radius-md); background: var(--bg);
@@ -847,6 +935,11 @@
     .write-plan .diff-note.warn { padding: 0; background: none; border: 0; color: var(--warning); }
     .diff-pick { display: inline-flex; align-items: center; gap: 0.35rem; margin: 0 0 0 auto; font-weight: 700; color: var(--text); cursor: pointer; }
     .diff-pick input { accent-color: var(--accent); }
+    /* A choice with a consequence: the box and its label on one line, what it
+       does underneath, rather than the explanation trailing off the label. */
+    .choice-line { display: flex; align-items: flex-start; gap: 0.5rem; font-weight: 700; color: var(--text); cursor: pointer; }
+    .choice-line input { margin: 0.2rem 0 0; flex: none; }
+    .choice-note { margin: 0.35rem 0 0 1.4rem; font-size: 0.8125rem; color: var(--text-muted); }
 
     /* the fixer */
     .fix-counter { padding: 0.2rem 0.55rem; border-radius: 999px; font: 600 0.75rem/1 var(--font-mono);
@@ -912,6 +1005,12 @@
 
     /* ===== Motion ======================================================= */
     @keyframes spin { to { transform: rotate(360deg); } }
+    /* The reduced-motion stand-in for anything that spins. Opacity carries no
+       direction of travel, so it does not provoke what rotation provokes. */
+    @keyframes breathe { 0%, 100% { opacity: 1; } 50% { opacity: 0.35; } }
+    @keyframes sheen { from { transform: translateX(-100%); } to { transform: translateX(300%); } }
+    @keyframes rise { from { opacity: 0; transform: translateY(8px); } to { opacity: 1; transform: none; } }
+    @keyframes pop-badge { 0% { transform: scale(0.72); } 60% { transform: scale(1.12); } 100% { transform: none; } }
     @keyframes fade-in { from { opacity: 0; } to { opacity: 1; } }
     @keyframes pop-in { from { opacity: 0; transform: translateY(6px) scale(0.985); } to { opacity: 1; transform: none; } }
     @keyframes nudge { 0%, 100% { transform: none; } 30% { transform: translateY(-3px); } 60% { transform: translateY(1px); } }
@@ -923,6 +1022,19 @@
         transition-duration: 0.001ms !important;
         scroll-behavior: auto !important;
       }
+
+      /* Everything above is decoration and can go. These are not: a spinner
+         frozen mid-arc reads as an application that has hung, which is the
+         opposite of what it is there to say. Rotation is the part that causes
+         trouble, so it becomes a pulse and keeps saying "still working".
+         Must follow the blanket rule: same specificity, both !important. */
+      .progress-spinner, .btn.is-busy::after {
+        animation: breathe 1.6s ease-in-out infinite !important;
+        animation-duration: 1.6s !important;
+        animation-iteration-count: infinite !important;
+      }
+      /* The bar still moves, just without the easing. */
+      .progress-fill { transition-duration: 1ms !important; }
     }
 
     /* ===== Medium widths ================================================ */
@@ -934,9 +1046,13 @@
       .detail-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
       .sendbar { grid-template-columns: 1fr; }
       .send-actions { justify-content: flex-start; }
-      /* Narrow enough for the table's min-width to matter: it scrolls
-         sideways in its own box, which also means the header cannot stick. */
-      .table-wrapper { overflow-x: auto; }
+      /* Narrow enough for the table's min-width to matter, so it scrolls
+         sideways in its own box. That box is then the scrollport the header
+         sticks to, and a box with no height of its own never scrolls
+         vertically - so the header travelled off the top with the page and
+         the columns lost their names exactly where the table is also sliding
+         sideways. Bounding the height gives it something to stick to. */
+      .table-wrapper { overflow-x: auto; max-height: 70vh; }
       #animeTable thead th { top: 0; }
     }
 
@@ -997,7 +1113,7 @@
       /* A shortcut sheet is no use without a keyboard, and it was costing a
          whole row here. The `?` key and the tools menu still reach it. */
       #btnShortcutsInline { display: none; }
-      .table-wrapper { border-radius: var(--radius-md); }
+      .table-wrapper { border-radius: var(--radius-md); max-height: 65vh; }
       .sendbar { padding: 0.75rem var(--gutter); }
       .send-stats, .send-subline { display: none; }
       .send-actions { justify-content: stretch; }

@@ -241,6 +241,7 @@
       }
       tokenStatus.textContent = 'Checking...';
       tokenStatus.className = 'token-status';
+      setBusy(btnTokenTest, true);
       try {
         const res = await fetch('/api/anilist-test', {
           method: 'POST',
@@ -261,6 +262,7 @@
         tokenStatus.textContent = 'Could not reach the local server.';
         tokenStatus.className = 'token-status bad';
       } finally {
+        setBusy(btnTokenTest, false);
         updateAccountChip();
       }
     });
@@ -518,11 +520,14 @@
     });
 
     function describeUndo() {
+      // The consequence goes under the choice, not trailing off the end of its
+      // label: this is the one destructive option in the dialog.
       const deleteBox = lastWriteCreated
-        ? `<div class="warn"><label class="diff-pick"><input type="checkbox" id="undoDeleteCreated">
-             also delete the ${lastWriteCreated} ${lastWriteCreated === 1 ? 'entry' : 'entries'} this
-             write created</label> Deleting removes them from your account for good; leaving this
-             unticked keeps them exactly as the write left them.</div>`
+        ? `<div class="warn"><label class="choice-line"><input type="checkbox" id="undoDeleteCreated">
+             <span>also delete the ${lastWriteCreated} ${lastWriteCreated === 1 ? 'entry' : 'entries'}
+             this write created</span></label>
+             <p class="choice-note">Deleting removes them from your account for good. Left unticked,
+             they stay exactly as the write left them.</p></div>`
         : '';
       undoPlan.innerHTML = `
         <div>Putting your account back the way it was before that write.</div>

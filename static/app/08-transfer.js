@@ -57,19 +57,36 @@
     });
     copySourceUser.addEventListener('input', () => { btnCopyRun.disabled = true; });
 
+    // Figures, not a sentence. Five numbers in prose read as a paragraph when
+    // what the Check step is for is scanning them, and the tail of it was an
+    // inline tinted box that wrapped across two lines and collided with the
+    // text beside it. "Only on the destination" also said out loud what the
+    // warning below the list already says, so it is now just a count.
+    function copyFigure(label, value, cls) {
+      return `<div class="copy-fig${cls ? ' ' + cls : ''}">`
+        + `<dt>${escapeHtml(label)}</dt><dd>${escapeHtml(String(value))}</dd></div>`;
+    }
+
     function copyStageLine(stage) {
       const label = stage.media_type === 'manga' ? 'Manga' : 'Anime';
-      if (!stage.found) return `<div><strong>${label}</strong>: the source has none.</div>`;
-      const bits = [`<strong>${stage.found}</strong> on the source`,
-                    `<strong>${stage.creates}</strong> to add`,
-                    `<strong>${stage.updates}</strong> to overwrite`];
-      if (stage.unchanged) bits.push(`${stage.unchanged} already identical`);
-      const skipped = stage.skipped.length
-        ? ` ${stage.skipped.length} cannot be written (no AniList id).` : '';
-      const extra = stage.extra_on_destination
-        ? ` <span class="warn">${stage.extra_on_destination} on the destination are not on the
-            source and will be left as they are.</span>` : '';
-      return `<div><strong>${label}</strong>: ${bits.join(', ')}.${skipped}${extra}</div>`;
+      if (!stage.found) {
+        return `<div class="copy-stage"><h3 class="copy-stage-head">${label}</h3>`
+          + `<p class="copy-stage-empty">The source has none.</p></div>`;
+      }
+      const figures = [
+        copyFigure('On the source', stage.found),
+        copyFigure('To add', stage.creates, stage.creates ? 'is-live' : ''),
+        copyFigure('To overwrite', stage.updates, stage.updates ? 'is-live' : ''),
+      ];
+      if (stage.unchanged) figures.push(copyFigure('Already identical', stage.unchanged));
+      if (stage.extra_on_destination) {
+        figures.push(copyFigure('Only on the destination', stage.extra_on_destination));
+      }
+      if (stage.skipped.length) {
+        figures.push(copyFigure('No AniList id', stage.skipped.length, 'is-warn'));
+      }
+      return `<div class="copy-stage"><h3 class="copy-stage-head">${label}</h3>`
+        + `<dl class="copy-figs">${figures.join('')}</dl></div>`;
     }
 
     btnCopyCheck.addEventListener('click', async () => {
@@ -84,6 +101,7 @@
         return;
       }
       btnCopyCheck.disabled = true;
+      setBusy(btnCopyCheck, true);
       copyPlan.innerHTML = 'Reading both accounts...';
       try {
         const res = await fetch('/api/anilist-copy-preview', {
@@ -107,6 +125,7 @@
         copyPlan.innerHTML = '<div class="warn">Could not reach the local server.</div>';
       } finally {
         btnCopyCheck.disabled = false;
+        setBusy(btnCopyCheck, false);
       }
     });
 
@@ -230,6 +249,7 @@
         return;
       }
       btnListImportGo.disabled = true;
+      setBusy(btnListImportGo, true);
       listImportStatus.textContent = 'Reading the list from AniList...';
       listImportStatus.className = 'token-status';
       try {
@@ -261,6 +281,7 @@
         listImportStatus.className = 'token-status bad';
       } finally {
         btnListImportGo.disabled = false;
+        setBusy(btnListImportGo, false);
       }
     });
 

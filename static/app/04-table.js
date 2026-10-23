@@ -261,7 +261,7 @@
 
       if (capped.length === 0) {
         tableBody.innerHTML = '';
-        emptyState.style.display = 'block';
+        emptyState.hidden = false;
         // Three different empties: nothing yet, nothing yet because a run has
         // only just started, and rows that the filter is hiding.
         emptyState.dataset.mode = currentAnimes.length ? 'filter' : (isProcessing ? 'running' : 'none');
@@ -269,7 +269,7 @@
         return;
       }
 
-      emptyState.style.display = 'none';
+      emptyState.hidden = true;
       tableBody.innerHTML = capped.map(item => {
         const globalIdx = rowIndex.get(item);
         const malUrl = item.id ? `https://myanimelist.net/${mediaType()}/${item.id}` : '';

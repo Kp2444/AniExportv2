@@ -6,7 +6,7 @@
 const { execFileSync } = require('child_process');
 const path = require('path');
 
-const suites = ['test_diff.js', 'test_card.js', 'test_skiplist.js'];
+const suites = ['test_diff.js', 'test_card.js', 'test_skiplist.js', 'test_copy.js'];
 let failed = 0;
 
 console.log('browser behaviour (node ' + process.version + ')');

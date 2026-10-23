@@ -115,6 +115,7 @@
       const query = fixQuery.value.trim();
       if (!query) return;
       fixResults.innerHTML = '<div class="fix-hint">Searching AniList...</div>';
+      setBusy(btnFixSearch, true);
       try {
         const res = await fetch('/api/resolve-one', {
           method: 'POST',
@@ -131,6 +132,8 @@
         renderFixResults(fixCandidates);
       } catch (e) {
         fixResults.innerHTML = '<div class="fix-hint">Could not reach the local server.</div>';
+      } finally {
+        setBusy(btnFixSearch, false);
       }
     }
 

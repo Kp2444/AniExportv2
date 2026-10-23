@@ -29,9 +29,9 @@ class BrowserBehaviourTests(unittest.TestCase):
         self.assertEqual(result.returncode, 0,
                          "node suites failed:\n" + result.stdout + result.stderr)
         # Guards against a runner that silently runs nothing.
-        for suite in ("write diff", "candidate card", "skip list"):
+        for suite in ("write diff", "candidate card", "skip list", "account copy"):
             self.assertIn(suite, result.stdout, "a suite did not report")
-        self.assertIn("all 3 suites passed", result.stdout)
+        self.assertIn("all 4 suites passed", result.stdout)
 
     def test_a_renamed_function_breaks_the_extract_loudly(self):
         """The point of extracting from the live source is that a rename is a

@@ -753,13 +753,61 @@ class RedesignTests(unittest.TestCase):
         self.assertGreater(len(wanted), 90)
         self.assertEqual(sorted(wanted - present - made), [])
 
+    def test_reduced_motion_keeps_the_loading_indicators_alive(self):
+        """The blanket rule freezes every animation to 0.001ms. For decoration
+        that is right; for a spinner it is not - a frozen arc reads as an
+        application that has hung, which is the opposite of what it is there
+        to say. Measured in the browser: the spinner had
+        `spin 1e-06s 1` and did not move.
+
+        Rotation is the part that provokes vestibular trouble, so under
+        reduced motion it becomes an opacity pulse rather than nothing.
+        """
+        css = self.css()
+        block = css.split("@media (prefers-reduced-motion: reduce) {", 1)[1]
+        self.assertIn(".progress-spinner, .btn.is-busy::after {", block)
+        self.assertIn("animation: breathe", block)
+        self.assertIn("animation-iteration-count: infinite !important", block)
+        # the stand-in must not itself be a transform
+        breathe = css.split("@keyframes breathe {", 1)[1].split("}", 1)[0]
+        self.assertIn("opacity", breathe)
+        self.assertNotIn("transform", breathe)
+
+    def test_a_button_that_starts_a_request_says_it_is_working(self):
+        """Disabling says "you cannot press this", not "because I am busy",
+        and these wait on the network for whole seconds."""
+        script = self.script()
+        self.assertIn("function setBusy(", script)
+        for button in ("btnTokenTest", "btnCopyCheck", "btnFixSearch",
+                       "btnListImportGo", "btnPreview"):
+            self.assertIn("setBusy(" + button, script, button + " never reports progress")
+        # every one that sets busy must also clear it
+        self.assertEqual(script.count("setBusy(btnCopyCheck, true)"),
+                         script.count("setBusy(btnCopyCheck, false)"))
+
+    def test_an_inline_warning_cannot_box_itself(self):
+        """`.write-plan .warn` (0,2,0) outranks `span.warn` (0,1,1), so an
+        inline warning inside a dialog body grew a padded, tinted box and
+        wrapped with the background covering only its first line. Seen in the
+        account-copy Check result, where the tail collided with the sentence
+        beside it."""
+        css = self.css()
+        self.assertIn("span.warn, .write-plan span.warn {", css)
+        # the reset has to win, so it must name the container too
+        reset = css.split("span.warn, .write-plan span.warn {", 1)[1].split("}", 1)[0]
+        for prop in ("padding: 0", "background: none", "border: 0"):
+            self.assertIn(prop, reset)
+
     def test_the_generic_label_rules_exempt_the_controls_they_broke(self):
         """`display: block` on every label in a popover or dialog outranked the
         component rules: the option switches rendered as a dot stacked above
         their own text, and "keep mine" dropped onto a line of its own."""
         css = self.css()
-        self.assertIn(".popover label:not(.toggle-control) { display: block;", css)
-        self.assertIn(".modal-body label:not(.diff-pick):not(.toggle-control) { display: block;", css)
+        self.assertIn(".popover > label { display: block;", css)
+        # Scoped to direct children: as a descendant rule it kept catching
+        # controls it was never meant for.
+        self.assertIn(".modal-body > label { display: block;", css)
+        self.assertNotIn(".modal-body label:not(", css)
 
     def test_the_page_scrolls_the_table_and_the_header_sticks_below_the_bar(self):
         """A scroll box of its own put the last rows behind the send bar, with

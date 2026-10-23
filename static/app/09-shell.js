@@ -312,6 +312,9 @@
       const bad = !anilistUser && tokenStatus.classList.contains('bad');
       chip.classList.toggle('is-connected', !!anilistUser);
       chip.classList.toggle('is-bad', bad);
+      // One source for the two places that report the connection: this chip
+      // and the status beside the Write button.
+      document.body.classList.toggle('has-anilist', !!anilistUser);
       byId('accountLabel').textContent = anilistUser ? anilistUser.name : 'Connect AniList';
       chip.title = anilistUser ? 'Connected to AniList as ' + anilistUser.name : 'Connect your AniList account';
       updateSendAccount();

@@ -1264,6 +1264,114 @@ directly instead; the live behaviour was measured in the earlier sessions record
 
 ---
 
+### Component pass (2026-10-23)
+
+Every component walked in both themes: the bar and its three popovers, the Source step, the
+summary line, the notice bar, the progress card, the toolbar, the table and its detail row, the
+empty states, the row-cap notice, both send bars, all six dialogs and the toast.
+
+| Defect | Fix |
+|---|---|
+| **The account-copy Check result overlapped itself.** Each media line ended in an inline `<span class="warn">` that `.write-plan .warn` (0,2,0) turned into a padded box, outranking `span.warn` (0,1,1). An inline box wraps with the background on its first line only, so the tail collided with the sentence beside it | the five numbers are labelled figures in a block per media type, reusing the send bar's stat-strip idiom. "To add" and "To overwrite" are highlighted; zero counts are dropped. The sentence went too - the warning below it already said the same thing |
+| **Text-only actions read as captions.** `.btn-ghost` had a transparent border, so "Add or change titles" - the only way back to the Source step - looked like a label parked in the corner, as did CSV, Preview, .gz, Copy unmatched and Always skip unchecked | a hairline border at rest, brightening on hover |
+| **The write status sat between two buttons** as bare text, reading as a gap in the row | a status chip with a dot, matching the account chip in the bar. `body.has-anilist` is toggled where the chip is already updated, so one place decides |
+| **The empty-table message sat near the top of its panel.** `renderTable` set `display: block` inline, beating the rule that centres it | the element uses `hidden`, so the stylesheet owns the layout |
+| **The undo dialog ran its destructive choice into its consequence** - "also delete the N entries this write created Deleting removes them…" on one line | the choice on one line, what it does underneath |
+
+**The root cause behind three of those, fixed properly.** `.modal-body label` and `.popover label`
+were descendant rules setting `display: block`. They kept reaching controls they were never meant
+for - the diff pickers, the option toggles, the undo checkbox - and each time the fix was another
+`:not()`. Both are now scoped to **direct children** (`.modal-body > label`, `.popover > label`),
+which is what they always meant: every real field label in a dialog or popover is a direct child,
+and every control that was being caught sits inside a wrapper. The `:not()` chains are gone.
+
+**Checked and left alone:** the `?` key badge inside the Keys button (a kbd in a button reads as
+"press this"), the row `⋯` toggle at `--text-subtle` (tertiary, brightens on hover), and the
+send bar looking dark in a full-page light screenshot — measured at `color(srgb 1 1 1 / 0.92)`
+and correct in a zoom, so that was a capture artifact, not a defect.
+
+**Not re-verified this pass:** phone width. The `X-Frame-Options: DENY` added earlier blocks the
+iframe technique used before, and Chrome clamps `resize_window`. The phone rules themselves are
+unchanged; the only new variable is 2px of border per ghost button.
+
+---
+
+### Motion and loading feedback (2026-10-23)
+
+**The reported "spinner is not working" was not a spinner bug.** Measured in the browser:
+`prefers-reduced-motion: reduce` is on, and the stylesheet carried the usual blanket rule —
+`*, *::before, *::after { animation-duration: 0.001ms !important; ... }`. The spinner computed to
+`spin 1e-06s 1` and froze mid-arc, which reads as an application that has hung. Every transition
+in the app was 0.001ms for the same reason.
+
+**A spinner is not decoration.** Rotation is the part that provokes vestibular trouble, so under
+reduced motion it becomes an opacity pulse (`breathe`) instead of nothing. Verified by sampling the
+computed opacity during a live run: `0.58 → 0.35 → 0.53 → 0.90`, with `getAnimations()` reporting
+`breathe: running`. The keyframe animates opacity only — a test asserts it contains no `transform`,
+so the exemption cannot quietly become a second rotation.
+
+**Buttons that start a request now say they are working.** Disabling a button says "you cannot
+press this", not "because I am busy", and these wait on the network for seconds. A reusable
+`setBusy(button, on)` swaps the label for a ring and sets `aria-busy`. Wired to the token **Check**,
+the copy **Check**, the fixer **Search**, **Read list** and **Preview** — two of which had no
+`finally`, so the state would have stuck on; those were added. A test pins that every button which
+sets the state also clears it.
+
+**Motion added for people who have not asked for less of it:** a travelling sheen on the progress
+track (it rides the track, not the fill, so a run parked on one percentage while the rate limit
+clears still looks alive), a `rise` entrance for the stages, the notice bar and the copy-check
+blocks, and a `pop-badge` on a stepper badge as it becomes current or done. The badge animation is
+declared only in the reached states, so it fires on the change and never on an idle step.
+
+**Tried and rejected:** a soft elevation shadow on the main panels. Built it, looked at both themes
+side by side with and without — indistinguishable. The flat treatment plus a hairline border
+already separates the panel from the page, so it would have been change for its own sake.
+
+**Checked and already correct:** the "pick a destination" nudge. Its animation dies under reduced
+motion, but it also turns the choice borders accent, moves focus to the first choice and scrolls it
+into view, so the signal never depended on the movement.
+
+---
+
+### Narrow layout, verified at last (2026-10-23)
+
+Two earlier passes recorded phone width as **not verified**: the `X-Frame-Options: DENY` added for
+clickjacking blocks the iframe technique, `resize_window` reports success and changes nothing on a
+maximised window, and a sized `window.open` is merged back into it as a tab. The way through is a
+harness, not a workaround: the page is a single self-contained response, so a copy of it served
+from a plain `python -m http.server` on another port carries no frame header and can be framed at
+exactly 390 and 430 px. The API is dead in that copy, which does not matter — rows go straight into
+`currentAnimes` and `renderTable` is called. (`currentAnimes` is a top-level `let`, so it is
+script-scoped, not a property of `window`; everything has to go through `eval` inside the frame.)
+
+**What it showed, measured at 390x780:**
+
+| | |
+|---|---|
+| horizontal overflow | none — `scrollWidth` 375 = `clientWidth` 375 |
+| chrome above the first row | **682 px of 780**: bar 97, summary 36, notice 134, toolbar 240, header 42, send bar 133 |
+| space left for rows | **43 px** |
+
+**The real defect: the table header did not stick.** Below 1100 px the wrapper takes `overflow-x:
+auto` so the table can slide sideways, which also computes `overflow-y: auto` and makes the wrapper
+the scrollport the sticky header resolves against. A wrapper with no height of its own never
+scrolls vertically, so the header had nothing to stick to and travelled off the top with the page —
+losing the column names exactly where the table is also sliding sideways. Measured: after scrolling
+339 px the header sat at y 223 and climbing, with the bar's bottom at 97.
+
+Bounding the wrapper (`max-height: 70vh`, 65vh on phones) gives the header a scrollport. Measured
+after: the box scrolled 400 px and the header stayed at y 376, one pixel below the box's top.
+Desktop is untouched — `max-height: none`, `overflow-y: visible`, header pinned under the bar at
+64 px, one page scroll.
+
+**The trade-off, stated plainly:** the narrow layout now has a page scroll *and* a table scroll.
+Nested scrolling is mildly annoying on touch. It is better than a table that slides sideways with
+no column names, but the fuller fix is to make the table fit 375 px so no inner scrollport exists
+at all — roughly: drop the Type column into the title cell's meta line and tighten the count and
+status columns. Measured as achievable at about 372 px. Not done here: it restructures the row.
+
+---
+
 ## 🧹 Persistent skip list (2026-10-19)
 
 Unchecking a row only ever excluded it from the current list; paste the same titles again and they

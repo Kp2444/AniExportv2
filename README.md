@@ -6,7 +6,7 @@
 
 [![Python](https://img.shields.io/badge/python-3.9%2B-3776AB?logo=python&logoColor=white)](https://www.python.org/)
 [![Dependencies](https://img.shields.io/badge/dependencies-zero-success)](requirements.txt)
-[![Tests](https://img.shields.io/badge/tests-466%20passing-success)](#-tests)
+[![Tests](https://img.shields.io/badge/tests-469%20passing-success)](#-tests)
 [![License](https://img.shields.io/badge/license-MIT-lightgrey)](LICENSE)
 
 </div>
@@ -468,7 +468,7 @@ Known defects, each with the code that causes them, are listed in
 python -m unittest discover -s tests -t .
 ```
 
-**466 tests** (about nine seconds) covering the XML builders, status and date handling, batched resolution, the disk
+**469 tests** (about nine seconds) covering the XML builders, status and date handling, batched resolution, the disk
 cache, candidate ranking, run control, the GUI event contract, the AniList write payloads, the
 conflict policy (one case per rule, including the blank-progress and score-zero cases that
 motivate it), the per-row diff, the undo snapshot and its restore and delete paths, retrying
@@ -494,7 +494,7 @@ static/index.html      the page
 static/app.css         its styles
 static/app/*.js        its behaviour, ten numbered sections joined in order
 tools/calibrate.py     tune the review thresholds against a real list
-tests/                 466 tests, no network
+tests/                 469 tests, no network
 ```
 
 `static/index.html` links the stylesheet and script as ordinary files, so it opens in a browser on

@@ -103,6 +103,7 @@
     });
 
     btnPreview.addEventListener('click', async () => {
+      setBusy(btnPreview, true);
       try {
         const res = await fetch('/api/preview-xml?media=' + mediaType());
         const payload = await res.json().catch(() => ({}));
@@ -116,6 +117,8 @@
         showModal(previewModal);
       } catch (e) {
         showToast('Could not reach the local server', 'error');
+      } finally {
+        setBusy(btnPreview, false);
       }
     });
 

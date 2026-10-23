@@ -247,6 +247,17 @@
 
     toggleSequels.addEventListener('change', saveState);
 
+    // Marks a button as working. Disabling one says "you cannot press this";
+    // it does not say "because I am busy", and these start requests that take
+    // whole seconds. The spinner lives in CSS so it survives reduced motion,
+    // where a frozen indicator would read as a hung app.
+    function setBusy(button, on) {
+      if (!button) return;
+      button.classList.toggle('is-busy', !!on);
+      if (on) button.setAttribute('aria-busy', 'true');
+      else button.removeAttribute('aria-busy');
+    }
+
     function showToast(msg, type = 'success') {
       toastMessage.textContent = msg;
       toast.className = 'toast show toast-' + type;

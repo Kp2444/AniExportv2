@@ -9,7 +9,7 @@ engineering notes cite their E/L/M/P evidence labels.
 > **Status, 2026-10-22.** Every numbered finding has **shipped** with tests except **R24** and
 > **R28**, both of which need a decision only you can make. `gui.py` is **1,610 lines, down from
 > 6,662**; `generate_mal_xml.py` is 2,419 from 3,042; the script is ten numbered sections. The
-> suite is **466 tests** in about nine seconds, from 333 in fifty-nine. The review's own headline
+> suite is **469 tests** in about nine seconds, from 333 in fifty-nine. The review's own headline
 > recommendation was **measured and rejected**; the half of it that survived shipped as R13 — see
 > [The matching question](#-the-matching-question).
 >
@@ -79,7 +79,7 @@ Shape when this review was written, and now:
 | `gui.py` | 6,660, of which **5,127 were one string literal** | **1,610** |
 | `generate_mal_xml.py` | 2,931, five jobs in one file | **2,419**, plus `matching.py` 424, `malxml.py` 275, `titles.py` 259 |
 | the page | inside that literal | `static/index.html` 578, `static/app.css` 1,021, `static/app/*.js` **ten** sections, 3,599 lines |
-| `tests/` | 344 tests, 59 s | **466 tests, ~9 s**, still no outbound network — plus `tests/js`, run by node through `tests/test_js_behaviour.py` |
+| `tests/` | 344 tests, 59 s | **469 tests, ~9 s**, still no outbound network — plus `tests/js`, run by node through `tests/test_js_behaviour.py` |
 
 ---
 
